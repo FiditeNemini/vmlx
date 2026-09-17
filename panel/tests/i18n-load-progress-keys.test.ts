@@ -101,7 +101,9 @@ describe('load-progress i18n keys', () => {
     // the keys that are sent can never catch an emit that sends none.
     const emits = loadProgressEmitBodies()
     expect(emits.length).toBeGreaterThan(5)
-    const missing = emits.filter(e => !e.body.includes('labelKey')).map(e => e.line)
+    // A tombstone removes state; it carries no displayed text to translate.
+    // Exempt only the exact payload shape, not arbitrary unlabelled progress.
+    const missing = emits.filter(e => !/^\{\s*sessionId,\s*cleared:\s*true\s*\}$/.test(e.body) && !e.body.includes('labelKey')).map(e => e.line)
     expect(missing).toEqual([])
   })
 

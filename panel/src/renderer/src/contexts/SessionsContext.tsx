@@ -34,6 +34,9 @@ export interface LoadProgress {
    */
   labelParams?: Record<string, string | number>
   progress: number
+  /** Checker is working before the engine process starts; DB status is unchanged. */
+  preflightActive?: boolean
+  phase?: string
   /** Engine lifecycle generation — stale-event guard across load/wake attempts. */
   progressGeneration?: number
   /** True while the current phase has no measured denominator — render an
@@ -79,6 +82,9 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     refreshSessions()
+    // A delayed hydration reply must not resurrect a preflight entry which
+    // a live clear/stop/ready event already superseded after this request.
+    const progressEventsSeen = new Set<string>()
 
     // Hydrate the current load/wake progress from the main process: a
     // renderer (re)mounted mid-load never saw the events emitted before it
@@ -88,7 +94,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
       setLoadProgress(prev => {
         const next = new Map(prev)
         for (const [sessionId, entry] of Object.entries(snapshot)) {
-          if (!next.has(sessionId) && entry && typeof entry === 'object') {
+          if (!progressEventsSeen.has(sessionId) && !next.has(sessionId) && entry && typeof entry === 'object') {
             next.set(sessionId, entry as LoadProgress)
           }
         }
@@ -101,10 +107,12 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
       window.api.sessions.onDeleted(() => refreshSessions()),
       window.api.sessions.onUpdated(() => refreshSessions()),
       window.api.sessions.onStarting((data: any) => {
+        progressEventsSeen.add(data.sessionId)
         setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'loading' as const } : s))
         setLoadProgress(prev => { const next = new Map(prev); next.delete(data.sessionId); return next })
       }),
       window.api.sessions.onReady((data: any) => {
+        progressEventsSeen.add(data.sessionId)
         // Restart promotes pending launch settings after session:updated. The
         // pre-restart list still carries the old active config; status/PID alone
         // cannot refresh the config consumed by the chat toolbar and drawers.
@@ -125,10 +133,12 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
         // fabricating it here ended the bar before the model was ready.
       }),
       window.api.sessions.onStopped((data: any) => {
+        progressEventsSeen.add(data.sessionId)
         setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'stopped' as const, pid: undefined } : s))
         setLoadProgress(prev => { const next = new Map(prev); next.delete(data.sessionId); return next })
       }),
       window.api.sessions.onError((data: any) => {
+        progressEventsSeen.add(data.sessionId)
         setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'error' as const } : s))
         setLoadingSessions(prev => {
           const next = new Set(prev)
@@ -140,7 +150,13 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
       }),
       // Loading progress — real-time phase tracking from engine log parsing
       ...(window.api.sessions.onLoadProgress ? [window.api.sessions.onLoadProgress((data: any) => {
+        progressEventsSeen.add(data.sessionId)
         setLoadProgress(prev => {
+          if (data.cleared === true) {
+            const next = new Map(prev)
+            next.delete(data.sessionId)
+            return next
+          }
           // Lifecycle generation guard: an event from an older load/wake
           // attempt (stale after Stop/restart/PID replacement) must never
           // repaint the bar over the current attempt's state.
@@ -157,6 +173,8 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
             ...(next.get(data.sessionId) || {}),
             ...(data.progressGeneration != null ? { progressGeneration: data.progressGeneration } : {}),
             indeterminate: data.indeterminate === true,
+            preflightActive: data.preflightActive === true,
+            phase: data.phase,
             label: data.label,
             // Assigned unconditionally, not spread in only when present: the
             // previous entry is spread above, so a conditional copy would leave

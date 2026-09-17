@@ -9,6 +9,7 @@ import {
   resolveEffectiveReasoningParser,
 } from '../../../../shared/reasoningParserAliases'
 import { useTranslation } from '../../i18n'
+import { useToast } from '../Toast'
 
 interface ChatModeToolbarProps {
   activeChatId: string | null
@@ -33,7 +34,8 @@ interface SessionDetail {
 
 export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange, onOverridesChanged }: ChatModeToolbarProps) {
   const { t } = useTranslation()
-  const { sessions: allSessions } = useSessionsContext()
+  const { showToast } = useToast()
+  const { sessions: allSessions, loadProgress } = useSessionsContext()
 
   // Filter out image sessions — they belong in the Image tab, not chat
   const sessions = useMemo(() => allSessions.filter(s => !isImageSession(s)), [allSessions])
@@ -125,13 +127,21 @@ export function ChatModeToolbar({ activeChatId, activeSessionId, onSessionChange
     : t('layout.chatToolbar.noModelSelected')
   const isRunning = displaySession?.status === 'running'
   const isStandby = displaySession?.status === 'standby'
-  const isLoading = displaySession?.status === 'loading'
+  const isPreflighting = !!activeSessionId && loadProgress.get(activeSessionId)?.preflightActive === true
+  const isLoading = displaySession?.status === 'loading' || isPreflighting
   const isError = displaySession?.status === 'error'
-  const isStopped = displaySession?.status === 'stopped' || isError
+  const isStopped = !isPreflighting && (displaySession?.status === 'stopped' || isError)
 
   const handleStart = async () => {
     if (!activeSessionId) return
-    await window.api.sessions.start(activeSessionId)
+    try {
+      const result = await window.api.sessions.start(activeSessionId)
+      if (!result?.success) {
+        throw new Error(result?.error || t('chat.interface.toast.failedToStart'))
+      }
+    } catch (error) {
+      showToast('error', t('chat.interface.toast.failedToStart'), (error as Error).message)
+    }
   }
 
   const handleStop = async () => {

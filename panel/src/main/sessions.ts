@@ -1563,6 +1563,8 @@ export class SessionManager extends EventEmitter {
   private logBuffers = new Map<string, string[]>()
   /** Successful preflight records awaiting this bundle's engine start. */
   private pendingBundlePreflightLogs = new Map<string, { modelPath: string; lines: string[] }>()
+  private bundlePreflightCounts = new Map<string, number>()
+  private bundlePreflightProgress = new Map<string, { event: { sessionId: string } & Record<string, unknown> }>()
   private static readonly LOG_BUFFER_MAX_LINES = 2000
   // Allow up to 60 consecutive health check failures (5s * 60 = 5 min)
   // before marking session as down. Long prefill operations (e.g. 44k+
@@ -2467,45 +2469,82 @@ export class SessionManager extends EventEmitter {
     }
     this.validateLocalSessionTarget(sessionId, session, config)
     if (existsSync(config.modelPath)) {
-      const preflightLines: string[] = []
-      const retainPreflightLine = (line: string) => {
-        this.pushLog(sessionId, line)
-        const stamped = this.logBuffers.get(sessionId)?.at(-1)
-        if (stamped) preflightLines.push(stamped)
-        if (preflightLines.length > SessionManager.LOG_BUFFER_MAX_LINES) preflightLines.shift()
+      // Preflight can repair shards for minutes BEFORE a process exists. Keep
+      // this distinct from session:starting: validation must still happen
+      // before single-model mode unloads the healthy engine. Progress, not a
+      // fabricated DB status/PID, makes this work visible on every surface.
+      this.bundlePreflightCounts.set(sessionId, (this.bundlePreflightCounts.get(sessionId) || 0) + 1)
+      let preflightGroup = this.bundlePreflightProgress.get(sessionId)
+      if (!preflightGroup) {
+        preflightGroup = { event: {
+          sessionId, label: 'Scanning model files...',
+          labelKey: 'main.loadProgress.scanningModelFiles',
+          progress: 0, indeterminate: true, phase: 'bundle_preflight', preflightActive: true,
+        } }
+        this.bundlePreflightProgress.set(sessionId, preflightGroup)
+        this.emitLoadProgress(preflightGroup.event)
       }
-      const publishRepair = createBundleRepairProgressReporter((message, isNotice) => {
-        retainPreflightLine(message.label)
-        this.emit('session:log', {
-          sessionId, data: message.label, labelKey: message.labelKey, labelParams: message.labelParams,
-          bundleRepairNotice: isNotice,
+      // Overlapping callers share the current event: a checker waiting on the
+      // bundle lock must not replace the active copy with "Scanning". Once an
+      // engine/wake event supersedes this group, none of its callbacks repaint it.
+      const group = preflightGroup
+      try {
+        const preflightLines: string[] = []
+        const retainPreflightLine = (line: string) => {
+          this.pushLog(sessionId, line)
+          const stamped = this.logBuffers.get(sessionId)?.at(-1)
+          if (stamped) preflightLines.push(stamped)
+          if (preflightLines.length > SessionManager.LOG_BUFFER_MAX_LINES) preflightLines.shift()
+        }
+        const publishRepair = createBundleRepairProgressReporter((message, isNotice) => {
+          retainPreflightLine(message.label)
+          this.emit('session:log', {
+            sessionId, data: message.label, labelKey: message.labelKey, labelParams: message.labelParams,
+            bundleRepairNotice: isNotice,
+          })
+          if (!isNotice && this.lastLoadProgressEvents.get(sessionId) === group.event) {
+            group.event = {
+              sessionId, ...message, progress: 0, indeterminate: true, phase: 'bundle_repair', preflightActive: true,
+            }
+            this.emitLoadProgress(group.event)
+          }
         })
-        if (!isNotice) this.emitLoadProgress({
-          sessionId, ...message, progress: 0, indeterminate: true, phase: 'bundle_repair',
+        const report = await runModelBundleIntegrityPreflight(
+          engine, config.modelPath, line => {
+            retainPreflightLine(line)
+            publishRepair(line)
+          },
+        ).catch(error => {
+          this.pendingBundlePreflightLogs.delete(sessionId)
+          throw error
         })
-      })
-      const report = await runModelBundleIntegrityPreflight(
-        engine, config.modelPath, line => {
-          retainPreflightLine(line)
-          publishRepair(line)
-        },
-      ).catch(error => {
-        this.pendingBundlePreflightLogs.delete(sessionId)
-        throw error
-      })
-      // Gateway/manual start may check the same stamped bundle twice. A
-      // second no-op check must not erase the first check's repair receipt.
-      if (preflightLines.length) this.pendingBundlePreflightLogs.set(sessionId, {
-        modelPath: config.modelPath, lines: preflightLines,
-      })
-      const source = report.cache_hit ? 'one-time stamp' : 'fresh header scan'
-      console.log(
-        `[SESSIONS] bundle integrity OK for ${sessionId}: ${source}, ` +
-        `${report.shards} shards, ${report.tensors} tensors, ` +
-        `${report.misaligned_tensors} remaining misaligned tensors`,
-      )
-      for (const repaired of report.repairs) {
-        console.log(`[SESSIONS] bundle integrity atomically repaired ${repaired}`)
+        // Gateway/manual start may check the same stamped bundle twice. A
+        // second no-op check must not erase the first check's repair receipt.
+        if (preflightLines.length) this.pendingBundlePreflightLogs.set(sessionId, {
+          modelPath: config.modelPath, lines: preflightLines,
+        })
+        const source = report.cache_hit ? 'one-time stamp' : 'fresh header scan'
+        console.log(
+          `[SESSIONS] bundle integrity OK for ${sessionId}: ${source}, ` +
+          `${report.shards} shards, ${report.tensors} tensors, ` +
+          `${report.misaligned_tensors} remaining misaligned tensors`,
+        )
+        for (const repaired of report.repairs) {
+          console.log(`[SESSIONS] bundle integrity atomically repaired ${repaired}`)
+        }
+      } finally {
+        const remaining = (this.bundlePreflightCounts.get(sessionId) || 1) - 1
+        if (remaining > 0) this.bundlePreflightCounts.set(sessionId, remaining)
+        else {
+          this.bundlePreflightCounts.delete(sessionId)
+          this.bundlePreflightProgress.delete(sessionId)
+          // Clear both successful and failed checks. Never erase a newer
+          // engine/wake event or leave a stale repair bar after a rejection.
+          if (this.lastLoadProgressEvents.get(sessionId) === group.event) {
+            this.lastLoadProgressEvents.delete(sessionId)
+            this.emit('session:loadProgress', { sessionId, cleared: true })
+          }
+        }
       }
     }
   }

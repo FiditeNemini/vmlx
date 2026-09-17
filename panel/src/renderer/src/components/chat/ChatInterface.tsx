@@ -775,10 +775,10 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
           with progress < 100). Hidden once the main process sends the
           terminal 100%. */}
       {sessionId && (
-        sessionStatus === 'loading' ||
+        sessionLoadProgress?.preflightActive === true || sessionStatus === 'loading' ||
         (sessionStatus === 'running' && sessionLoadProgress && sessionLoadProgress.progress < 100)
       ) && (
-        <div className="px-4 py-2 border-t border-border bg-yellow-500/5">
+        <div data-vmlx-section="chat-model-load-progress" role="status" className="px-4 py-2 border-t border-border bg-yellow-500/5">
           <div className="flex items-center gap-2">
             <Loader2 className="h-3.5 w-3.5 text-yellow-500 animate-spin flex-shrink-0" />
             <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
@@ -815,13 +815,17 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         </div>
       )}
       {/* Model not running banner */}
-      {!sessionEndpoint && sessionId && !loading && sessionStatus !== 'loading' && (
+      {!sessionEndpoint && sessionId && !loading && sessionStatus !== 'loading' && !sessionLoadProgress?.preflightActive && (
         <div className="flex items-center justify-center gap-3 px-4 py-2 border-t border-border bg-warning/5">
           <span className="text-xs text-muted-foreground">{t('chat.interface.notRunningBanner')}</span>
           <button
+            data-vmlx-control="chat-load-model"
             onClick={async () => {
               try {
-                await window.api.sessions.start(sessionId)
+                const result = await window.api.sessions.start(sessionId)
+                if (!result?.success) {
+                  throw new Error(result?.error || t('chat.interface.toast.failedToStart'))
+                }
               } catch (e) {
                 showToast('error', t('chat.interface.toast.failedToStart'), (e as Error).message)
               }

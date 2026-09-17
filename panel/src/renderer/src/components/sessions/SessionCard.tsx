@@ -90,6 +90,7 @@ export function SessionCard({
   const [loadingElapsed, setLoadingElapsed] = useState(0);
   const { loadProgress } = useSessionsContext();
   const progress = loadProgress.get(session.id);
+  const isPreflighting = progress?.preflightActive === true;
   const residentLoad = formatResidentLoad(progress);
 
   // Elapsed time counter when model is loading
@@ -224,7 +225,7 @@ export function SessionCard({
           running but the weights are still settling into RAM (the main
           process keeps emitting resident progress until the model is
           actually resident and then sends the terminal 100%). */}
-      {(session.status === "loading" ||
+      {(isPreflighting || session.status === "loading" ||
         (session.status === "running" && progress && progress.progress < 100)) && (
         <div className="mb-3">
           <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
@@ -340,7 +341,7 @@ export function SessionCard({
           </button>
         )}
 
-        {session.status === "loading" && (
+        {(isPreflighting || session.status === "loading") && (
           <>
             <button
               onClick={() => onOpen(session.id)}
@@ -354,7 +355,7 @@ export function SessionCard({
           </>
         )}
 
-        {session.status === "stopped" || session.status === "error" ? (
+        {!isPreflighting && (session.status === "stopped" || session.status === "error") ? (
           <button
             onClick={() => onStart(session.id)}
               data-vmlx-control="session-card-start"

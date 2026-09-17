@@ -150,7 +150,9 @@ describe('load-progress labels can reach the locale catalogs', () => {
     )
     const start = context.indexOf('onLoadProgress')
     expect(start).toBeGreaterThan(-1)
-    const handler = context.slice(start, start + 1600)
+    const end = context.indexOf('window.api.sessions.onHealth', start)
+    expect(end).toBeGreaterThan(start)
+    const handler = context.slice(start, end)
     expect(handler).toMatch(/labelKey:\s*data\.labelKey/)
     // Unconditional, because the previous entry is spread in first: a
     // conditional copy would pair a stale key with a fresh English label.

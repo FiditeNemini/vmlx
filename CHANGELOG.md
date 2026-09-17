@@ -4,6 +4,17 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.62] - 2026-09-17
+
+- Qwen3.8 Flash-Next AR decoding: combine eligible expert-down reduction, hyper-connection normalization and GDN prework. The default paths check actual packing, group size, operand dtype, shape, M5 Max hardware and MLX 0.32.2; unsupported configurations retain the reference path. Explicit opt-outs remain available. Native MTP drafting and verification retain their separate paths.
+- GLM-5.3 Flash AR decoding: combine eligible mHC and weighted normalization while preserving hydrated coefficient precision and native cache state. The qualified single-sequence path is enabled under its hardware/runtime/shape guards; router/shared-projection experiments remain opt-in.
+- SSD prefix reuse: refresh native boundary indexes after pool mutations, publish new block durability pins atomically, and recover failed writes without advertising incomplete cache entries. Busy health snapshots expose the most recently completed durability record.
+- Cancellation and chat: preserve explicit cancellation through streaming Chat, Responses and Messages, retain interrupted history, and settle streaming controls after navigation. Tool-generation durability remains separate from completion of a whole agent turn.
+- Model loading: show actual preflight repair progress and start failures inside Chat. Alignment repair still validates and atomically replaces the original affected shards; unchanged repaired bundles are not copied again.
+- Tool results: apply the same bounded exceptional MCP result to both display and model continuation. Native model reasoning controls and tool argument schemas are not rewritten.
+- Ollama: preserve typed rejections and returned errors in raw and templated generation. Report actual producer token counts and measured wrapper duration without inventing a prefill/decode timing split.
+- Scope: improvements are workload- and hardware-dependent, not universal throughput or an instantaneous AR/MTP speed floor. Existing video-perception and independent-provider limitations remain; GLM concurrency is queued single-active processing, not physical two-sequence decoding. No dependency versions or existing saved session choices are changed by this release.
+
 ## [1.6.61] - 2026-09-16
 
 - Persistent caching: preserve each native tensor's precision and packed state during SSD storage. Validate explicit quantization metadata, geometry and cache chains before restoring affine-quantized entries; model weight precision is not treated as cache precision.

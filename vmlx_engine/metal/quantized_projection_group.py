@@ -108,6 +108,11 @@ def quantized_projection_group_reason(
         return "no projections"
     if not all(isinstance(linear, nn.QuantizedLinear) for linear in linears):
         return "projection is not QuantizedLinear"
+    if any(hasattr(linear, "hadamard_block") for linear in linears):
+        # Packing raw rows would bypass the per-module activation transform.
+        # Keep these callable projections intact; equal shape/bits is not
+        # sufficient proof that their transformed inputs are interchangeable.
+        return "projection requires a Hadamard activation transform"
 
     first = linears[0]
     first_input_dims, _ = _quantized_linear_dimensions(first)

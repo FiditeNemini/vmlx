@@ -6,6 +6,7 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ## [1.6.62] - 2026-09-17
 
+- Bonsai 2 27B JANG: load declared signed-Hadamard Ternary and packed 1.75-bit bundles through the vision-language runtime, preserving per-module quantization and transforms. Packed storage expands losslessly to native 2-bit weights in memory without rewriting the bundle. Native reasoning, tools, image/video input and SSD continuations use the existing model contracts; audio and MTP are not advertised for these bundles.
 - Qwen3.8 Flash-Next AR decoding: combine eligible expert-down reduction, hyper-connection normalization and GDN prework. The default paths check actual packing, group size, operand dtype, shape, M5 Max hardware and MLX 0.32.2; unsupported configurations retain the reference path. Explicit opt-outs remain available. Native MTP drafting and verification retain their separate paths.
 - GLM-5.3 Flash AR decoding: combine eligible mHC and weighted normalization while preserving hydrated coefficient precision and native cache state. The qualified single-sequence path is enabled under its hardware/runtime/shape guards; router/shared-projection experiments remain opt-in.
 - SSD prefix reuse: refresh native boundary indexes after pool mutations, publish new block durability pins atomically, and recover failed writes without advertising incomplete cache entries. Busy health snapshots expose the most recently completed durability record.

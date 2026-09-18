@@ -1,21 +1,21 @@
 {
-  "version": "1.6.62",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.62/vMLX-1.6.62-tahoe-arm64.dmg",
-  "sha256": "fd97e369dbff676177df76320afd3b2183b006d11c3fea41558eb6848e625ffd",
-  "sha512": "ZJ+eRQfMg3ZtBqrJEM7n2w/g0w7bCAmMpPsarGwzL/SRD2Gyyv9USoDq/h7Cz144WL3+uC8ENRnPrz2hPFqQHQ==",
+  "version": "1.6.63",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.63/vMLX-1.6.63-tahoe-arm64.dmg",
+  "sha256": "1480a010746725058681f69800c73515fc95bedf27960158d385db2913610741",
+  "sha512": "Ae2ChIc9ECj5IwvyH786kDdh518dnOsZBhNnWt10R5oQApugnj71Z5sVHFvZjZUSVM+da75DVRQDAERREO+hgg==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.62/vMLX-1.6.62-sequoia-arm64.dmg",
-      "bytes": 572560050,
-      "sha256": "a1104f1eeb56cd16563a29da672ff5894621063eb8bc81bbe36a263ee6a3dd5c",
-      "sha512": "ptPUHR4G2uCrUKqPc+RU9yYV2EgXgpVMlhqL+zPFIQYjTK35621Q76R3BrrFDuXy6Qo63WH1hni/sIgIzVRHfA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.63/vMLX-1.6.63-sequoia-arm64.dmg",
+      "bytes": 572512382,
+      "sha256": "69ee0310eb9dccb96b7824c60b2751250bdcfdeeee476227de288f3d5763f915",
+      "sha512": "U3qgQGhuQHgbH08cPTcThv0pg3FpCP3LhcAPCWVrARZMfKjut+zbKZsH3pwVsNVkaeKb4pe/JdhwbarpfVa01Q=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.62/vMLX-1.6.62-tahoe-arm64.dmg",
-      "bytes": 594504402,
-      "sha256": "fd97e369dbff676177df76320afd3b2183b006d11c3fea41558eb6848e625ffd",
-      "sha512": "ZJ+eRQfMg3ZtBqrJEM7n2w/g0w7bCAmMpPsarGwzL/SRD2Gyyv9USoDq/h7Cz144WL3+uC8ENRnPrz2hPFqQHQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.63/vMLX-1.6.63-tahoe-arm64.dmg",
+      "bytes": 594450173,
+      "sha256": "1480a010746725058681f69800c73515fc95bedf27960158d385db2913610741",
+      "sha512": "Ae2ChIc9ECj5IwvyH786kDdh518dnOsZBhNnWt10R5oQApugnj71Z5sVHFvZjZUSVM+da75DVRQDAERREO+hgg=="
     }
   },
-  "notes": "# vMLX 1.6.62\n\n## Changes\n\n- Publish vMLX 1.6.61 updater manifest (`a7f857ec0`)\n- fix(cache): refresh native SSD boundary indexes after pool mutations (`746bf5f6e`)\n- perf(qwen4): add opt-in precise AR sigmoid epilogue (`4b270967d`)\n- fix(stream): preserve explicit MLLM cancellation terminals (`3f9ed1e43`)\n- fix(chat): display server-side cancellation notices (`d790ea7c7`)\n- fix(tools): bound exceptional MCP results in display and continuation (`0a4e54e4f`)\n- Preserve explicit cancellation across Chat and Messages (`b1fc48ce7`)\n- Preserve returned errors on templated Ollama generate (`9bc9b576b`)\n- Preserve typed rejections in raw Ollama generation (`189576df1`)\n- Refresh completed durability records in busy health snapshots (`a906ce8c2`)\n- fix(chat): settle streaming state after navigation (`9b67785bd`)\n- fix(ollama): preserve raw completion usage and measured duration (`13a102300`)\n- fix(cache): publish new block fence pins atomically and recover failed writes (`dde29882f`)\n- fix(chat): surface model preflight progress and start failures (`289d2d04f`)\n- perf: add bounded opt-in cold-page hints for Qwen PLE (`a039ae1b0`)\n- Add opt-in exact Qwen AR down and HC boundary fusions (`483088133`)\n- Add opt-in mixed-dtype Qwen GDN prework fusion (`81946bb9b`)\n- Add opt-in deferred packed PLE for productive Qwen AR (`abc12ce49`)\n- Remove deferred PLE scheduling after matched serving regression (`99ca9c411`)\n- Enable guarded Qwen AR fusions with explicit opt-outs (`6e245498b`)\n- Add guarded GLM compound mHC normalization for AR decode (`59d482ded`)\n- Admit hydrated GLM coefficients and expose compound graph counts (`22f958c97`)\n- Add guarded GLM router and shared projection dispatch (`7d87c536b`)\n- Enable qualified GLM AR compound normalization with explicit opt-out (`0b123b172`)\n- Prepare 1.6.62 qualified AR and continuation fixes (`1e4198255`)\n- Add Bonsai2 Hadamard and packed ternary runtime with guarded loading (`7537d458b`)\n- Document Bonsai2 runtime in upcoming 1.6.62 release (`b32b2edea`)\n\n## Runtime provenance\n\n- vMLX source: `3cde185be9e633a9cbcf4d17730f154ed612232a`\n- JANG runtime: `f3c79081c3d99e8a26fa28444934f7567acb00c6` (`jang 2.5.47`)\n- Tahoe/macOS 26 is the default build; Sequoia is the compatibility build.\n- Both DMGs are Developer ID signed, independently notarized, stapled, and Gatekeeper checked by the candidate workflow.\n\n## Downloads\n\n- **Tahoe**: `vMLX-1.6.62-tahoe-arm64.dmg`\n  - SHA-256: `fd97e369dbff676177df76320afd3b2183b006d11c3fea41558eb6848e625ffd`\n  - Size: `594504402` bytes\n- **Sequoia**: `vMLX-1.6.62-sequoia-arm64.dmg`\n  - SHA-256: `a1104f1eeb56cd16563a29da672ff5894621063eb8bc81bbe36a263ee6a3dd5c`\n  - Size: `572560050` bytes\n\n## Python distributions\n\n- Wheel: `vmlx-1.6.62-py3-none-any.whl` \u2014 SHA-256 `fdaadc80c63493d0ec1f740fbd46cfafa5ae22e1c6b64293e7dd77eca0b6fa32`\n- Source: `vmlx-1.6.62.tar.gz` \u2014 SHA-256 `2989fdcd226f3a654ddd86636de08ad871b419c58d2f6b0ac4cbda5c3b631332`"
+  "notes": "# vMLX 1.6.63\n\n## Changes\n\n- Bonsai 2 27B JANG now keeps language activations and attention KV in FP16, avoiding unintended promotion by FP32 norm/convolution weights. Hadamard accumulation, checkpoint parameters and native recurrent state keep their required precision; the vision tower is unchanged.\n- Prefix and SSD cache identity now includes the activation precision policy. Earlier FP32 states cannot be restored into the changed execution path. Existing model bundles and cache files are not rewritten.\n- Both Ternary and packed 1.75-bit storage are supported. Packed 1.75-bit weights still expand losslessly to native 2-bit weights in memory; this is not a 1.75-bit RAM claim.\n- No dependency versions, saved session choices, tool/reasoning contracts, audio capabilities or MTP support change. Performance is workload-dependent. Unqualified kernel experiments are not enabled.\n\n## Runtime provenance\n\n- vMLX source: `08b3fec9d19680b3123e10f548480a6c2bf55ae8`\n- JANG runtime: `f3c79081c3d99e8a26fa28444934f7567acb00c6` (`jang 2.5.47`)\n- Tahoe/macOS 26 is the default build; Sequoia is the compatibility build.\n- Both DMGs are Developer ID signed, independently notarized, stapled, and Gatekeeper checked by the release artifact checks.\n\n## Downloads\n\n- **Tahoe**: `vMLX-1.6.63-tahoe-arm64.dmg`\n  - SHA-256: `1480a010746725058681f69800c73515fc95bedf27960158d385db2913610741`\n  - Size: `594450173` bytes\n- **Sequoia**: `vMLX-1.6.63-sequoia-arm64.dmg`\n  - SHA-256: `69ee0310eb9dccb96b7824c60b2751250bdcfdeeee476227de288f3d5763f915`\n  - Size: `572512382` bytes\n\n## Python distributions\n\n- Wheel: `vmlx-1.6.63-py3-none-any.whl` \u2014 SHA-256 `65daf83f3680c9c82a36629df5f186b971cc210fca7dcb5612b1044aa0b9a8c8`\n- Source: `vmlx-1.6.63.tar.gz` \u2014 SHA-256 `65e3d286b621537da096476633f49f79d458b4ae6fcf911427fa34e22c55d6f1`"
 }

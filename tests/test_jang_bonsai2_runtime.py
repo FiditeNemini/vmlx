@@ -3,6 +3,7 @@ import copy
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten
 import numpy as np
 import pytest
 
@@ -10,6 +11,7 @@ from vmlx_engine.metal.quantized_projection_group import quantized_projection_gr
 from vmlx_engine.utils.jang_hadamard import (
     hadamard_spec_from_config, hadamard_activation, install_hadamard_modules,
     verify_hadamard_signs_loaded, HadamardQuantizedLinear, HadamardQuantizedEmbedding,
+    configure_hadamard_activation_precision,
 )
 from vmlx_engine.utils.jang_ternary_packed import (
     ternary_packed_modules, expand_ternary_packed_mlx, expand_ternary_packed_shard_mlx,
@@ -199,3 +201,70 @@ def test_bonsai_manifest_controls_post_load_bits():
          "tensor_quantization_manifest_schema": 2,
          "tensor_quantization_manifest": {"projection": {"bits": 2, "group_size": 128}}}}
     assert _post_load_quantization_overrides({}, j) == {"projection": {"bits": 2, "group_size": 128}}
+
+
+def precision_fixture():
+    m = nn.Module()
+    m.language_model = model()
+    m.language_model.norm = nn.RMSNorm(512)
+    m.language_model.conv = nn.Conv1d(32, 32, 3, groups=32, bias=False)
+    m.language_model.A_log = mx.ones((2,), mx.float32)
+    m.vision_tower = nn.RMSNorm(512)
+    spec = hadamard_spec_from_config(contract())
+    install_hadamard_modules(m.language_model, spec)
+    for layer in (m.language_model.projection, m.language_model.embedding):
+        layer.signs = mx.ones((512,), mx.float32)
+        layer.scales = layer.scales.astype(mx.float16)
+        layer.biases = layer.biases.astype(mx.float16)
+    cfg = {**contract(), "model_type": "qwen3_5"}
+    return m, cfg
+
+
+def test_fp16_policy_contains_promotion_without_changing_weights_or_transform():
+    m, cfg = precision_fixture()
+    lang = m.language_model
+    x = mx.ones((1, 3, 512), mx.float16)
+    c = mx.ones((1, 3, 32), mx.float16)
+    norm_before, conv_before = lang.norm(x), lang.conv(c)
+    assert norm_before.dtype == mx.float32
+    assert conv_before.dtype == mx.float32
+    parameters = dict(tree_flatten(m.parameters()))
+    result = configure_hadamard_activation_precision(m, cfg)
+    assert result == {"signature": "qwen-hadamard-fp16-v1", "projections": 2,
+                      "norms": 1, "convolutions": 1}
+    assert mx.array_equal(lang.norm(x), norm_before.astype(mx.float16)).item()
+    assert mx.array_equal(lang.conv(c), conv_before.astype(mx.float16)).item()
+    assert lang.projection(x.astype(mx.float32)).dtype == mx.float16
+    assert lang.embedding(mx.array([[1, 2]])).dtype == mx.float16
+    assert lang.projection.hadamard_compute_dtype == mx.float32
+    assert lang.projection.signs.dtype == mx.float32
+    assert lang.A_log.dtype == mx.float32
+    assert m.vision_tower(x).dtype == mx.float32
+    assert all(parameters[name] is value for name, value in tree_flatten(m.parameters()))
+
+
+def test_fp16_policy_is_not_global_and_reference_has_separate_identity():
+    from vmlx_engine.prefix_cache import compute_model_cache_key
+
+    m, cfg = precision_fixture()
+    assert configure_hadamard_activation_precision(m, {"model_type": "qwen3_5"}) == {}
+    baseline, _ = precision_fixture()
+    configure_hadamard_activation_precision(baseline, cfg, enabled=False)
+    configure_hadamard_activation_precision(m, cfg)
+    old_key = compute_model_cache_key(baseline, model_path="same-bundle")
+    new_key = compute_model_cache_key(m, model_path="same-bundle")
+    assert old_key != new_key
+    clone, _ = precision_fixture()
+    configure_hadamard_activation_precision(clone, cfg)
+    assert compute_model_cache_key(clone, model_path="same-bundle") == new_key
+    with pytest.raises(ValueError, match="cannot change"):
+        configure_hadamard_activation_precision(m, cfg, enabled=False)
+
+
+def test_fp16_policy_rejects_unqualified_scale_precision_before_mutation():
+    m, cfg = precision_fixture()
+    m.language_model.projection.scales = m.language_model.projection.scales.astype(mx.bfloat16)
+    with pytest.raises(ValueError, match="FP16 affine scales"):
+        configure_hadamard_activation_precision(m, cfg)
+    assert not hasattr(m, "_vmlx_hadamard_activation_precision")
+    assert type(m.language_model.norm) is nn.RMSNorm

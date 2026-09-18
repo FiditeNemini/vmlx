@@ -397,6 +397,9 @@ def compute_model_cache_key(
     projection_layout = getattr(model, "_vmlx_attention_projection_layout", None)
     if isinstance(projection_layout, str) and projection_layout:
         parts.append(f"attention_projection_layout={projection_layout}")
+    activation_precision = getattr(model, "_vmlx_hadamard_activation_precision", None)
+    if isinstance(activation_precision, str) and activation_precision:
+        parts.append(f"hadamard_activation_precision={activation_precision}")
     try:
         parts.append(type(model).__module__ + "." + type(model).__name__)
         for attr in ("args", "config"):

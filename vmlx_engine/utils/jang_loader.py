@@ -4932,6 +4932,20 @@ def _load_jang_v2_vlm(
     if _hadamard_spec is not None:
         verified = verify_hadamard_signs_loaded(model, _hadamard_spec)
         logger.info("JANG Hadamard: verified %d/%d sign vectors", verified, len(_hadamard_spec.modules))
+        from .jang_hadamard import configure_hadamard_activation_precision
+
+        precision = configure_hadamard_activation_precision(
+            model, config,
+            enabled=os.environ.get("VMLX_BONSAI_FP16_ACTIVATIONS", "1") != "0",
+        )
+        if precision:
+            logger.info(
+                "JANG Hadamard activation policy: %s projections=%d norms=%d "
+                "convolutions=%d; Hadamard accumulation and recurrent state "
+                "retain native FP32; cache namespace isolated",
+                precision["signature"], precision["projections"],
+                precision["norms"], precision["convolutions"],
+            )
 
     # bfloat16 for MLA models and 512+ expert models
     _model_cfg = json.loads((path / "config.json").read_text())

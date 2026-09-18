@@ -4,6 +4,12 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.63] - 2026-09-18
+
+- Bonsai 2 27B compatibility checkpoint: retains the signed-Hadamard runtime introduced in 1.6.62 for JANG affine Ternary and packed 1.75-bit bundles, with native reasoning, XML-function tools, image/video input and per-generation SSD continuations.
+- Packed 1.75-bit weights expand losslessly to native 2-bit weights in memory; this release does not introduce native packed arithmetic, audio support or an MTP head for these bundles.
+- Runtime kernels, dependency versions, parser/cache contracts and saved session defaults are unchanged from 1.6.62. Unqualified speed experiments are not included. Performance remains workload-dependent; independently authenticated remote Responses and untested image-exporter variants are not newly qualified by this checkpoint.
+
 ## [1.6.62] - 2026-09-17
 
 - Bonsai 2 27B JANG: load declared signed-Hadamard Ternary and packed 1.75-bit bundles through the vision-language runtime, preserving per-module quantization and transforms. Packed storage expands losslessly to native 2-bit weights in memory without rewriting the bundle. Native reasoning, tools, image/video input and SSD continuations use the existing model contracts; audio and MTP are not advertised for these bundles.

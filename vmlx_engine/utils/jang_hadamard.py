@@ -121,8 +121,12 @@ class HadamardQuantizedLinear(nn.QuantizedLinear):
     """QuantizedLinear whose input is rotated into the stored weight basis."""
 
     def __call__(self, x):
+        activation_dtype = getattr(self, "hadamard_activation_dtype", None)
+        if activation_dtype is not None:
+            x = x.astype(activation_dtype)
         x = hadamard_activation(x, self.hadamard_block, self.signs, compute_dtype=self.hadamard_compute_dtype)
-        return super().__call__(x)
+        out = super().__call__(x)
+        return out.astype(activation_dtype) if activation_dtype is not None else out
 
 
 class HadamardQuantizedEmbedding(nn.QuantizedEmbedding):
@@ -130,10 +134,67 @@ class HadamardQuantizedEmbedding(nn.QuantizedEmbedding):
 
     def __call__(self, x):
         out = super().__call__(x)
+        activation_dtype = getattr(self, "hadamard_activation_dtype", None)
+        if activation_dtype is not None:
+            out = out.astype(activation_dtype)
         return hadamard_activation(out, self.hadamard_block, self.signs, inverse=True, compute_dtype=self.hadamard_compute_dtype)
 
     def as_linear(self, x):
         raise NotImplementedError("Hadamard-rotated embeddings cannot serve as a tied output head")
+
+
+class _HadamardActivationRMSNorm(nn.RMSNorm):
+    def __call__(self, x):
+        # Preserve checkpoint weights and FP32 norm arithmetic, not its
+        # accidental promotion of the residual stream and attention KV.
+        return super().__call__(x).astype(mx.float16)
+
+
+class _HadamardActivationConv1d(nn.Conv1d):
+    def __call__(self, x):
+        return super().__call__(x).astype(mx.float16)
+
+
+def configure_hadamard_activation_precision(model, config, *, enabled=True):
+    """Scope FP16 activations to the declared Qwen Hadamard language graph.
+
+    This is a numerical execution policy, NOT an SSD serialization cast.
+    Hadamard accumulation/signs, norm/conv weights, A_log/dt_bias and recurrent
+    GDN state remain in their native precision. Vision modules are untouched.
+    The execution marker separates old/native and FP16 prefix namespaces.
+    """
+    if config.get("model_type") != "qwen3_5" or hadamard_spec_from_config(config) is None:
+        return {}
+    language = getattr(model, "language_model", None)
+    if language is None:
+        raise ValueError("Qwen Hadamard activation policy requires its language graph")
+    modules = list(language.named_modules())
+    packed = [module for _, module in modules
+              if isinstance(module, (HadamardQuantizedLinear, HadamardQuantizedEmbedding))]
+    if not packed:
+        raise ValueError("Qwen Hadamard activation policy requires installed wrappers")
+    if enabled and any(module.scales.dtype != mx.float16 for module in packed):
+        raise ValueError("FP16 Hadamard activation policy requires FP16 affine scales")
+    signature = "qwen-hadamard-fp16-v1" if enabled else "qwen-hadamard-native-v1"
+    previous = getattr(model, "_vmlx_hadamard_activation_precision", None)
+    if previous is not None and previous != signature:
+        raise ValueError("Hadamard activation policy cannot change on a loaded model")
+    counts = {"projections": 0, "norms": 0, "convolutions": 0}
+    if enabled:
+        for _, module in modules:
+            if isinstance(module, (HadamardQuantizedLinear, HadamardQuantizedEmbedding)):
+                module.hadamard_activation_dtype = mx.float16
+                counts["projections"] += 1
+            elif type(module) is nn.RMSNorm:
+                module.__class__ = _HadamardActivationRMSNorm
+                counts["norms"] += 1
+            elif type(module) is nn.Conv1d:
+                module.__class__ = _HadamardActivationConv1d
+                counts["convolutions"] += 1
+    for owner in (model, language, getattr(language, "model", None)):
+        if owner is not None:
+            owner._vmlx_hadamard_activation_precision = signature
+    return {"signature": signature, **counts}
 
 
 def _resolve(model, path: str):

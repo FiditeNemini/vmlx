@@ -2858,6 +2858,16 @@ def _load_jang_v2(
     _ensure_jang_family_runtime_supported(path, config)
     _normalize_step3p7_model_type(config)
 
+    from .jang_hadamard import hadamard_spec_from_config
+    from .jang_ternary_packed import ternary_packed_modules
+
+    if hadamard_spec_from_config(config, jang_cfg) is not None or ternary_packed_modules(jang_cfg):
+        raise RuntimeError(
+            "This JANG bundle requires Hadamard/packed-ternary runtime transforms. "
+            "Use the vision-language load path; the text-only loader cannot "
+            "honour this storage contract."
+        )
+
     from .jang_affine_storage import prepare_affine1_runtime_config
 
     config, _affine1_storage_modules = prepare_affine1_runtime_config(
@@ -3944,6 +3954,25 @@ def _load_jang_v2_vlm(
     _normalize_gemma4_config_scalar_types(config)
     _ensure_jang_family_runtime_supported(path, config)
 
+    from .jang_hadamard import (
+        hadamard_spec_from_config,
+        install_hadamard_modules,
+        verify_hadamard_signs_loaded,
+    )
+    from .jang_ternary_packed import (
+        expand_ternary_packed_shard_mlx,
+        ternary_packed_modules,
+    )
+
+    _hadamard_spec = hadamard_spec_from_config(config, jang_cfg)
+    _ternary_packed_modules = ternary_packed_modules(jang_cfg)
+    _ternary_packed_expanded_count = 0
+    if _ternary_packed_modules:
+        logger.info(
+            "JANG ternary_packed_26b: expanding %d declared modules losslessly "
+            "to native 2-bit slots during loading", len(_ternary_packed_modules)
+        )
+
     from .jang_affine_storage import prepare_affine1_runtime_config
 
     config, _affine1_storage_modules = prepare_affine1_runtime_config(
@@ -3988,7 +4017,7 @@ def _load_jang_v2_vlm(
         jang_cfg,
         fallback_bits=[4],
         context="JANG v2 VLM",
-        skip_shape_repair=bool(_affine1_storage_modules),
+        skip_shape_repair=bool(_affine1_storage_modules or _ternary_packed_modules),
     )
     config["quantization"].setdefault("mode", _jang_quant_mode(jang_cfg, config))
     quant_mode = str(config["quantization"].get("mode") or "affine")
@@ -4473,6 +4502,18 @@ def _load_jang_v2_vlm(
     # fall back to minimal sanitize for MoE models where gate_up_proj is already split.
     from mlx_vlm.utils import sanitize_weights
 
+    if _hadamard_spec is not None:
+        installed = install_hadamard_modules(model, _hadamard_spec)
+        logger.info(
+            "JANG Hadamard activation runtime: wrapped %d modules "
+            "(%d forward, %d inverse; block=%d; float32 transform)",
+            installed, len(_hadamard_spec.forward), len(_hadamard_spec.inverse),
+            _hadamard_spec.block_size,
+        )
+    _declared_hadamard_quant = (
+        config.get("quantization") if _hadamard_spec is not None else None
+    )
+
     # Gemma 4: JANG stores expert keys as switch_mlp but model uses experts.switch_glu.
     # Fall through to top-level model_type if text_config.model_type is missing,
     # and accept both "gemma4" and "gemma4_text" — some JANG variants have the top
@@ -4488,9 +4529,12 @@ def _load_jang_v2_vlm(
     # headers (no data load) into a combined shape map so a module whose .weight
     # and .scales straddle a shard boundary still gets its bits pre-fixed before
     # load_weights. The per-shard call inside the loop below stays as a safety net.
-    if not _affine1_storage_modules:
+    if not (_affine1_storage_modules or _ternary_packed_modules):
         _shape_map_xshard = _collect_shard_shape_map(weight_files)
-        _pre_fix_bits_from_metadata(model, _shape_map_xshard, block_size)
+        _pre_fix_bits_from_metadata(
+            model, _shape_map_xshard, block_size,
+            quantization_overrides=_declared_hadamard_quant,
+        )
         del _shape_map_xshard
 
     _gemma_ple_quantized_module_paths = {
@@ -4504,6 +4548,11 @@ def _load_jang_v2_vlm(
     _affine1_expanded_count = 0
     for sf in _iter_shards_with_progress(weight_files):
         shard_weights = mx.load(str(sf))
+        if _ternary_packed_modules:
+            shard_weights, expanded_count = expand_ternary_packed_shard_mlx(
+                shard_weights, _ternary_packed_modules
+            )
+            _ternary_packed_expanded_count += expanded_count
         if _affine1_storage_modules:
             from .jang_affine_storage import expand_affine1_shard_mlx
 
@@ -4827,10 +4876,26 @@ def _load_jang_v2_vlm(
             }
         # Pre-fix per-layer bits before load to prevent shape mismatch
         # ValueError on JANG mixed-precision models (fixes #62, #63).
-        _pre_fix_bits_from_shard(model, shard_weights, block_size)
+        _pre_fix_bits_from_shard(
+            model, shard_weights, block_size,
+            quantization_overrides=_declared_hadamard_quant,
+        )
         model.load_weights(list(shard_weights.items()), strict=False)
         del shard_weights
         gc.collect()
+
+    if _ternary_packed_modules:
+        if _ternary_packed_expanded_count != len(_ternary_packed_modules):
+            raise RuntimeError(
+                "JANG ternary_packed expansion count mismatch: "
+                f"expanded={_ternary_packed_expanded_count}, "
+                f"manifest={len(_ternary_packed_modules)}"
+            )
+        logger.info(
+            "JANG ternary_packed_26b: expanded %d/%d modules; "
+            "codes/scales unchanged, biases materialized as -scales",
+            _ternary_packed_expanded_count, len(_ternary_packed_modules),
+        )
 
     if _affine1_storage_modules:
         if _affine1_expanded_count != len(_affine1_storage_modules):
@@ -4863,6 +4928,10 @@ def _load_jang_v2_vlm(
 
     if not hasattr(model, "config"):
         model.config = model_config
+
+    if _hadamard_spec is not None:
+        verified = verify_hadamard_signs_loaded(model, _hadamard_spec)
+        logger.info("JANG Hadamard: verified %d/%d sign vectors", verified, len(_hadamard_spec.modules))
 
     # bfloat16 for MLA models and 512+ expert models
     _model_cfg = json.loads((path / "config.json").read_text())
@@ -6409,7 +6478,7 @@ def _upgrade_modules_with_uint32_weights(
     return upgraded
 
 
-def _pre_fix_bits_from_shard(model, shard_weights, block_size):
+def _pre_fix_bits_from_shard(model, shard_weights, block_size, quantization_overrides=None):
     """Fix QuantizedLinear.bits from actual weight shapes BEFORE load_weights.
 
     JANG mixed-precision models have per-layer bit widths (e.g. [3, 4, 8]),
@@ -6481,6 +6550,12 @@ def _pre_fix_bits_from_shard(model, shard_weights, block_size):
                     continue
                 valid.append((in_dim, actual_bits, try_bs))
 
+            declared = (quantization_overrides or {}).get(mod_path)
+            if isinstance(declared, dict):
+                bits, gs = int(declared["bits"]), int(declared["group_size"])
+                if w_cols * 32 == s_cols * gs * bits:
+                    valid = [(s_cols * gs, bits, gs)]
+
             if ".switch_mlp." in mod_path and valid:
                 # pre_fix_bits switch_mlp config-trust: if the module's
                 # CURRENT bits/group_size are in the valid set (config
@@ -6551,7 +6626,7 @@ def _collect_shard_shape_map(weight_files):
     return shape_map
 
 
-def _pre_fix_bits_from_metadata(model, shape_map, block_size):
+def _pre_fix_bits_from_metadata(model, shape_map, block_size, quantization_overrides=None):
     """Cross-shard variant of `_pre_fix_bits_from_shard` (jjang-ai/vmlx#114).
 
     Operates on a {weight_key: shape_tuple} map collected across ALL shards
@@ -6610,6 +6685,12 @@ def _pre_fix_bits_from_metadata(model, shape_map, block_size):
                 if actual_bits not in (2, 3, 4, 5, 6, 8):
                     continue
                 valid.append((in_dim, actual_bits, try_bs))
+
+            declared = (quantization_overrides or {}).get(mod_path)
+            if isinstance(declared, dict):
+                bits, gs = int(declared["bits"]), int(declared["group_size"])
+                if w_cols * 32 == s_cols * gs * bits:
+                    valid = [(s_cols * gs, bits, gs)]
 
             if ".switch_mlp." in mod_path and valid:
                 # pre_fix_metadata switch_mlp config-trust: keep current bits/
@@ -6681,7 +6762,11 @@ def _post_load_quantization_overrides(
     )
     if (
         manifest_schema >= 2
-        and jang_quantization.get("method") == "jang-affine-discrete"
+        and jang_quantization.get("method") in {
+            "jang-affine-discrete",
+            "jang-affine-discrete-ternary-lossless-repack",
+            "jang-affine-discrete-ternary-lossless-repack+ternary-packed-26b-storage",
+        }
         and isinstance(manifest, dict)
         and manifest
     ):

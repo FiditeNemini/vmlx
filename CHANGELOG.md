@@ -4,6 +4,12 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.64] - 2026-09-18
+
+- XML tool calls: preserve arguments declared as strings before attempting JSON decoding, including literal JSON text, indentation and newlines. Streaming, recovery and Chat/Responses schema paths share the same rule; object and ambiguous union arguments retain their existing decoding behavior.
+- Chat tool previews: malformed model arguments no longer crash an expanded tool card. Display guards preserve the original arguments and execution errors without fabricating corrected tool inputs.
+- Model precision, sampling defaults, saved sessions and dependency versions are unchanged. Experimental Hadamard and Qwen kernel paths are not enabled by this release.
+
 ## [1.6.63] - 2026-09-18
 
 - Bonsai 2 27B JANG: keep language activations and attention KV in FP16 instead of allowing FP32 norm/convolution weights to promote them. Signed-Hadamard accumulation, checkpoint parameters and native GDN recurrent state retain their required precision; the vision tower is unchanged. The policy applies to the declared Qwen Hadamard language graph with FP16 affine scales, not to unrelated model families.

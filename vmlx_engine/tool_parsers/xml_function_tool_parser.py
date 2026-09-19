@@ -132,30 +132,6 @@ class XMLFunctionToolParser(ToolParser):
         except (json.JSONDecodeError, ValueError):
             return raw
 
-    @classmethod
-    def _schema_is_string_or_null(cls, prop: Any) -> bool:
-        if not isinstance(prop, dict):
-            return False
-        typ = prop.get("type")
-        if typ == "string":
-            return True
-        if isinstance(typ, (list, tuple)):
-            return "string" in typ and all(t in ("string", "null") for t in typ)
-        for key in ("anyOf", "oneOf"):
-            options = prop.get(key)
-            if isinstance(options, list) and options:
-                strings = [cls._schema_is_string_or_null(o) for o in options]
-                if any(strings) and all(is_string or (isinstance(o, dict) and o.get("type") == "null")
-                                        for o, is_string in zip(options, strings)):
-                    return True
-        return False
-
-    @classmethod
-    def _argument_properties(cls, request: dict[str, Any] | None, name: str) -> dict[str, Any]:
-        schema = cls._function_schema_for_tool(request, name)
-        props = schema.get("properties") if isinstance(schema, dict) else None
-        return props if isinstance(props, dict) else {}
-
     # _request_tool_names and the doubled-wrapper recovery live on ToolParser:
     # the malformed shape arrives on both the qwen and xml_function routes.
 
@@ -359,27 +335,6 @@ class XMLFunctionToolParser(ToolParser):
     # searched a directory literally named None). Only a schema that allows
     # null turns those spellings into JSON null; a plain string field keeps
     # the text the model wrote.
-    _NULL_SPELLINGS = frozenset({"none", "null", "nil"})
-
-    @classmethod
-    def _schema_allows_null(cls, prop: Any) -> bool:
-        if not isinstance(prop, dict):
-            return False
-        if prop.get("nullable") is True:
-            return True
-        typ = prop.get("type")
-        if typ == "null":
-            return True
-        if isinstance(typ, (list, tuple)) and "null" in typ:
-            return True
-        for key in ("anyOf", "oneOf"):
-            options = prop.get(key)
-            if isinstance(options, list) and any(
-                isinstance(o, dict) and o.get("type") == "null" for o in options
-            ):
-                return True
-        return False
-
     def _coerce_nullable_arguments(
         self, tool_calls: list[dict[str, Any]], request: dict[str, Any] | None
     ) -> list[dict[str, Any]]:

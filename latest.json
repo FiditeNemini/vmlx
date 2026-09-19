@@ -1,21 +1,21 @@
 {
-  "version": "1.6.63",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.63/vMLX-1.6.63-tahoe-arm64.dmg",
-  "sha256": "1480a010746725058681f69800c73515fc95bedf27960158d385db2913610741",
-  "sha512": "Ae2ChIc9ECj5IwvyH786kDdh518dnOsZBhNnWt10R5oQApugnj71Z5sVHFvZjZUSVM+da75DVRQDAERREO+hgg==",
+  "version": "1.6.64",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.64/vMLX-1.6.64-tahoe-arm64.dmg",
+  "sha256": "f21d3fdd961cf43342c5ee31c21ccc3aa56e43e31e0ccefdf3d49680ff034110",
+  "sha512": "uarIvmNO1E6L0WAKa9smrucMS6mlQO7MUWU+vYHQ7iZuBXIbHNcFIHKkZ5B8lNyuO9tZTgOIdEe/WFNmVAtM7g==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.63/vMLX-1.6.63-sequoia-arm64.dmg",
-      "bytes": 572512382,
-      "sha256": "69ee0310eb9dccb96b7824c60b2751250bdcfdeeee476227de288f3d5763f915",
-      "sha512": "U3qgQGhuQHgbH08cPTcThv0pg3FpCP3LhcAPCWVrARZMfKjut+zbKZsH3pwVsNVkaeKb4pe/JdhwbarpfVa01Q=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.64/vMLX-1.6.64-sequoia-arm64.dmg",
+      "bytes": 572512119,
+      "sha256": "a1ecd8a93947933badb9c1200d5f37828bda6de15d7d8c36019de357ae82c260",
+      "sha512": "/SVdoDha12lHMqs0EEQ3Xfif54McaHe1I7v35MXzaaavwE+WOViq/UpJKf6yKEI0wnPJczaMrFm+yGQtQzd40A=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.63/vMLX-1.6.63-tahoe-arm64.dmg",
-      "bytes": 594450173,
-      "sha256": "1480a010746725058681f69800c73515fc95bedf27960158d385db2913610741",
-      "sha512": "Ae2ChIc9ECj5IwvyH786kDdh518dnOsZBhNnWt10R5oQApugnj71Z5sVHFvZjZUSVM+da75DVRQDAERREO+hgg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.64/vMLX-1.6.64-tahoe-arm64.dmg",
+      "bytes": 594550337,
+      "sha256": "f21d3fdd961cf43342c5ee31c21ccc3aa56e43e31e0ccefdf3d49680ff034110",
+      "sha512": "uarIvmNO1E6L0WAKa9smrucMS6mlQO7MUWU+vYHQ7iZuBXIbHNcFIHKkZ5B8lNyuO9tZTgOIdEe/WFNmVAtM7g=="
     }
   },
-  "notes": "# vMLX 1.6.63\n\n## Changes\n\n- Bonsai 2 27B JANG now keeps language activations and attention KV in FP16, avoiding unintended promotion by FP32 norm/convolution weights. Hadamard accumulation, checkpoint parameters and native recurrent state keep their required precision; the vision tower is unchanged.\n- Prefix and SSD cache identity now includes the activation precision policy. Earlier FP32 states cannot be restored into the changed execution path. Existing model bundles and cache files are not rewritten.\n- Both Ternary and packed 1.75-bit storage are supported. Packed 1.75-bit weights still expand losslessly to native 2-bit weights in memory; this is not a 1.75-bit RAM claim.\n- No dependency versions, saved session choices, tool/reasoning contracts, audio capabilities or MTP support change. Performance is workload-dependent. Unqualified kernel experiments are not enabled.\n\n## Runtime provenance\n\n- vMLX source: `08b3fec9d19680b3123e10f548480a6c2bf55ae8`\n- JANG runtime: `f3c79081c3d99e8a26fa28444934f7567acb00c6` (`jang 2.5.47`)\n- Tahoe/macOS 26 is the default build; Sequoia is the compatibility build.\n- Both DMGs are Developer ID signed, independently notarized, stapled, and Gatekeeper checked by the release artifact checks.\n\n## Downloads\n\n- **Tahoe**: `vMLX-1.6.63-tahoe-arm64.dmg`\n  - SHA-256: `1480a010746725058681f69800c73515fc95bedf27960158d385db2913610741`\n  - Size: `594450173` bytes\n- **Sequoia**: `vMLX-1.6.63-sequoia-arm64.dmg`\n  - SHA-256: `69ee0310eb9dccb96b7824c60b2751250bdcfdeeee476227de288f3d5763f915`\n  - Size: `572512382` bytes\n\n## Python distributions\n\n- Wheel: `vmlx-1.6.63-py3-none-any.whl` \u2014 SHA-256 `65daf83f3680c9c82a36629df5f186b971cc210fca7dcb5612b1044aa0b9a8c8`\n- Source: `vmlx-1.6.63.tar.gz` \u2014 SHA-256 `65e3d286b621537da096476633f49f79d458b4ae6fcf911427fa34e22c55d6f1`"
+  "notes": "# vMLX 1.6.64\n\n## Changes\n\n- Preserve schema-declared string arguments in XML tool calls, including the Qwen XML route. JSON-looking text remains a string instead of being decoded into an object or array. (`42fe9daf6`, `2749abdb7`)\n- Prevent malformed tool arguments from crashing chat tool previews. (`9e92fa929`)\n- This is a focused correctness release. Existing runtime precision, sampling, MTP and cache defaults are unchanged; experimental cold-start optimizations are not included.\n\n## Runtime provenance\n\n- vMLX source: `bb3482e792bb9310b4c5490de170c38929bf27fe`\n- JANG runtime: `f3c79081c3d99e8a26fa28444934f7567acb00c6` (`jang 2.5.47`)\n- Tahoe/macOS 26 is the default build; Sequoia is the compatibility build.\n- Both DMGs are Developer ID signed, independently notarized, stapled, and Gatekeeper checked by the candidate workflow.\n\n## Downloads\n\n- **Tahoe**: `vMLX-1.6.64-tahoe-arm64.dmg`\n  - SHA-256: `f21d3fdd961cf43342c5ee31c21ccc3aa56e43e31e0ccefdf3d49680ff034110`\n  - Size: `594550337` bytes\n- **Sequoia**: `vMLX-1.6.64-sequoia-arm64.dmg`\n  - SHA-256: `a1ecd8a93947933badb9c1200d5f37828bda6de15d7d8c36019de357ae82c260`\n  - Size: `572512119` bytes\n\n## Python distributions\n\n- Wheel: `vmlx-1.6.64-py3-none-any.whl` \u2014 SHA-256 `2eab16c15df6cd3694dd8c32231461624aac6ebe916183edf9f144591c66f778`\n- Source: `vmlx-1.6.64.tar.gz` \u2014 SHA-256 `6c8b23b97e51b8595688b8bd7026b9962c96c25a20ef0013ca2e2840d0ea5ae7`"
 }

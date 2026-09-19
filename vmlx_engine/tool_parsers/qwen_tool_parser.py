@@ -299,7 +299,7 @@ class QwenToolParser(ToolParser):
                 if name not in properties or name in arguments:
                     invalid = True
                     break
-                arguments[name] = cls._coerce_arg_value(raw_value)
+                arguments[name] = cls._coerce_arg_value(raw_value, properties.get(name))
             if invalid or any(
                 name not in arguments
                 or arguments[name] is None
@@ -363,8 +363,15 @@ class QwenToolParser(ToolParser):
             match.end(),
         )
 
-    @staticmethod
-    def _coerce_arg_value(value: str) -> Any:
+    @classmethod
+    def _coerce_arg_value(cls, value: str, prop_schema: Any = None) -> Any:
+        # Native XML strings are emitted verbatim, not JSON-encoded. Consult
+        # the declared type before decoding: source code, numeric filenames,
+        # quotes and trailing newlines must not become objects/scalars.
+        if cls._schema_is_string_or_null(prop_schema):
+            if cls._schema_allows_null(prop_schema) and value.strip().lower() in cls._NULL_SPELLINGS:
+                return None
+            return value
         # Strip only to TEST for JSON, never to produce the string result.
         # `value.strip()` before the fallback removed the payload's own leading
         # indentation: a code argument rendered as
@@ -380,7 +387,9 @@ class QwenToolParser(ToolParser):
             return value
 
     @classmethod
-    def _parse_function_blocks(cls, text: str) -> list[dict[str, Any]]:
+    def _parse_function_blocks(
+        cls, text: str, request: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """Parse Qwen3-Coder XML tool format (issue #192).
 
         <function=name><parameter=p>v</parameter></function>; falls back to
@@ -391,31 +400,7 @@ class QwenToolParser(ToolParser):
             name = func_name.strip()
             if not name:
                 continue
-            arguments: dict[str, Any] = {}
-            params = cls.PARAMETER_PATTERN.findall(body)
-            if params:
-                for pn, pv in params:
-                    arguments[pn.strip()] = cls._coerce_arg_value(pv)
-            if not arguments:
-                # Split-key variant (raw-suffix capture): `<parameter>` bare
-                # opener with the KEY floated inside as `command>` on its own
-                # line. Must run BEFORE the bare-args fallback, which would
-                # otherwise misread the literal <parameter> tag as an argument
-                # named "parameter" with the key glued into its value.
-                for pn, pv in cls._RECOVERY_SPLIT_KEY_PARAM.findall(body):
-                    arguments[pn.strip()] = cls._coerce_arg_value(pv)
-            if not arguments:
-                for pn, pv in cls.BARE_ARG_PATTERN.findall(body):
-                    arguments[pn.strip()] = cls._coerce_arg_value(pv)
-            if not arguments:
-                # Qwen3.6-35B live variant of the doubled-wrapper miskeying:
-                # the function NAME is correct but a parameter opens as
-                # `<function=KEY>` and closes as `</parameter>`. Without this
-                # the call parses with empty arguments and the required-args
-                # validator drops it (observed live: run_command missing
-                # 'command' on the Responses stream path).
-                for pn, pv in cls._RECOVERY_MISKEYED_PARAM.findall(body):
-                    arguments[pn.strip()] = cls._coerce_arg_value(pv)
+            arguments = cls._xml_arguments_from_body(body, cls._argument_properties(request, name))
             calls.append(
                 {
                     "id": generate_tool_id(),
@@ -424,6 +409,20 @@ class QwenToolParser(ToolParser):
                 }
             )
         return calls
+
+    @classmethod
+    def _xml_arguments_from_body(
+        cls, body: str, properties: dict[str, Any]
+    ) -> dict[str, Any]:
+        # Preserve the existing dialect order. Split keys precede bare tags so
+        # <parameter>\ncontent>... is not mistaken for a key named parameter.
+        for pattern in (cls.PARAMETER_PATTERN, cls._RECOVERY_SPLIT_KEY_PARAM,
+                        cls.BARE_ARG_PATTERN, cls._RECOVERY_MISKEYED_PARAM):
+            params = pattern.findall(body)
+            if params:
+                return {name.strip(): cls._coerce_arg_value(value, properties.get(name.strip()))
+                        for name, value in params}
+        return {}
 
     def extract_tool_calls(
         self, model_output: str, request: dict[str, Any] | None = None
@@ -483,7 +482,7 @@ class QwenToolParser(ToolParser):
 
         # Qwen3-Coder / Qwen3.6 XML function-parameter format (issue #192)
         if not tool_calls and "<function" in cleaned_text:
-            func_calls = self._parse_function_blocks(cleaned_text)
+            func_calls = self._parse_function_blocks(cleaned_text, request=request)
             allowed_names = self._request_tool_names(request)
             if allowed_names and not any(
                 call.get("name") in allowed_names for call in func_calls
@@ -526,7 +525,10 @@ class QwenToolParser(ToolParser):
                     # xml_function route (this landed there first and was
                     # inert here).
                     recovered = self._recover_doubled_wrapper_calls(
-                        cleaned_text, allowed_names=allowed_names
+                        cleaned_text, allowed_names=allowed_names,
+                        argument_parser=lambda name, body: self._xml_arguments_from_body(
+                            body, self._argument_properties(request, name)
+                        ),
                     )
                     if recovered:
                         func_calls = recovered

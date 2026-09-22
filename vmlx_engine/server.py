@@ -1559,6 +1559,11 @@ def _drop_contentless_assistant_turns(messages: list) -> list:
     theirs separately again -- fixing fewer than all four leaves the surface
     those clients hit still broken (the fix-one-of-N-schedulers class).
     """
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+    if read_mimo_v26_contract(_model_path or _model_name) is not None:
+        # MiMo's native template accepts reasoning-only and empty assistant
+        # turns. The Mistral compatibility workaround must not erase them.
+        return messages
     return [
         _msg
         for _msg in messages
@@ -1580,6 +1585,11 @@ def _strip_prior_reasoning_for_thinking_off(
     tool-call anchors even when visible content is empty so following tool
     results never become orphaned; drop only empty non-tool assistant turns.
     """
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+    if read_mimo_v26_contract(_model_path or _model_name) is not None:
+        # MiMo's native template retains past reasoning even when the next
+        # turn is thinking-off. The flag changes only the generation suffix.
+        return messages
     cleaned: list[dict] = []
     for original in messages:
         if not isinstance(original, dict) or original.get("role") != "assistant":
@@ -4335,6 +4345,13 @@ def _mimo_v2_runtime_modalities(bundle_path: str | None) -> list[str] | None:
     cfg = _read_bundle_json(bundle_path, "config.json")
     if str((cfg or {}).get("model_type") or "").lower() != "mimo_v2":
         return None
+
+    from .models.mimo_v26_contract import read_mimo_v26_contract, mimo_v26_modalities
+    contract = read_mimo_v26_contract(bundle_path)
+    if contract is not None:
+        # Do not import/register the V2.5 adapter as a side effect of capability
+        # discovery. Its global SwitchGLU patch contaminates the fresh runtime.
+        return mimo_v26_modalities(bundle_path, contract)
 
     modalities = ["text"]
     module = _mimo_v2_runtime_module()
@@ -12519,6 +12536,9 @@ def _native_cache_status(
             stored_kv_bits > 0
             or native_tq_storage
         )
+        fresh_mimo_storage = bool(getattr(
+            getattr(scheduler, "model", None), "_mimo_v26_runtime", False
+        ))
         storage_quantization = {
             "enabled": storage_quantized,
             "mode": "storage_boundary",
@@ -12526,7 +12546,7 @@ def _native_cache_status(
             "group_size": stored_kv_group if storage_quantized else None,
             "applies_to": (
                 "full_attention_kv_only"
-                if native_tq_storage
+                if native_tq_storage or fresh_mimo_storage
                 else "full_and_sliding_attention_kv"
             ),
             "metadata_policy": "preserve_rotating_window_metadata",
@@ -12538,6 +12558,9 @@ def _native_cache_status(
             storage_quantization["restore_policy"] = (
                 "decode_full_attention_tq_and_restore_rotating_state"
             )
+        elif fresh_mimo_storage:
+            storage_quantization["sliding_window_policy"] = "native_rotating_kv_state"
+            storage_quantization["restore_policy"] = "restore_native_dtype_and_rotating_state"
         return _with_runtime_layout({
             "family": family_name or scheduler_family or "mixed_attention",
             "schema": "mixed_swa_kv_v1",

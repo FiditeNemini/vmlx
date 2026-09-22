@@ -429,36 +429,35 @@ def register_all(registry=None):
         )
     )
 
-    # MiMo-V2.5 JANG_2L: multimodal artifact with text-first runtime.
+    # MiMo-V2 family (V2.5 / V2.6-Flash-RL / V2.6-Pro-RL).
     #
-    # Source contract imported from test-host.local:~/jang on 2026-05-27:
-    # full attention layers use 4 KV heads, SWA layers use 8 KV heads, V states
-    # are scaled by 0.707. The current target bundle removes MTP tensors and
-    # keeps base decode autoregressive. MiMo's template emits generic XML
-    # function calls, not Qwen tools. Current MiMo JANGTQ_2 live proof shows
-    # requested thinking can stop with all output hidden in reasoning_content and
-    # no visible final answer, so do not advertise reasoning until a visible-final
-    # thinking proof exists.
+    # The vendor template defaults to reasoning: it opens the assistant turn
+    # without <think>, the model emits literal <think>...</think> (added, NOT
+    # special tokens), thinking-off appends <think></think>, and every past
+    # assistant turn is re-rendered with its reasoning_content, so history must
+    # round-trip reasoning. Tools are generic XML function calls. EOS set comes
+    # from the vendor generation_config.
     _register(
         ModelConfig(
             family_name="mimo_v2",
             model_types=["mimo_v2"],
             cache_type="kv",
             cache_subtype="mimo_v2_asymmetric_swa",
-            eos_tokens=["<|im_end|>"],
+            eos_tokens=["<|im_end|>", "<|endoftext|>", "<|mimo_audio_eod|>"],
             tool_parser="xml_function",
-            reasoning_parser=None,
+            reasoning_parser="think_xml",
             think_in_template=False,
-            supports_thinking=False,
+            supports_thinking=True,
             supports_native_tools=True,
             is_mllm=True,
             architecture_hints={
-                "runtime_mtp_mode": "absent",
+                "runtime_mtp_mode": "preserved_disabled",
                 "full_attention_kv_heads": 4,
                 "swa_attention_kv_heads": 8,
                 "attention_value_scale": 0.707,
                 "swa_window": 128,
                 "swa_attention_sink_bias": True,
+                "default_enable_thinking": True,
             },
             priority=4,
         )

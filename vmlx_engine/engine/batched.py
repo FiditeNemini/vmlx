@@ -832,9 +832,10 @@ class BatchedEngine(BaseEngine):
         if tools:
             template_kwargs["tools"] = tools
 
-        rendered_messages = self._fold_leading_system_into_first_user(
-            self._collapse_text_only_content_lists(messages)
-        )
+        rendered_messages = messages
+        if not getattr(self._model, "_mimo_v26_runtime", False):
+            rendered_messages = self._collapse_text_only_content_lists(messages)
+            rendered_messages = self._fold_leading_system_into_first_user(rendered_messages)
         rendered_messages = self._normalize_tool_call_arguments_for_template(
             rendered_messages
         )
@@ -2074,6 +2075,16 @@ class BatchedEngine(BaseEngine):
 
         # Count non-system messages to detect multi-turn conversations
         non_system_msgs = sum(1 for m in messages if m.get("role") != "system")
+
+        if self._is_mllm and getattr(self._model, "_mimo_v26_runtime", False):
+            # The source template understands native/OpenAI media parts and
+            # preserves their placement among text fragments. Generic VLM
+            # normalization collects all media before all text, changing it.
+            return self._mimo_text_only_chat_template(
+                messages, tools, enable_thinking=enable_thinking,
+                extra_template_kwargs=extra_template_kwargs,
+                skip_generation_prompt=skip_generation_prompt,
+            )
 
         mllm_model_type = None
         if self._is_mllm and self._processor:

@@ -2505,6 +2505,26 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
 })
 
 describe('detectModelConfigFromDir local high-risk artifact parity', () => {
+  it.each([false, true])('honors fresh MiMo V2.6 media flags and native thinking defaults: %s', media => {
+    const dir = makeModelDir({ model_type: 'mimo_v2', vision_config: { depth: 28 } }, {
+      weight_format: 'mixed_affine_mxfp4', has_vision: media,
+      chat: { thinking: { supported: true, default: true } },
+      capabilities: { family: 'mimo_v2', cache_type: 'kv', supports_tools: true,
+        modality: media ? 'omni' : 'text',
+        modalities: { text: true, vision: media, video: media, audio: media } },
+    })
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: { 'visual.patch_embed.proj.weight': 'model-00001-of-00001.safetensors' },
+    }))
+    const detected = detectModelConfigFromDir(dir)
+    expect(detected.defaultEnableThinking).toBe(true)
+    expect(detected.reasoningParser).toBe('think_xml')
+    expect(detected.toolParser).toBe('xml_function')
+    expect(detected.cacheSubtype).toBe('mimo_v2_asymmetric_swa')
+    expect(detected.isMultimodal).toBe(media)
+    expect(detected.runtimeModalities).toEqual(media ? ['text', 'vision', 'video', 'audio'] : ['text'])
+    expect(!!detected.forceTextOnly).toBe(!media)
+  })
   it('matches current local high-risk model paths to panel parser cache and modality policy', () => {
     const rows: Array<{
       name: string

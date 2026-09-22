@@ -1508,7 +1508,10 @@ class MLLMScheduler:
             or getattr(self, "_model_type", "")
             or ""
         ).lower()
-        if not _mllm_media_prefix_cache_family_enabled(model_type):
+        runtime = getattr(getattr(self, "batch_generator", None), "model", None)
+        if not _mllm_media_prefix_cache_family_enabled(
+            model_type, mimo_v26_runtime=getattr(runtime, "_mimo_v26_runtime", False),
+        ):
             return False
         extra = getattr(request, "_cache_extra_keys", None)
         if not extra:
@@ -2250,6 +2253,14 @@ class MLLMScheduler:
         the config has at least two distinct attention modes. For everything
         else we return False and the normal prefix-cache pipeline runs.
         """
+        if getattr(getattr(self, "model", None), "_mimo_v26_runtime", False):
+            # The fresh language wrapper exposes source args, whose schema has
+            # hybrid_layer_pattern rather than the legacy cache_subtype field.
+            # Observe the native slots before constructing the generator so it
+            # captures rotating boundaries on the FIRST request.
+            kinds = {type(slot).__name__ for slot in lang_model.make_cache()}
+            return kinds == {"KVCache", "RotatingKVCache"}
+
         def _cfg_value(cfg, key):
             if isinstance(cfg, dict):
                 return cfg.get(key)

@@ -764,9 +764,16 @@ def check_and_inject_fallback_tools(
     # (matrix over all bundle templates, 2026-09-05).
     _xml_function_has_native_tool_schema = (
         is_xml_function_native_tool_prompt
-        and "<tool_call>" in instruction_prompt
-        and "<function=example_function_name>" in instruction_prompt
+        and (
+            ("<tool_call>" in instruction_prompt
+             and "<function=example_function_name>" in instruction_prompt)
+            # MiMo-V2.6 renders the complete JSON schemas but no example call.
+            # A parsed match of every requested parameter contract is enough;
+            # requiring an example injects a second, altered system prompt.
+            or _native_tools_schema_verdict is True
+        )
         and "<tools>" in instruction_prompt
+        and "</tools>" in instruction_prompt
         and all(
             f"<name>{name}</name>" in instruction_prompt
             or f'"name": "{name}"' in instruction_prompt

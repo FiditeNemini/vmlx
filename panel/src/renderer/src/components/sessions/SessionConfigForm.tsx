@@ -2370,7 +2370,8 @@ export function SliderField({
 
     const parsed = allowFractional ? Number(raw) : Math.round(Number(raw))
     const withinHardMaximum = maxInput == null || parsed <= maxInput
-    if (Number.isFinite(parsed) && parsed >= min && withinHardMaximum) {
+    const explicitUnlimited = allowUnlimited && parsed === unlimitedValue
+    if (Number.isFinite(parsed) && (explicitUnlimited || parsed >= min) && withinHardMaximum) {
       onChange(parsed)
     }
   }
@@ -2388,7 +2389,9 @@ export function SliderField({
       return
     }
     const num = allowFractional ? Number(raw) : Math.round(Number(raw))
-    if (isNaN(num)) {
+    if (allowUnlimited && num === unlimitedValue) {
+      onChange(unlimitedValue)
+    } else if (isNaN(num)) {
       onChange(defaultValue)
     } else {
       // Clamp to valid range — maxInput enforces hard server-side limits
@@ -2468,8 +2471,8 @@ export function SliderField({
           onBlur={handleInputBlur}
           placeholder={isUnlimited ? unlimitedLabel : undefined}
           disabled={disabled}
-          min={min}
-          step={allowFractional ? 'any' : step}
+          min={allowUnlimited ? Math.min(min, unlimitedValue) : min}
+          step={allowFractional ? 'any' : 1}
         />
       </div>
     </div>

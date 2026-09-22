@@ -5137,8 +5137,11 @@ def validate_tool_args_against_schema(
     except Exception:  # pragma: no cover - dependency is declared
         return "unconstrained", ["jsonschema is not importable"]
     try:
-        Draft202012Validator.check_schema(params)
-        validator = Draft202012Validator(params)
+        from jsonschema.validators import validator_for
+
+        validator_type = validator_for(params, default=Draft202012Validator)
+        validator_type.check_schema(params)
+        validator = validator_type(params)
     except SchemaError as exc:
         return "unconstrained", [f"malformed input schema: {getattr(exc, 'message', exc)}"]
     except Exception as exc:  # noqa: BLE001
@@ -7456,16 +7459,17 @@ def _parse_tool_calls_with_parser(
                 return None, "{}", ""
 
         def _coerce_json_args(raw_args: Any) -> dict[str, Any] | None:
-            if isinstance(raw_args, dict):
-                return dict(raw_args)
-            if isinstance(raw_args, str) and raw_args.strip():
-                try:
-                    parsed = json.loads(raw_args)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except (ValueError, TypeError):
+            try:
+                parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                if not isinstance(parsed, dict):
                     return None
-            return None
+                # Python accepts NaN/Infinity and overflows 1e999 to inf.
+                # Reject them (including nested values) before any delivery,
+                # even when optional JSON Schema validation is disabled.
+                json.dumps(parsed, allow_nan=False)
+                return dict(parsed)
+            except (ValueError, TypeError):
+                return None
 
         def _missing_required_args(name: str | None, raw_args: Any) -> list[str]:
             if not name:

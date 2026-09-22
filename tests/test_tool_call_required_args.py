@@ -241,3 +241,33 @@ def test_shared_filter_covers_both_parser_branches_and_every_dialect():
         assert "parse_tool_calls(" not in src and "_filter_to_request_tools" not in src, name
     responses = inspect.getsource(_server.create_response)
     assert "_parse_tool_calls_with_parser(" in responses
+
+
+# Structural JSON validity is mandatory, independently of schema policy.
+import pytest
+
+
+@pytest.mark.parametrize("policy", ["off", "warn", "enforce"])
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e999", '{"nested": [NaN]}'])
+def test_native_nonfinite_argument_is_dropped_before_delivery(monkeypatch, policy, value):
+    monkeypatch.setenv("VMLX_TOOL_ARGS_SCHEMA_VALIDATION", policy)
+    monkeypatch.setattr(_server, "_tool_call_parser_disabled_explicitly", False)
+    monkeypatch.setattr(_server, "_tool_call_parser", "xml_function")
+    request = ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "record"}],
+        tools=[{"type": "function", "function": {"name": "record", "parameters": {
+            "type": "object", "properties": {"value": {}}, "required": ["value"]}}}])
+    raw = f"<tool_call><function=record><parameter=value>{value}</parameter></function></tool_call>"
+    _begin_tool_call_drop_capture()
+    text, calls = _parse_tool_calls_with_parser(raw, request)
+    assert not calls
+    assert "<tool_call>" not in text
+    assert any("valid JSON object" in item for item in _take_tool_call_drop_diagnostics())
+
+
+def test_output_validation_respects_declared_draft04():
+    schema = {"name": "record", "parameters": {
+        "$schema": "http://json-schema.org/draft-04/schema#", "type": "object",
+        "properties": {"value": {"type": "number", "minimum": 0, "exclusiveMinimum": True}}}}
+    assert validate_tool_args_against_schema(schema, {"value": 1}) == ("valid", [])
+    status, problems = validate_tool_args_against_schema(schema, {"value": 0})
+    assert status == "invalid" and problems

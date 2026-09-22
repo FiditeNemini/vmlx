@@ -36,7 +36,7 @@ describe('visible SSD budget edit with migrated sessions', () => {
       expect(catalog.sessions.config.blockCacheSavedGbOverride).toContain('{gb}')
     }
   })
-  for (const percent of [0, 3, 90]) {
+  for (const percent of [0, 0.003, 3, 90]) {
     for (const gb of [undefined, 1, 7.5]) {
       it(`percent ${percent} replaces only the explicit GB override ${gb}`, () => {
         const config: any = {

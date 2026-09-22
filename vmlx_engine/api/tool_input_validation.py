@@ -2,6 +2,7 @@
 import json
 
 from jsonschema import Draft202012Validator, SchemaError
+from jsonschema.validators import validator_for
 
 
 def _mapping(value):
@@ -22,7 +23,9 @@ def validate_tool_schemas(tools):
         if not isinstance(parameters, dict):
             raise ValueError(f"tools[{index}].parameters must be a JSON Schema object")
         try:
-            Draft202012Validator.check_schema(parameters)
+            # Respect explicitly declared older drafts (for example draft-04
+            # boolean exclusiveMinimum), as jsonschema's value validator does.
+            validator_for(parameters, default=Draft202012Validator).check_schema(parameters)
         except SchemaError as exc:
             # A malformed client schema is a request error, not an unconstrained
             # generation request. Do not resolve references or rewrite schemas.

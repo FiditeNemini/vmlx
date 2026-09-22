@@ -72,3 +72,17 @@ def test_valid_nested_schema_and_escaped_history_are_preserved(path):
 def test_responses_builtin_tools_and_plain_text_are_unaffected():
     result = client.post('/responses', json={'model': 'test', 'input': 'hello', 'tools': [{'type': 'web_search'}]})
     assert result.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/chat", "/responses"])
+def test_declared_older_schema_draft_is_preserved(path):
+    schema = {"$schema": "http://json-schema.org/draft-04/schema#",
+              "type": "object", "properties": {
+                  "count": {"type": "number", "minimum": 0, "exclusiveMinimum": True}}}
+    request = body(path, {"name": "lookup", "parameters": schema})
+    result = client.post(path, json=request)
+    assert result.status_code == 200
+    assert result.json()['tools'] == request['tools']
+    # The same boolean is invalid when the caller declares draft 2020-12.
+    schema['$schema'] = "https://json-schema.org/draft/2020-12/schema"
+    assert client.post(path, json=body(path, {"name": "lookup", "parameters": schema})).status_code == 422

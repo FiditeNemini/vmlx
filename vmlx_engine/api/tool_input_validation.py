@@ -35,16 +35,29 @@ def validate_tool_schemas(tools):
 
 def _validate_arguments(arguments, location):
     # Preserve legacy no-argument and already-decoded object histories.
-    if arguments is None or arguments == "" or isinstance(arguments, dict):
+    if arguments is None or arguments == "":
+        return
+    if isinstance(arguments, dict):
+        try:
+            json.dumps(arguments, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{location} must contain JSON-compatible values") from exc
         return
     if not isinstance(arguments, str):
         raise ValueError(f"{location} must be a JSON object or its JSON string")
     try:
-        decoded = json.loads(arguments)
+        decoded = json.loads(arguments, parse_constant=_reject_nonfinite_constant)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"{location} contains malformed JSON") from exc
     if not isinstance(decoded, dict):
         raise ValueError(f"{location} must encode a JSON object")
+    _validate_arguments(decoded, location)  # Also rejects float overflow (1e999).
+
+
+def _reject_nonfinite_constant(value):
+    # Python's decoder accepts these extensions by default, but downstream
+    # tool clients require JSON, which has no NaN/Infinity numeric literals.
+    raise ValueError(f"Non-finite JSON constant: {value}")
 
 
 def validate_tool_history(items):

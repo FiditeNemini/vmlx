@@ -71,6 +71,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -6280,6 +6281,10 @@ app = FastAPI(
     version=__import__("vmlx_engine").__version__,
     lifespan=lifespan,
 )
+
+from .api.validation_errors import request_validation_error_response
+
+app.add_exception_handler(RequestValidationError, request_validation_error_response)
 
 
 @app.exception_handler(OllamaRequestValidationError)

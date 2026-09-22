@@ -2,12 +2,15 @@ import json
 
 import pytest
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 from vmlx_engine.api.models import ChatCompletionRequest, ResponsesRequest
+from vmlx_engine.api.validation_errors import request_validation_error_response
 
 
 app = FastAPI()
+app.add_exception_handler(RequestValidationError, request_validation_error_response)
 
 
 @app.post("/chat")
@@ -39,7 +42,10 @@ def test_malformed_schema_is_a_client_error(path, parameters):
 
 
 @pytest.mark.parametrize("path", ["/chat", "/responses"])
-@pytest.mark.parametrize("arguments", ['{"label":', '["alpha"]', '"alpha"'])
+@pytest.mark.parametrize("arguments", [
+    '{"label":', '["alpha"]', '"alpha"',
+    '{"value": NaN}', '{"value": Infinity}', '{"value": -Infinity}', '{"value": 1e999}',
+])
 def test_malformed_prior_function_arguments_are_rejected(path, arguments):
     call = {"id": "call_a", "type": "function", "function": {"name": "lookup", "arguments": arguments}}
     request = body(path, {"name": "lookup"})
@@ -86,3 +92,39 @@ def test_declared_older_schema_draft_is_preserved(path):
     # The same boolean is invalid when the caller declares draft 2020-12.
     schema['$schema'] = "https://json-schema.org/draft/2020-12/schema"
     assert client.post(path, json=body(path, {"name": "lookup", "parameters": schema})).status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/chat", "/responses"])
+def test_decoded_history_object_rejects_nonfinite_values(path):
+    request = body(path, {"name": "lookup"})
+    arguments = {"value": float("nan")}
+    if path == "/chat":
+        request['messages'].append({"role": "assistant", "tool_calls": [
+            {"type": "function", "function": {"name": "lookup", "arguments": arguments}}]})
+    else:
+        request['input'] = [{"type": "function_call", "call_id": "call_a",
+                             "name": "lookup", "arguments": arguments}]
+    # Raw body exercises parsers which accept non-standard JSON constants;
+    # the request validator must still reject them before model inference.
+    result = client.post(path, content=json.dumps(request), headers={"Content-Type": "application/json"})
+    assert result.status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/chat", "/responses"])
+def test_real_server_rejects_nonfinite_tool_history_without_loading_model(path):
+    from vmlx_engine.server import app as server_app
+
+    request = body(path, {"name": "lookup"})
+    function = {"name": "lookup", "arguments": {"value": float("inf")}}
+    if path == "/chat":
+        request['messages'].append({"role": "assistant", "tool_calls": [
+            {"id": "call_a", "type": "function", "function": function}]})
+        endpoint = "/v1/chat/completions"
+    else:
+        request['input'] = [{"type": "function_call", "call_id": "call_a", **function}]
+        endpoint = "/v1/responses"
+    # No context manager: lifespan/model loading is intentionally not started.
+    result = TestClient(server_app).post(
+        endpoint, content=json.dumps(request), headers={"Content-Type": "application/json"})
+    assert result.status_code == 422
+    assert result.json()['detail'][0]['type'] == 'value_error'

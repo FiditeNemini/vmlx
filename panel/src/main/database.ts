@@ -91,6 +91,7 @@ export interface Message {
   // turn was generated. Used to mark request-scoped tool capability changes
   // without deleting or heuristically rewriting prior assistant history.
   toolCapabilityFingerprint?: string;
+  generationRecordJson?: string; // Immutable request snapshots for session export
   reasoningContent?: string; // Reasoning/thinking content (from <think> tags or similar)
   reasoningSegmentsJson?: string; // JSON array of interleaved reasoning segments split by tool boundaries
 }
@@ -412,6 +413,10 @@ class DatabaseManager {
         this.db.exec(
           "ALTER TABLE messages ADD COLUMN tool_capability_fingerprint TEXT",
         );
+      }
+
+      if (!msgColumns.find((c) => c.name === "generation_record_json")) {
+        this.db.exec("ALTER TABLE messages ADD COLUMN generation_record_json TEXT");
       }
 
       // Safe migration: add new chat_overrides columns if missing
@@ -1596,9 +1601,9 @@ class DatabaseManager {
           id, chat_id, role, content, timestamp, tokens,
           metrics_json, warnings_json, tool_calls_json, reasoning_content,
           reasoning_segments_json, tool_calls_oai_json, tool_call_id,
-          tool_results_oai_json, tool_capability_fingerprint
+          tool_results_oai_json, tool_capability_fingerprint, generation_record_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       stmt.run(
         message.id,
@@ -1616,12 +1621,18 @@ class DatabaseManager {
         message.toolCallId,
         message.toolResultsOaiJson,
         message.toolCapabilityFingerprint,
+        message.generationRecordJson,
       );
 
       // Update chat's updatedAt atomically with the message insert
       this.updateChat(message.chatId, { updatedAt: message.timestamp });
     });
     insertAndUpdate();
+  }
+
+  updateMessageGenerationRecord(messageId: string, record: string): void {
+    this.ensureOpen();
+    this.db.prepare("UPDATE messages SET generation_record_json = ? WHERE id = ?").run(record, messageId);
   }
 
   /** Update an existing message's content in-place (for incremental persistence during streaming) */
@@ -1660,7 +1671,7 @@ class DatabaseManager {
   getMessages(chatId: string): Message[] {
     this.ensureOpen();
     const stmt = this.db.prepare(
-      "SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC",
+      "SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
     );
     return stmt.all(chatId).map((row: any) => ({
       id: row.id,
@@ -1678,6 +1689,7 @@ class DatabaseManager {
       toolCallId: row.tool_call_id,
       toolResultsOaiJson: row.tool_results_oai_json,
       toolCapabilityFingerprint: row.tool_capability_fingerprint,
+      generationRecordJson: row.generation_record_json,
     }));
   }
 

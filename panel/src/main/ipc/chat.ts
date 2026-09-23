@@ -7,6 +7,7 @@ import type { ClientRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
+import { captureGenerationPass, type GenerationRecord } from "../session-export";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
 import {
   readDetectedModelConfig,
@@ -2153,6 +2154,13 @@ export function registerChatHandlers(
       // Periodic DB save interval — saves content every 5s so it survives navigation/crashes
       let periodicSaveInterval: ReturnType<typeof setInterval> | null = null;
 
+      const generationRecord: GenerationRecord = { version: 1, status: 'in_progress', passes: [] };
+      const saveGenerationRecord = () => {
+        generationRecord.toolExchange = JSON.parse(JSON.stringify(requestMessages.slice(currentTurnToolStart)));
+        assistantMessage.generationRecordJson = JSON.stringify(generationRecord);
+        db.updateMessageGenerationRecord(assistantMessage.id, assistantMessage.generationRecordJson);
+      };
+
       // Pre-insert assistant message to DB immediately so periodic updates have a row to update.
       // Uses INSERT OR REPLACE so the final addMessage at completion overwrites cleanly.
       db.addMessage(assistantMessage);
@@ -2166,6 +2174,8 @@ export function registerChatHandlers(
               : allGeneratedContent
             : fullContent;
           const saveReasoning = currentReasoningContent();
+          try { saveGenerationRecord(); }
+          catch (error) { console.warn('[CHAT] Could not checkpoint generation record', error); }
           if (saveContent || saveReasoning) {
             try {
               db.updateMessageContent(
@@ -2208,6 +2218,7 @@ export function registerChatHandlers(
           `[CHAT] Sending to: ${apiUrl} (wire: ${wireApi}, remote: ${isRemote})`,
         );
 
+        let generationHealth: Record<string, any> | undefined;
         // Get model name: remote uses configured model, local reads from health endpoint
         let modelName = isRemote
           ? resolvedSession?.remoteModel || chat.modelId || "default"
@@ -2215,10 +2226,12 @@ export function registerChatHandlers(
         if (!isRemote) {
           try {
             const healthRes = await fetch(`${baseUrl}/health`, {
+              headers: authHeaders,
               signal: AbortSignal.timeout(1000),
             });
             if (healthRes.ok) {
               const health = await healthRes.json();
+              generationHealth = health;
               if (health.model_name) modelName = health.model_name;
             }
           } catch (_) {
@@ -2331,6 +2344,16 @@ export function registerChatHandlers(
           const finalizeRequestBody = (obj: Record<string, any>) => {
             applyPostToolAnswerPolicy(obj);
             previousToolRequestFields = captureToolRequestFields(obj);
+            generationRecord.passes.push(captureGenerationPass({
+              body: obj,
+              modelPath: resolvedSession?.modelPath || chat.modelPath,
+              family: chatDetectedFamily,
+              wireApi,
+              serverConfig: chatSessionConfig,
+              health: generationHealth,
+              toolExchange: requestMessages.slice(currentTurnToolStart),
+            }));
+            saveGenerationRecord();
             return obj;
           };
           if (useResponsesApi) {
@@ -4955,6 +4978,9 @@ export function registerChatHandlers(
         } catch (_persistErr) {
           /* Non-fatal: persistence is best-effort; UI still works without it. */
         }
+        generationRecord.status = 'completed';
+        generationRecord.finishReason = lastFinishReason;
+        saveGenerationRecord();
         db.addMessage(assistantMessage);
 
         // Send final metrics
@@ -5163,6 +5189,9 @@ export function registerChatHandlers(
               abortReasoningSegments,
             );
           }
+          generationRecord.status = 'interrupted';
+          generationRecord.finishReason = lastFinishReason;
+          saveGenerationRecord();
           db.addMessage(assistantMessage);
 
           try {

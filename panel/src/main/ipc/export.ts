@@ -1,7 +1,8 @@
 import { ipcMain, dialog } from 'electron'
 import { writeFileSync, readFileSync, statSync } from 'fs'
-import { db } from '../database'
+import { db, type Message } from '../database'
 import { randomUUID } from 'crypto'
+import { renderSessionMarkdown, parseSessionMarkdown } from '../session-export'
 
 /**
  * Chat export/import IPC handlers.
@@ -20,16 +21,7 @@ export function registerExportHandlers(): void {
 
     switch (format) {
       case 'markdown': {
-        const lines = [`# ${chat.title}\n`, `*Exported ${new Date().toLocaleString()}*\n`]
-        for (const m of messages) {
-          const role = m.role === 'assistant' ? 'Assistant' : m.role === 'user' ? 'User' : 'System'
-          lines.push(`## ${role}\n`)
-          if (m.reasoningContent && m.role === 'assistant') {
-            lines.push(`<details><summary>Thinking</summary>\n\n${m.reasoningContent}\n\n</details>\n`)
-          }
-          lines.push(m.content + '\n')
-        }
-        content = lines.join('\n')
+        content = renderSessionMarkdown(chat, messages)
         ext = 'md'
         break
       }
@@ -51,7 +43,8 @@ export function registerExportHandlers(): void {
             role: m.role as 'system' | 'user' | 'assistant',
             content: m.content,
             timestamp: m.timestamp,
-            ...(m.reasoningContent ? { reasoning: m.reasoningContent } : {})
+            ...(m.reasoningContent ? { reasoning: m.reasoningContent } : {}),
+            ...(m.generationRecordJson ? { generationRecord: JSON.parse(m.generationRecordJson) } : {})
           }))
         }, null, 2)
         ext = 'json'
@@ -60,7 +53,7 @@ export function registerExportHandlers(): void {
 
     const safeName = chat.title.replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 50).trim() || 'chat'
     const result = await dialog.showSaveDialog({
-      title: 'Export Chat',
+      title: format === 'markdown' ? 'Export session' : 'Export Chat',
       defaultPath: `${safeName}.${ext}`,
       filters: ext === 'md'
         ? [{ name: 'Markdown', extensions: ['md'] }]
@@ -111,7 +104,7 @@ export function registerExportHandlers(): void {
     stopAccess?.()
 
     let title = 'Imported Chat'
-    let messages: Array<{ role: string; content: string; reasoning?: string }> = []
+    let messages: Array<Partial<Message> & { role: string; content: string; reasoning?: string }> = []
 
     if (filePath.endsWith('.json')) {
       let parsed: any
@@ -135,26 +128,33 @@ export function registerExportHandlers(): void {
         messages = parsed.messages.map((m: any) => ({
           role: m.role || 'user',
           content: m.content || '',
-          ...(m.reasoning ? { reasoning: m.reasoning } : {})
+          ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+          ...(m.generationRecord ? { generationRecordJson: JSON.stringify(m.generationRecord) } : {})
         }))
       }
     } else if (filePath.endsWith('.md')) {
-      // Parse markdown: ## User / ## Assistant / ## System sections
-      title = 'Imported (Markdown)'
-      const sections = raw.split(/^## /m).slice(1)
-      for (const section of sections) {
-        const firstLine = section.split('\n')[0].trim().toLowerCase()
-        let content = section.split('\n').slice(1).join('\n').trim()
-        const role = firstLine.includes('assistant') || firstLine.includes('gpt') ? 'assistant'
-          : firstLine.includes('system') ? 'system' : 'user'
-        // Extract reasoning from <details><summary>Thinking</summary>...</details> blocks
-        let reasoning: string | undefined
-        const detailsMatch = content.match(/^<details><summary>Thinking<\/summary>\s*\n\n([\s\S]*?)\n\n<\/details>\s*\n?/)
-        if (detailsMatch) {
-          reasoning = detailsMatch[1].trim()
-          content = content.slice(detailsMatch[0].length).trim()
+      const session = parseSessionMarkdown(raw)
+      if (session) {
+        title = session.title
+        messages = session.messages.map(m => ({ ...m, role: m.role || 'user', content: m.content || '' }))
+      } else {
+        // Parse legacy markdown: ## User / ## Assistant / ## System sections
+        title = 'Imported (Markdown)'
+        const sections = raw.split(/^## /m).slice(1)
+        for (const section of sections) {
+          const firstLine = section.split('\n')[0].trim().toLowerCase()
+          let content = section.split('\n').slice(1).join('\n').trim()
+          const role = firstLine.includes('assistant') || firstLine.includes('gpt') ? 'assistant'
+            : firstLine.includes('system') ? 'system' : 'user'
+          // Extract reasoning from <details><summary>Thinking</summary>...</details> blocks
+          let reasoning: string | undefined
+          const detailsMatch = content.match(/^<details><summary>Thinking<\/summary>\s*\n\n([\s\S]*?)\n\n<\/details>\s*\n?/)
+          if (detailsMatch) {
+            reasoning = detailsMatch[1].trim()
+            content = content.slice(detailsMatch[0].length).trim()
+          }
+          if (content) messages.push({ role, content, ...(reasoning ? { reasoning } : {}) })
         }
-        if (content) messages.push({ role, content, ...(reasoning ? { reasoning } : {}) })
       }
     }
 
@@ -190,7 +190,14 @@ export function registerExportHandlers(): void {
         role: msg.role as 'system' | 'user' | 'assistant',
         content: msg.content,
         timestamp: now,
-        ...(msg.reasoning ? { reasoningContent: msg.reasoning } : {})
+        ...(msg.reasoning || msg.reasoningContent ? { reasoningContent: msg.reasoning || msg.reasoningContent } : {}),
+        generationRecordJson: msg.generationRecordJson,
+        reasoningSegmentsJson: msg.reasoningSegmentsJson,
+        toolCallsOaiJson: msg.toolCallsOaiJson,
+        toolResultsOaiJson: msg.toolResultsOaiJson,
+        toolCallsJson: msg.toolCallsJson,
+        warningsJson: msg.warningsJson,
+        metricsJson: msg.metricsJson,
       })
     }
 

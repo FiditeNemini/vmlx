@@ -1092,8 +1092,8 @@ class MLLMScheduler:
                         f"VLM {'block disk-only' if block_disk_only else 'paged'} cache enabled: "
                         f"block_size={self.config.paged_cache_block_size}, "
                         f"max_blocks={_mllm_index_blocks}, "
-                        f"capacity="
-                        f"{_mllm_index_blocks * self.config.paged_cache_block_size} tokens"
+                        f"indexed_capacity="
+                        f"{max(0, _mllm_index_blocks - 1) * self.config.paged_cache_block_size} tokens"
                     )
                 except Exception as e:
                     self._cleanup_failed_block_cache_initialization(

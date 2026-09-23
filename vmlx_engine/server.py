@@ -26721,6 +26721,16 @@ async def stream_chat_completion(
                 if request_parser
                 else accumulated_text.strip()
             )
+            if _visible_prefix_before_unparsed_tool_markup(full) != full:
+                # Generic parsers can return malformed markup unchanged without
+                # recording a rejection. Hiding it below must still produce a
+                # diagnostic and, when nothing usable remains, an error terminal.
+                # Match Responses instead of silently ending an empty Chat stream.
+                _record_tool_call_drop(
+                    "Buffered native tool markup did not produce a usable function "
+                    "call. Its control suffix was hidden. Inspect the parser and "
+                    "validation diagnostics; this alone does not establish output-token truncation."
+                )
             if already_sent and full.startswith(already_sent):
                 # Leading whitespace of the remainder is INTERNAL to the full
                 # text (paragraph separator before the flushed portion) — keep it.

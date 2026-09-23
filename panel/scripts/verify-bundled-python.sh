@@ -214,6 +214,10 @@ HASH_GATED_ENGINE_FILES=(
   "speculative.py"
   "models/llm.py"
   "models/mllm.py"
+  "models/mimo_v26.py"
+  "models/mimo_v26_contract.py"
+  "models/mimo_v26_cache.py"
+  "tool_parsers/xml_function_tool_parser.py"
   "models/minimax_m3/cache.py"
   "models/step3p7_mlx_vlm.py"
   "models/gemma4_unified_register.py"
@@ -287,6 +291,11 @@ HASH_GATED_JANG_TOOLS_FILES=(
   "kimi_prune/generate_vl.py"
   "kimi_prune/runtime_patch.py"
   "mimo_v2/mlx_model.py"
+  "mimo_v2/mlx_register.py"
+  "mimo_v2/v26_model.py"
+  "mimo_v2/v26_vision.py"
+  "mimo_v2/v26_audio.py"
+  "mimo_v2/v26_omni.py"
   "nanbeige/__init__.py"
   "nanbeige/model.py"
   "nanbeige/mlx_register.py"
@@ -484,12 +493,11 @@ else
       echo "   bundled: $BUNDLED_JANG_TOOLS_DIR/$rel"
       exit 1
     fi
-    # Hash the file as it exists at origin/main, not as it exists in the local
-    # working tree. The tree is whatever the operator happens to be editing —
-    # comparing against it blocks a correct bundle over unrelated local edits,
-    # and blesses a stale one whenever the same stale tree produced it.
+    # Use the exact commit accepted by the provenance gate above, including an
+    # explicit release pin. Never compare a pinned bundle to unrelated main
+    # bytes or fall back to an uncommitted working tree.
     SOURCE_SHA=""
-    JANG_BLOB_REF="origin/main:${JANG_GIT_PREFIX}jang_tools/$rel"
+    JANG_BLOB_REF="${EXPECTED_JANG_COMMIT}:${JANG_GIT_PREFIX}jang_tools/$rel"
     # Pipe the blob straight into shasum. Capturing it in a variable first would
     # strip trailing newlines (command substitution does), and every file would
     # then look like content drift.
@@ -500,8 +508,8 @@ else
       )"
     fi
     if [ -z "$SOURCE_SHA" ]; then
-      echo "    WARNING: jang_tools/$rel not readable at origin/main — comparing against the working tree" >&2
-      SOURCE_SHA="$("$SHASUM_BIN" -a 256 "$JANG_TOOLS_SOURCE_DIR/$rel" | "$AWK_BIN" '{print $1}')"
+      echo "❌ RELEASE BLOCKED — jang_tools/$rel is missing at $EXPECTED_JANG_COMMIT" >&2
+      exit 1
     fi
     BUNDLED_SHA="$("$SHASUM_BIN" -a 256 "$BUNDLED_JANG_TOOLS_DIR/$rel" | "$AWK_BIN" '{print $1}')"
     if [ "$SOURCE_SHA" != "$BUNDLED_SHA" ]; then
@@ -544,6 +552,7 @@ REQUIRED = [
     ("jang_tools.laguna.runtime", "jang_tools.laguna.runtime", "Laguna mixed-affine runtime missing from bundled jang-tools"),
     ("jang_tools.mimo_v2.mlx_register", "jang_tools.mimo_v2.mlx_register", "MiMo-V2.5 runtime registration missing from bundled jang-tools"),
     ("mlx_lm.models.mimo_v2", "mlx_lm.models.mimo_v2", "MiMo-V2.5 mlx-lm registration missing after importing jang_tools.mimo_v2.mlx_register"),
+    ("vmlx_engine.models.mimo_v26", "vmlx_engine.models.mimo_v26", "MiMo-V2.6 text/vision/video/audio runtime missing from bundle"),
     ("jang_tools.nanbeige", "jang_tools.nanbeige", "Nanbeige package missing from bundled jang-tools"),
     ("jang_tools.nanbeige.model", "jang_tools.nanbeige.model", "Nanbeige looped-transformer model runtime missing from bundled jang-tools"),
     ("jang_tools.nanbeige.mlx_register", "jang_tools.nanbeige.mlx_register", "Nanbeige mlx-lm registration hook missing from bundled jang-tools"),

@@ -8219,6 +8219,9 @@ class Scheduler:
                         )
                     if rereconstructed is not None:
                         block_table = trimmed
+                        # Subsequent boundary validation must use the accepted
+                        # shorter checkpoint, not the original KV-only hit.
+                        fetch_num = trimmed.num_tokens
                         request.block_table = trimmed
                         request.cached_tokens = trimmed.num_tokens
                         request.shared_prefix_blocks = len(trimmed.block_ids)

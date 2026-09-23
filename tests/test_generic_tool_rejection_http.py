@@ -13,22 +13,28 @@ from vmlx_engine.engine.base import GenerationOutput
 @pytest.mark.parametrize("api", ["chat", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("finish", ["stop", "length"])
-async def test_generic_control_rejection_http(monkeypatch, api, stream, finish):
+@pytest.mark.parametrize("text", [
+    "<tool_call>UNSAFE_ORPHAN_SUFFIX",
+    '<tool_call>{"name":"unavailable_tool","arguments":{"path":"x"}}</tool_call>',
+    '<tool_call>{"name":"file_info","arguments":{}}</tool_call>',
+    '<tool_call>{"name":"file_info","arguments":[]}</tool_call>',
+])
+async def test_generic_control_rejection_http(monkeypatch, api, stream, finish, text):
     class Engine:
         tokenizer = SimpleNamespace(has_thinking=False)
         is_mllm = False
         preserve_native_tool_format = True
 
         async def chat(self, **kwargs):
-            return GenerationOutput(text="<tool_call>UNSAFE_ORPHAN_SUFFIX", tokens=[],
+            return GenerationOutput(text=text, tokens=[],
                                     prompt_tokens=12, completion_tokens=2,
                                     finished=True, finish_reason=finish)
 
         async def stream_chat(self, **kwargs):
-            text = ""
-            for i, delta in enumerate(["<tool_call>", "UNSAFE_ORPHAN_SUFFIX"]):
-                text += delta
-                yield GenerationOutput(text=text, new_text=delta, tokens=[],
+            accumulated = ""
+            for i, delta in enumerate([text[:11], text[11:]]):
+                accumulated += delta
+                yield GenerationOutput(text=accumulated, new_text=delta, tokens=[],
                                        prompt_tokens=12, completion_tokens=i+1,
                                        finished=bool(i), finish_reason=finish if i else None)
 

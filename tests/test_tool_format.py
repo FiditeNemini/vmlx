@@ -3519,6 +3519,7 @@ class TestFallbackToolPromptFormat:
         from vmlx_engine.api.models import ResponsesRequest
 
         monkeypatch.setattr(server, "_tool_call_parser", None)
+        server._begin_tool_call_drop_capture()
         req = ResponsesRequest(
             model="m",
             input="x",
@@ -3540,7 +3541,14 @@ class TestFallbackToolPromptFormat:
         )
 
         assert calls is None
-        assert "README.md" in cleaned
+        assert cleaned == ""
+        assert any(
+            "README.md" in warning and "not in the request's tools list" in warning
+            for warning in server._take_tool_call_drop_diagnostics()
+        )
+        # Plain discussion of a filename is still legitimate visible text.
+        cleaned, calls = server._parse_tool_calls_with_parser("README.md is a file.", req)
+        assert cleaned == "README.md is a file." and calls is None
 
     def test_server_cleans_suppressed_zaya_tool_markup_without_calling_tool(
         self, monkeypatch

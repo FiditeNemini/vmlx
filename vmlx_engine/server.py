@@ -7838,6 +7838,10 @@ def _parse_tool_calls_with_parser(
                 return cleaned, calls
             if _dropped_only_validated_calls():
                 return cleaned, None
+            if _has_tool_marker_or_partial_suffix(text):
+                # An unavailable function name is still rejected tool control,
+                # not a reason to revive its envelope as nonstream prose.
+                return _visible_prefix_before_unparsed_tool_markup(text), None
             return text, None
         repaired_cleaned, repaired_calls = _repair_instruction_echo_tool_call(text)
         if repaired_calls:
@@ -7977,14 +7981,15 @@ def _parse_tool_calls_with_parser(
                 # arguments: the markup is not an answer, the diagnostics
                 # carry the reason.
                 return result.content or "", None
-            # Parser consumed only unavailable tool names. Treat as plain text
-            # so clients do not receive hallucinated function calls like
-            # README.md()/src()/tests() when the request only exposed
-            # list_directory().
+            # Never execute unavailable names such as README.md()/src()/tests().
+            # A native envelope is rejected control, not assistant prose; keep
+            # only its safe visible prefix. Ordinary text remains ordinary text.
             if bool(
                 getattr(parser_cls, "SUPPRESS_INVALID_NATIVE_MARKUP", False)
             ):
                 return result.content or "", None
+            if _has_tool_marker_or_partial_suffix(output_text):
+                return _visible_prefix_before_unparsed_tool_markup(output_text), None
             return output_text, None
         else:
             if strict_native_format:

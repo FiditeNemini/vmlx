@@ -1674,11 +1674,35 @@ def _private_reasoning_has_tool_syntax(text: str | None) -> bool:
     )
 
 
+def _private_reasoning_tools_allowed(
+    request: "ChatCompletionRequest | ResponsesRequest | None",
+) -> bool:
+    """Qwen calls belong after reasoning closes, including examples at the cap.
+
+    Resolve the configured native tool dialect, not the bundle's display name.
+    Other families retain their existing private-rail recovery contracts (for
+    example canonical DeepSeek DSML and Harmony commentary).
+    """
+    active_parser = _tool_call_parser
+    if not active_parser and request is not None:
+        try:
+            from .model_config_registry import get_model_config_registry
+
+            active_parser = get_model_config_registry().get_tool_parser(
+                _model_path or _model_name or getattr(request, "model", "")
+            )
+        except Exception:
+            pass
+    return active_parser not in {"qwen", "qwen3"}
+
+
 def _parse_private_reasoning_tool_calls(
     reasoning_text: str | None,
     request: "ChatCompletionRequest | ResponsesRequest",
 ) -> list["ToolCall"] | None:
     """Extract structured private-rail tool calls without exposing private prose."""
+    if not _private_reasoning_tools_allowed(request):
+        return None
     if not _private_reasoning_has_tool_syntax(reasoning_text):
         return None
     text = str(reasoning_text).strip()
@@ -20526,6 +20550,16 @@ async def create_chat_completion(
                 _think_in_prompt_ns = True
             else:
                 _think_in_prompt_ns = False
+            # Match the streaming seed when a wrapper hides its renderer but
+            # the loaded model contract explicitly opens the thinking rail.
+            if _stamped_think_template_requires_reasoning_seed(
+                _mc_nonstream,
+                _eff_thinking_ns,
+                template_completed_thinking=_template_completes_thinking(
+                    engine.tokenizer, _model_name or request.model
+                ),
+            ):
+                _think_in_prompt_ns = True
             if _hy3_prompt_starts_in_reasoning(
                 model_key=_model_path or _model_name or request.model,
                 enable_thinking=_eff_thinking_ns,
@@ -23904,6 +23938,16 @@ async def create_response(
                 _think_in_prompt_ns = True
             else:
                 _think_in_prompt_ns = False
+            # Match the streaming seed when a wrapper hides its renderer but
+            # the loaded model contract explicitly opens the thinking rail.
+            if _stamped_think_template_requires_reasoning_seed(
+                _mc_nonstream,
+                _eff_thinking_ns,
+                template_completed_thinking=_template_completes_thinking(
+                    engine.tokenizer, _model_name or request.model
+                ),
+            ):
+                _think_in_prompt_ns = True
             if _hy3_prompt_starts_in_reasoning(
                 model_key=_model_path or _model_name or request.model,
                 enable_thinking=_eff_thinking_ns,
@@ -25424,6 +25468,7 @@ async def stream_chat_completion(
     accumulated_reasoning = ""  # Track reasoning text for fallback
     accumulated_content = ""  # Track content-only text for tool call marker detection
     _early_stopped_tool_text: str | None = None
+    _allow_reasoning_tools = _private_reasoning_tools_allowed(request)
     _draining_tool_parser_stop = False
     streamed_content = (
         ""  # Track content actually yielded to client (for post-stream dedup)
@@ -25744,7 +25789,12 @@ async def stream_chat_completion(
                 and delta_text
                 and not output.finished
             ):
-                if _tc_stop_parser.stream_tool_calls_complete(accumulated_text):
+                _stop_candidate = accumulated_text
+                if request_parser and not _allow_reasoning_tools:
+                    _stop_candidate = (
+                        request_parser.extract_reasoning(accumulated_text)[1] or ""
+                    )
+                if _tc_stop_parser.stream_tool_calls_complete(_stop_candidate):
                     _tc_stop_complete_chunks += 1
                     _tc_stop_grace = int(
                         getattr(
@@ -25766,7 +25816,7 @@ async def stream_chat_completion(
                         # the client as content nor steers the post-stream
                         # parse to the wrong channel.
                         accumulated_text = _tc_stop_parser.stream_tool_call_stop_truncate(
-                            accumulated_text
+                            _stop_candidate
                         )
                         _early_stopped_tool_text = accumulated_text
                         if _tc_stop_parser.stream_tool_calls_complete(
@@ -25863,7 +25913,11 @@ async def stream_chat_completion(
                         tool_call_buffering = _has_tool_marker_or_partial_suffix(
                             accumulated_content
                         ) or _content_forms_raw_json_tool_call(accumulated_content)
-                    if not tool_call_buffering and delta_msg.reasoning:
+                    if (
+                        not tool_call_buffering
+                        and delta_msg.reasoning
+                        and _allow_reasoning_tools
+                    ):
                         _reasoning_tail = (
                             accumulated_reasoning[-30:]
                             if len(accumulated_reasoning) > 30
@@ -25908,8 +25962,10 @@ async def stream_chat_completion(
                         # the reasoning rail. Stop the reasoning prefix at the
                         # first native tool marker so the structured call itself
                         # never leaks as reasoning text.
-                        _safe_reasoning = _visible_prefix_before_unparsed_tool_markup(
-                            accumulated_reasoning
+                        _safe_reasoning = (
+                            _visible_prefix_before_unparsed_tool_markup(accumulated_reasoning)
+                            if _allow_reasoning_tools
+                            else accumulated_reasoning
                         )
                         if _safe_reasoning.startswith(streamed_reasoning_content):
                             _reasoning_delta = _safe_reasoning[
@@ -26015,7 +26071,7 @@ async def stream_chat_completion(
                     emit_reasoning = delta_msg.reasoning
                     emit_content = delta_msg.content
 
-                if tool_call_active and emit_reasoning:
+                if tool_call_active and emit_reasoning and _allow_reasoning_tools:
                     safe_reasoning_prefix = _tool_safe_stream_prefix(
                         accumulated_reasoning,
                         finished=output.finished,
@@ -26466,12 +26522,16 @@ async def stream_chat_completion(
         elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
         elif request_parser and accumulated_reasoning.strip():
-            # Tool call markers were in reasoning — try parsing reasoning text
-            parse_text = accumulated_reasoning.strip()
+            # Only native private-rail tool dialects may promote reasoning.
+            # Qwen examples remain reasoning, even when their JSON is valid.
+            parse_text = accumulated_reasoning.strip() if _allow_reasoning_tools else ""
         else:
             parse_text = _strip_think_for_tool_parse(accumulated_text)
         cleaned_text, tool_calls = _parse_tool_calls_with_parser(
-            parse_text or accumulated_text, request
+            (
+                parse_text if request_parser and not _allow_reasoning_tools
+                else (parse_text or accumulated_text)
+            ), request
         )
         if tool_calls:
             # Emit any remaining content text before the tool calls,
@@ -27849,6 +27909,7 @@ async def stream_responses_api(
     accumulated_content = ""  # Content-only text for tool call marker detection
     accumulated_reasoning = ""  # Reasoning text for fallback
     _early_stopped_tool_text: str | None = None
+    _allow_reasoning_tools = _private_reasoning_tools_allowed(request)
     _draining_tool_parser_stop = False
     streamed_reasoning_text = ""  # Tool-safe reasoning already sent to the client
     content_was_emitted = False
@@ -28196,7 +28257,12 @@ async def stream_responses_api(
                     and tool_call_buffering
                     and not output.finished
                 ):
-                    if _tc_stop_parser.stream_tool_calls_complete(full_text):
+                    _stop_candidate = full_text
+                    if request_parser and not _allow_reasoning_tools:
+                        _stop_candidate = (
+                            request_parser.extract_reasoning(full_text)[1] or ""
+                        )
+                    if _tc_stop_parser.stream_tool_calls_complete(_stop_candidate):
                         _tc_stop_complete_chunks += 1
                         _tc_stop_grace = int(
                             getattr(
@@ -28222,7 +28288,7 @@ async def stream_responses_api(
                             # to the wrong channel.
                             full_text = (
                                 _tc_stop_parser.stream_tool_call_stop_truncate(
-                                    full_text
+                                    _stop_candidate
                                 )
                             )
                             _early_stopped_tool_text = full_text
@@ -28315,7 +28381,11 @@ async def stream_responses_api(
                                 ):
                                     tool_call_buffering = True
                                     _buffer_trigger = "raw-json"
-                            if not tool_call_buffering and delta_msg.reasoning:
+                            if (
+                                not tool_call_buffering
+                                and delta_msg.reasoning
+                                and _allow_reasoning_tools
+                            ):
                                 _reasoning_tail = (
                                     accumulated_reasoning[-30:]
                                     if len(accumulated_reasoning) > 30
@@ -28377,6 +28447,8 @@ async def stream_responses_api(
                                     _visible_prefix_before_unparsed_tool_markup(
                                         accumulated_reasoning
                                     )
+                                    if _allow_reasoning_tools
+                                    else accumulated_reasoning
                                 )
                                 if _safe_reasoning.startswith(streamed_reasoning_text):
                                     _reasoning_delta = _safe_reasoning[
@@ -28431,7 +28503,7 @@ async def stream_responses_api(
                                 emit_reasoning = delta_msg.reasoning
                                 emit_content = delta_msg.content
 
-                            if tool_call_active and emit_reasoning:
+                            if tool_call_active and emit_reasoning and _allow_reasoning_tools:
                                 safe_reasoning_prefix = _tool_safe_stream_prefix(
                                     accumulated_reasoning,
                                     finished=output.finished,
@@ -28751,7 +28823,7 @@ async def stream_responses_api(
     # Preserve the raw accumulator for final tool parsing, but expose only the
     # genuine reasoning prefix through summary events and completed output.
     visible_reasoning_text = accumulated_reasoning
-    if tool_call_active and visible_reasoning_text:
+    if tool_call_active and visible_reasoning_text and _allow_reasoning_tools:
         visible_reasoning_text = _visible_prefix_before_unparsed_tool_markup(
             visible_reasoning_text
         )
@@ -28787,12 +28859,15 @@ async def stream_responses_api(
         elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
         elif request_parser and accumulated_reasoning.strip():
-            parse_text = accumulated_reasoning.strip()
+            parse_text = accumulated_reasoning.strip() if _allow_reasoning_tools else ""
             _tool_parse_from_reasoning_only = True
         else:
             parse_text = _strip_think_for_tool_parse(full_text)
         cleaned_text, tool_calls = _parse_tool_calls_with_parser(
-            parse_text or full_text, request
+            (
+                parse_text if request_parser and not _allow_reasoning_tools
+                else (parse_text or full_text)
+            ), request
         )
         if _tool_parse_from_reasoning_only and not tool_calls:
             # Reasoning-only text is only a candidate tool-call source. If it is

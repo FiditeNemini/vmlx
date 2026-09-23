@@ -3143,8 +3143,19 @@ def _load_jang_v2(
     except Exception as _lmoe_e:
         logger.debug(f"LatentMoE patch skipped: {_lmoe_e}")
 
+    # Shape inference can add fine-grained packed MoEGate entries even when
+    # the bundle only declares a uniform default. Upstream checks explicit
+    # overrides BEFORE to_quantized support, so these entries crash skeleton
+    # creation. Use the same in-memory compatibility rule as the non-JANG
+    # loader; the shard pass below still decodes and binds the packed routers.
+    # Do this AFTER shape inference and BEFORE skeleton construction.
+    from .tokenizer import _sanitize_nemotron_quantization_config_for_load
+
+    skeleton_config, skipped_gates = _sanitize_nemotron_quantization_config_for_load(config)
+    if skipped_gates:
+        logger.info("  Loading %d packed Nemotron routers as floating MoEGate weights", len(skipped_gates))
     model, config = _load_model_skeleton(
-        path, lazy=True, strict=False, model_config=config
+        path, lazy=True, strict=False, model_config=skeleton_config or config
     )
     _upgrade_switch_to_quantized(
         model,

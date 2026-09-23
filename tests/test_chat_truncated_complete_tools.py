@@ -71,3 +71,56 @@ async def test_chat_parsed_calls_preserve_budget_terminal(monkeypatch, finish, r
     terminals = [choice["finish_reason"] for choice in choices if choice.get("finish_reason")]
     assert terminals == ["length" if finish == "length" else "tool_calls"]
     assert not any(event.get("error") for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["stop", "length"])
+@pytest.mark.parametrize("required", [False, True])
+async def test_nonstream_chat_parsed_calls_preserve_budget_terminal(monkeypatch, finish, required):
+    import httpx
+
+    text = (
+        '<tool_call><function=record_payload>'
+        '<parameter=content>{"n":1}</parameter>'
+        '</function></tool_call>'
+    )
+
+    class Engine:
+        tokenizer = SimpleNamespace(has_thinking=False)
+        is_mllm = False
+        preserve_native_tool_format = True
+
+        async def chat(self, **kwargs):
+            return GenerationOutput(
+                text=text, tokens=[], prompt_tokens=10, completion_tokens=128,
+                finished=True, finish_reason=finish,
+            )
+
+    monkeypatch.setattr(server, "_engine", Engine())
+    monkeypatch.setattr(server, "_model_name", "tool-budget-test")
+    monkeypatch.setattr(server, "_served_model_name", "tool-budget-test")
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_reasoning_parser", None)
+    monkeypatch.setattr(server, "_tool_call_parser", "xml_function")
+    monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+    monkeypatch.setattr(server, "_api_key", None)
+    body = {
+        "model": "tool-budget-test", "stream": False, "max_tokens": 128,
+        "messages": [{"role": "user", "content": "Record the values."}],
+        "tools": [{"type": "function", "function": {
+            "name": "record_payload", "parameters": {
+                "type": "object", "properties": {"content": {"type": "string"}},
+            },
+        }}],
+        "tool_choice": "required" if required else "auto",
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
+        response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200
+    data = response.json()
+    choice = data["choices"][0]
+    calls = choice["message"]["tool_calls"]
+    assert len(calls) == 1
+    assert json.loads(calls[0]["function"]["arguments"]) == {"content": '{"n":1}'}
+    assert choice["finish_reason"] == ("length" if finish == "length" else "tool_calls")
+    assert data["usage"]["completion_tokens"] == 128

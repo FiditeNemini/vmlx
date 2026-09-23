@@ -20993,12 +20993,12 @@ async def create_chat_completion(
             },
         )
 
-    # Determine finish reason
-    finish_reason = (
-        "tool_calls"
-        if tool_calls
-        else (_ns_visible_answer_finish_reason or output.finish_reason)
-    )
+    # A complete parsed call does not erase an exhausted output budget. Match
+    # the streaming rail so nonstream clients can distinguish truncation from
+    # a normal tool handoff while still receiving the usable call.
+    finish_reason = _ns_visible_answer_finish_reason or output.finish_reason
+    if tool_calls and _normalize_responses_finish_reason(finish_reason) != "length":
+        finish_reason = "tool_calls"
     response_content = clean_output_text(cleaned_text) if cleaned_text else None
     if response_content:
         response_content = _finalize_visible_text_for_request(response_content, request, minimum_partial=4)

@@ -109,6 +109,25 @@ class XMLFunctionToolParser(ToolParser):
         return value
 
     @classmethod
+    def _schema_is_boolean_or_null(cls, prop: Any) -> bool:
+        """Only unambiguous boolean schemas may accept Python boolean spelling."""
+        if not isinstance(prop, dict):
+            return False
+        typ = prop.get("type")
+        if typ == "boolean":
+            return True
+        if isinstance(typ, (list, tuple)):
+            return "boolean" in typ and all(t in ("boolean", "null") for t in typ)
+        for key in ("anyOf", "oneOf"):
+            options = prop.get(key)
+            if isinstance(options, list) and options:
+                booleans = [cls._schema_is_boolean_or_null(o) for o in options]
+                if any(booleans) and all(is_bool or (isinstance(o, dict) and o.get("type") == "null")
+                                         for o, is_bool in zip(options, booleans)):
+                    return True
+        return False
+
+    @classmethod
     def _coerce_value(cls, value: str, prop_schema: Any = None) -> Any:
         # Strip only to TEST for a JSON shape (and the <value> wrapper); the
         # string result keeps its own bytes — indentation, trailing newlines,
@@ -127,6 +146,13 @@ class XMLFunctionToolParser(ToolParser):
         if wrapped:
             raw = wrapped.group(1)
             candidate = raw.strip()
+        # XML scalar bodies are not themselves JSON envelopes. Some native
+        # generations use unquoted Python True/False; leaving False as a
+        # nonempty string can invert a client's boolean branch. Decode only
+        # these exact spellings under an explicitly boolean schema. Quoted
+        # strings, ambiguous schemas and JSON-native calls stay untouched.
+        if candidate in ("True", "False") and cls._schema_is_boolean_or_null(prop_schema):
+            return candidate == "True"
         try:
             return json.loads(candidate)
         except (json.JSONDecodeError, ValueError):

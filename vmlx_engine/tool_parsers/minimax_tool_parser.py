@@ -279,13 +279,12 @@ class MiniMaxToolParser(ToolParser):
         )
         if params:
             arguments: dict[str, Any] = {}
+            properties = self._argument_properties(request, func_name)
             for param_name, param_value in params:
                 clean_name = _extract_name(param_name)
-                clean_value = param_value.strip()
-                for _close in ("</parameter>", "</field>"):
-                    if clean_value.endswith(_close):
-                        clean_value = clean_value[: -len(_close)].strip()
-                arguments[clean_name] = _convert_param_value(clean_value)
+                arguments[clean_name] = self._native_parameter_value(
+                    param_value, properties.get(clean_name)
+                )
             return {
                 "id": generate_tool_id(),
                 "name": func_name,
@@ -328,6 +327,19 @@ class MiniMaxToolParser(ToolParser):
         }
 
     @classmethod
+    def _native_parameter_value(cls, value: str, schema: Any) -> Any:
+        # MiniMax's native template emits strings verbatim and uses tojson
+        # only for non-strings. Unlike MiMo's dialect, it adds no framing
+        # newline inside the parameter tags. Decode before JSON parsing can
+        # turn a numeric filename, literal null/false, or JSON source into a
+        # different type; whitespace and quotes in declared strings are data.
+        if cls._schema_is_string_or_null(schema):
+            if cls._schema_allows_null(schema) and value.strip().lower() in cls._NULL_SPELLINGS:
+                return None
+            return value
+        return _convert_param_value(value)
+
+    @classmethod
     def _direct_schema_arguments(
         cls,
         func_name: str,
@@ -341,6 +353,7 @@ class MiniMaxToolParser(ToolParser):
         required = schema.get("required") or []
         if not isinstance(properties, dict) or not isinstance(required, list):
             return None
+        hints = cls._argument_properties(request, func_name)
 
         arguments: dict[str, Any] = {}
         cursor = 0
@@ -352,7 +365,7 @@ class MiniMaxToolParser(ToolParser):
             name = match.group(1)
             if name not in properties or name in arguments:
                 return None
-            arguments[name] = _convert_param_value(match.group(2))
+            arguments[name] = cls._native_parameter_value(match.group(2), hints.get(name))
             cursor = match.end()
 
         if not arguments or invoke_content[cursor:].strip():

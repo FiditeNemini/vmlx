@@ -1804,6 +1804,101 @@ class TestMiniMaxToolParser:
         assert result.tool_calls[0]["name"] == "get_weather"
 
 
+class TestMiniMaxNativeSchema:
+    """Native XML strings are literal payloads, not JSON scalar envelopes."""
+
+    @staticmethod
+    def request(schema, api="chat"):
+        function = {"name": "capture", "parameters": schema}
+        tool = ({"type": "function", "function": function} if api == "chat"
+                else {"type": "function", **function})
+        return {"tools": [tool]}
+
+    @staticmethod
+    def schema(prop):
+        return {"type": "object", "properties": {"label": prop}, "required": ["label"]}
+
+    @staticmethod
+    def text(value, dialect="parameter"):
+        body = (f"<label>{value}</label>" if dialect == "direct"
+                else f'<{dialect} name="label">{value}</{dialect}>')
+        return f'<minimax:tool_call><invoke name="capture">{body}</invoke></minimax:tool_call>'
+
+    @pytest.mark.parametrize("api", ["chat", "responses"])
+    @pytest.mark.parametrize("dialect", ["parameter", "field", "direct"])
+    @pytest.mark.parametrize("value", [
+        "123", "false", "null", "True", '"quoted"', '{"n":1}', "[1,2]",
+        "", "  indented\n\n", "\nvalue\n", "\\n\\t", "日本語",
+    ])
+    def test_declared_strings_keep_type_and_bytes(self, api, dialect, value):
+        parser = MiniMaxToolParser()
+        request = self.request(self.schema({"type": "string"}), api)
+        text = self.text(value, dialect)
+        result = parser.extract_tool_calls(text, request=request)
+        assert result.tools_called
+        assert json.loads(result.tool_calls[0]["arguments"]) == {"label": value}
+        streamed = parser.extract_tool_calls_streaming(
+            text[:-len("</minimax:tool_call>")], text, "</minimax:tool_call>",
+            request=request,
+        )
+        assert json.loads(streamed["tool_calls"][0]["function"]["arguments"]) == {"label": value}
+
+    @pytest.mark.parametrize("api", ["chat", "responses"])
+    @pytest.mark.parametrize("dialect", ["parameter", "field", "direct"])
+    @pytest.mark.parametrize("prop", [
+        {"$ref": "#/$defs/text"},
+        {"allOf": [{"$ref": "#/$defs/text"}, {"minLength": 1}]},
+        {"anyOf": [{"$ref": "#/$defs/text"}, {"type": "null"}]},
+    ])
+    def test_resolved_schema_controls_native_value(self, api, dialect, prop):
+        schema = {**self.schema(prop), "$defs": {"text": {"type": "string"}}}
+        result = MiniMaxToolParser().extract_tool_calls(
+            self.text("123", dialect), request=self.request(schema, api),
+        )
+        assert json.loads(result.tool_calls[0]["arguments"]) == {"label": "123"}
+
+    @pytest.mark.parametrize("value,prop,expected", [
+        ("123", {"type": "integer"}, 123),
+        ("false", {"type": "boolean"}, False),
+        ("null", {"type": ["string", "null"]}, None),
+        ('"null"', {"type": ["string", "null"]}, '"null"'),
+        ('{"x":[false,null]}', {"type": "object"}, {"x": [False, None]}),
+        ("123", {"anyOf": [{"type": "string"}, {"type": "integer"}]}, 123),
+        ("123", {}, 123),
+    ])
+    def test_other_declared_types_retain_native_json(self, value, prop, expected):
+        result = MiniMaxToolParser().extract_tool_calls(
+            self.text(value), request=self.request(self.schema(prop)),
+        )
+        actual = json.loads(result.tool_calls[0]["arguments"])["label"]
+        assert actual == expected
+        assert type(actual) is type(expected)
+
+    def test_json_native_invoke_is_not_coerced_to_schema(self):
+        text = '<minimax:tool_call><invoke name="capture">{"label":123}</invoke></minimax:tool_call>'
+        result = MiniMaxToolParser().extract_tool_calls(
+            text, request=self.request(self.schema({"type": "string"})),
+        )
+        assert json.loads(result.tool_calls[0]["arguments"]) == {"label": 123}
+
+    @pytest.mark.parametrize("ending", ["", "</minimax:tool_call>"])
+    def test_existing_truncated_invoke_recovery_keeps_declared_string(self, ending):
+        text = '<minimax:tool_call><invoke name="capture"><parameter name="label">123</parameter>' + ending
+        result = MiniMaxToolParser().extract_tool_calls(
+            text, request=self.request(self.schema({"type": "string"})),
+        )
+        assert json.loads(result.tool_calls[0]["arguments"]) == {"label": "123"}
+
+    def test_each_call_uses_its_own_tool_schema(self):
+        request = self.request(self.schema({"type": "string"}))
+        request["tools"].append({"type": "function", "function": {
+            "name": "count", "parameters": self.schema({"type": "integer"}),
+        }})
+        text = self.text("123") + self.text("123").replace('name="capture"', 'name="count"')
+        result = MiniMaxToolParser().extract_tool_calls(text, request=request)
+        assert [json.loads(x["arguments"])["label"] for x in result.tool_calls] == ["123", 123]
+
+
 class TestEdgeCases:
     """Test edge cases and error handling."""
 

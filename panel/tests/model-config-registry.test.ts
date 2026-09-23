@@ -2624,7 +2624,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'nemotron',
         reasoningParser: 'deepseek_r1',
-        isMultimodal: false,
+        // Verified Omni sidecar plus vision/audio encoder and projector payloads.
+        isMultimodal: true,
       },
       {
         name: 'nemotron_omni_nano_jangtq4',
@@ -2643,7 +2644,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'nemotron',
         reasoningParser: 'deepseek_r1',
-        isMultimodal: false,
+        // Verified Omni sidecar plus vision/audio encoder and projector payloads.
+        isMultimodal: true,
       },
     ]
 

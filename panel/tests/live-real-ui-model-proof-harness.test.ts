@@ -26,6 +26,8 @@ import {
   captureRequiredScreenshot,
   captureBundleGenerationContract,
   createChatThroughVisibleControl,
+  resolveDevElectronExecutable,
+  visiblePagedCachePolicy,
   collectOllamaStream,
   deriveProvenSurfaces,
   correlateTerminalResponseToCacheExecution,
@@ -6824,5 +6826,23 @@ describe("tool loop: per-turn protocol resolution", () => {
     expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
       /referenced the second-turn probe prematurely/,
     );
+  });
+});
+
+
+describe("dev Electron launch identity", () => {
+  it("records the same explicit binary passed to electron-vite", () => {
+    expect(resolveDevElectronExecutable("/panel", { ELECTRON_EXEC_PATH: "/private/Electron" })).toBe("/private/Electron");
+    expect(resolveDevElectronExecutable("/panel", {})).toBe("/panel/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
+  });
+});
+
+describe("visible SSD-only cache policy", () => {
+  it("requires visible policy evidence when the RAM checkbox is omitted", () => {
+    expect(visiblePagedCachePolicy({present: false, checked: false, disabled: false, policyVisible: true})).toEqual({established: true, usePagedCache: false, lockedOff: true});
+    expect(visiblePagedCachePolicy({present: false, checked: false, disabled: false, policyVisible: false}).established).toBe(false);
+  });
+  it("does not let policy prose override a conflicting real RAM control", () => {
+    expect(visiblePagedCachePolicy({present: true, checked: true, disabled: false, policyVisible: true})).toEqual({established: true, usePagedCache: true, lockedOff: false});
   });
 });

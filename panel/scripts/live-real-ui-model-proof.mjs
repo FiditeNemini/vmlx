@@ -2501,6 +2501,23 @@ export function viteRendererSourceSeen(resources) {
   )
 }
 
+export function resolveDevElectronExecutable(panelRoot, env = process.env) {
+  return env.ELECTRON_EXEC_PATH
+    ? path.resolve(panelRoot, env.ELECTRON_EXEC_PATH)
+    : path.join(panelRoot, 'node_modules', 'electron', 'dist',
+      'Electron.app', 'Contents', 'MacOS', 'Electron')
+}
+
+// The SSD-only UI deliberately omits the RAM checkbox. Absence by itself is
+// not proof of Off: require its visible locked-Off policy or a real checkbox.
+export function visiblePagedCachePolicy({ present, checked, disabled, policyVisible }) {
+  return {
+    established: present || policyVisible,
+    usePagedCache: present ? checked : false,
+    lockedOff: present ? disabled && !checked : policyVisible,
+  }
+}
+
 function captureUiRuntimeProvenance(
   app,
   rendererResources,
@@ -2514,16 +2531,7 @@ function captureUiRuntimeProvenance(
   const mode = app?.uiLaunchMode || ''
   const executable = mode === 'installed-app'
     ? path.join(app.appPath, 'Contents', 'MacOS', 'vMLX')
-    : path.join(
-      panelDir,
-      'node_modules',
-      'electron',
-      'dist',
-      'Electron.app',
-      'Contents',
-      'MacOS',
-      'Electron',
-    )
+    : (app.electronExecutable || resolveDevElectronExecutable(panelDir))
   const asarPath = mode === 'installed-app'
     ? path.join(app.appPath, 'Contents', 'Resources', 'app.asar')
     : ''
@@ -3323,6 +3331,7 @@ function startUiApp(userDataDir, debugPort, gatewayPort) {
     proc,
     logs,
     uiLaunchMode: 'electron-dev',
+    electronExecutable: resolveDevElectronExecutable(panelDir, proofEnv),
     command: ['npm', ...args],
     appPath: '',
     gatewayPort,
@@ -11862,9 +11871,24 @@ async function main() {
           const pagedInput = inputFor('In-Memory Paged Cache (RAM)');
           const prefixInput = inputFor('Enable Prefix Cache')
             || inputFor('DSV4 Native Composite Prefix Cache');
+          const pagedPolicy = (${visiblePagedCachePolicy.toString()})({
+            present: !!pagedInput,
+            checked: !!pagedInput?.checked,
+            disabled: !!pagedInput?.disabled,
+            policyVisible: [...drawer.querySelectorAll('*')].some((element) =>
+              isVisible(element)
+              && element.children.length === 0
+              && (element.textContent || '').includes(
+                'SSD-only cache policy: In-Memory Paged Cache and Media Preprocess RAM Cache are locked OFF for every model.'
+              )
+            ),
+          });
           const initialCacheControls = {
+            pagedControlPresent: !!pagedInput,
+            pagedPolicyEstablished: pagedPolicy.established,
+            pagedPolicyLockedOff: pagedPolicy.lockedOff,
             enablePrefixCache: !!prefixInput?.checked,
-            usePagedCache: !!pagedInput?.checked,
+            usePagedCache: pagedPolicy.usePagedCache,
             enableDiskCache: !!promptDiskInput?.checked,
             enableBlockDiskCache: !!blockDiskInput?.checked,
             usePagedCacheDisabled: !!pagedInput?.disabled,
@@ -11902,8 +11926,8 @@ async function main() {
                 && initialCacheControls.diskCachePresent === true)
             )
             && !!prefixInput
-            && !!pagedInput
-            && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
+            && pagedPolicy.established
+            && (!expectPagedCacheLocked || pagedPolicy.lockedOff)
             && cacheExpectationMatches;
           const close = [...(drawer?.querySelectorAll('button') || [])]
             .find((button) => button.getAttribute('aria-label') === 'Close');

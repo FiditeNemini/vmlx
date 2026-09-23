@@ -90,6 +90,7 @@ import {
   stripStreamingToolTags,
   toolMarkupHoldbackLength,
 } from "../../shared/toolMarkupSanitizer";
+import { appendVisibleToolContent } from "../../shared/toolContent";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay";
 import {
@@ -4344,8 +4345,7 @@ export function registerChatHandlers(
             // Preserve content before tool execution so abort can recover it
             flushToolTagHoldback();
             if (fullContent.trim()) {
-              allGeneratedContent +=
-                (allGeneratedContent ? "\n\n" : "") + fullContent.trim();
+              allGeneratedContent = appendVisibleToolContent(allGeneratedContent, fullContent);
             }
             // Flush accumulated content to renderer before blocking on tool execution
             try {
@@ -4489,8 +4489,7 @@ export function registerChatHandlers(
               `[CHAT] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES}: model stopped with ${iterationTokenCount} tokens (iteration), content=${hasContent}`,
             );
             if (hasContent) {
-              allGeneratedContent +=
-                (allGeneratedContent ? "\n\n" : "") + fullContent.trim();
+              allGeneratedContent = appendVisibleToolContent(allGeneratedContent, fullContent);
               if (useResponsesApi) {
                 requestMessages.push({
                   type: "output_text",

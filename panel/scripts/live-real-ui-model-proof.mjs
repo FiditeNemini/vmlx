@@ -9965,10 +9965,12 @@ async function main() {
             const preDrawer = document.querySelector(
               '[data-vmlx-surface="server-settings"]'
             );
-            const nativeSectionButton = [...(preDrawer?.querySelectorAll('button') || [])]
-              .find((button) => (
-                (button.innerText || '').replace(/\\s+/g, ' ').trim() === 'Native MTP'
-              ));
+            const nativeSectionButton = await waitFor(
+              () => preDrawer?.querySelector(
+                'button[data-vmlx-control="section-specDecode"]'
+              ) || null,
+              'visible Speculative Decoding section before Start',
+            );
             const labelFor = (text) => [...(preDrawer?.querySelectorAll('label') || [])]
               .find((label) => (
                 (label.innerText || '').replace(/\\s+/g, ' ').trim().startsWith(text)

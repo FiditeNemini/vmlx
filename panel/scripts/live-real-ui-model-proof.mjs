@@ -678,6 +678,12 @@ const imageExpectRegex = process.env.VMLINUX_REAL_UI_IMAGE_EXPECT_REGEX
 const videoDataUrl = process.env.VMLINUX_REAL_UI_VIDEO_DATA_URL
   || process.env.VMLX_REAL_UI_VIDEO_DATA_URL
   || ''
+// A fixture-specific semantic check needs a matching question. Preserve the
+// exact prompt in the proof rather than scoring a generic description against
+// unstated requirements (for example, each labeled object's direction).
+const videoPrompt = process.env.VMLINUX_REAL_UI_VIDEO_PROMPT
+  || process.env.VMLX_REAL_UI_VIDEO_PROMPT
+  || 'Describe the attached video briefly in English.'
 // Audio attachments are a real product capability — the renderer carries
 // kind: 'audio' through InputBox/ChatInterface/chat-utils/MessageBubble — but
 // this harness had NO audio path at all, so audio through the Electron UI had
@@ -11310,7 +11316,7 @@ async function main() {
                 message: 'VMLINUX_REAL_UI_CHECK_VIDEO requires VMLINUX_REAL_UI_VIDEO_DATA_URL',
               });
             } else {
-              await sendMessageWithCapture(5, 'video_send_message', 'Describe the attached video briefly in English.', [
+              await sendMessageWithCapture(5, 'video_send_message', ${JSON.stringify(videoPrompt)}, [
                 {
                   name: 'real-ui-proof-video.mp4',
                   type: 'video/mp4',
@@ -11772,6 +11778,7 @@ async function main() {
           checkVideo,
           expectPagedCacheLocked,
           imageExpectRegex,
+          videoPrompt,
           videoExpectRegex,
           cacheExpectRegex,
           pairedApiHoldSeconds,
@@ -12808,6 +12815,7 @@ async function main() {
         expectPagedCacheLocked,
         expectDsv4PoolQuant,
         imageExpectRegex,
+        videoPrompt,
         videoExpectRegex,
         cacheExpectRegex,
         pairedApiHoldSeconds,

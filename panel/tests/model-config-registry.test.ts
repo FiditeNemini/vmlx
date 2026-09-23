@@ -2551,7 +2551,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'qwen',
         reasoningParser: 'qwen3',
-        isMultimodal: false,
+        // Actual bundle declares vision/video and indexes 333 vision tensors.
+        isMultimodal: true,
       },
       {
         name: 'qwen27_jang4m_mtp',

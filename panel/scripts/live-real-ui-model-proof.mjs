@@ -5368,8 +5368,8 @@ export function validateServerCacheEvidence(result) {
   return failures
 }
 
-// The Native MTP control must render exactly when the ENGINE says the bundle
-// carries MTP weights — not when the bundle NAME happens to say so. A control
+// The Native MTP control follows engine capability, not the bundle name or
+// weight presence alone. A control
 // on a model that cannot use it is the dead-toggle class of bug; a missing
 // control on a model that can is an unreachable feature. Both arms were
 // observed live before this was pinned:
@@ -5377,11 +5377,11 @@ export function validateServerCacheEvidence(result) {
 //     -> label visible, selector present, options [auto, deterministic, off]
 //   Nemotron-Omni-Nano-JANGTQ-CRACK  index_has_mtp_tensors=false, 0 tensors
 //     -> no label, no selector, no mention anywhere in the drawer
-// Deliberately NOT asserted: the blocked-fallback direction. A bundle whose
-// weights are present but whose compatibility gate fails has never been
-// observed here, and pinning an unobserved expectation is what made two
-// earlier rows unpassable. It is recorded instead, so the first real
-// occurrence shows up in the artifact rather than as a mystery failure.
+// MiMo-V2.6 also carries 72 MTP tensors but explicitly reports the runtime
+// unwired. Its absent control is correct. Require the complete engine verdict;
+// a missing capability field or contradictory active runtime is not an excuse
+// to hide a supported control. Compatibility-blocked supported families retain
+// the existing control and fallback checks.
 export function validateNativeMtpSurfaceParity(result) {
   const failures = []
   if (result?.requestedServerCacheControls !== true) return failures
@@ -5402,7 +5402,15 @@ export function validateNativeMtpSurfaceParity(result) {
     failures.push('/health mtp.index_has_mtp_tensors is not a boolean, so UI/engine MTP parity is unverifiable')
     return failures
   }
-  if (mtp.index_has_mtp_tensors === true) {
+  const runtimeUnwired = mtp.status === 'weights_present_runtime_unwired'
+    && mtp.runtime_supported === false
+    && mtp.runtime_available === false
+    && mtp.runtime_active === false
+  if (runtimeUnwired && mtp.index_has_mtp_tensors === true) {
+    if (surface.labelVisible === true || surface.modeSelectPresent === true) {
+      failures.push('engine reports native MTP runtime unwired but the UI rendered a Native MTP control')
+    }
+  } else if (mtp.index_has_mtp_tensors === true) {
     if (surface.labelVisible !== true) {
       failures.push('engine reports MTP weights in the bundle but the UI rendered no Native MTP control')
     }

@@ -6480,6 +6480,33 @@ describe("native MTP surface / engine parity", () => {
     expect(validateNativeMtpSurfaceParity(mtpBundleResult())).toEqual([]);
   });
 
+  it("accepts hidden controls for witnessed weights-present runtime-unwired capability", () => {
+    const result: any = nonMtpBundleResult();
+    Object.assign(result.server.health.mtp, {
+      index_has_mtp_tensors: true, mtp_tensor_count: 72,
+      runtime_supported: false, runtime_available: false,
+      status: "weights_present_runtime_unwired",
+    });
+    expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
+    result.serverCacheControls.nativeMtpControl.labelVisible = true;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/runtime unwired/);
+  });
+
+  it.each(["runtime_supported", "runtime_available", "runtime_active"])(
+    "does not hide supported controls when the unwired %s verdict is contradictory or absent",
+    (field) => {
+      for (const value of [true, undefined]) {
+        const result: any = nonMtpBundleResult();
+        Object.assign(result.server.health.mtp, {
+          index_has_mtp_tensors: true, runtime_supported: false,
+          runtime_available: false, runtime_active: false,
+          status: "weights_present_runtime_unwired", [field]: value,
+        });
+        expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/rendered no Native MTP control/);
+      }
+    },
+  );
+
   it("accepts a visibly selected and persisted fixed D2 runtime", () => {
     const result: any = mtpBundleResult();
     result.requestContract = {

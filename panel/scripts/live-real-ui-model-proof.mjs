@@ -3810,6 +3810,19 @@ export const releasePrimarySharedPrefix = [
   'Keep the response coherent and finite.',
 ].join(' ')
 
+// React ignores a range input event whose native value never changed. Exercise
+// an actual slider transition before selecting an explicit value equal to its
+// displayed model default, so the request is a real user override.
+export function explicitRangeInputSequence(current, requested, minimum, maximum) {
+  const values = [current, requested, minimum, maximum].map(Number)
+  if (values.some(value => !Number.isFinite(value))) throw new Error('Non-finite range input')
+  const [now, target, min, max] = values
+  if (min > max || target < min || target > max) throw new Error('Range input outside visible bounds')
+  if (now !== target) return [target]
+  if (min === max) throw new Error('Cannot change a fixed range input')
+  return [target === min ? max : min, target]
+}
+
 export function validateRenderedDomEvidence(result) {
   const failures = []
   const expectedTurns = expectedUiTurnCount(result)
@@ -3909,6 +3922,16 @@ export function validateRenderedDomEvidence(result) {
     result?.requestContract?.promptTwo,
     result?.requestContract?.promptThree,
   ].slice(0, expectedTurns).map(String)
+  for (let index = 0; index < configuredPrompts.length; index++) {
+    const prompt = configuredPrompts[index]
+    const start = prompt.lastIndexOf('\nThird UI turn:')
+    if (prompt.includes('Return this exact three-line rendering receipt') && start >= 0) {
+      const expected = prompt.slice(start + 1).trim()
+      if (persistedById.get(String(assistantIds[index] || ''))?.trim() !== expected) {
+        failures.push('final assistant answer did not preserve the requested verbatim receipt')
+      }
+    }
+  }
   const renderingPromptIndex = configuredPrompts.findIndex(
     (prompt) => prompt.includes('$43') || prompt.includes('\\times'),
   )
@@ -10409,6 +10432,7 @@ async function main() {
             HTMLSelectElement.prototype,
             'value',
           )?.set;
+          const explicitRangeInputSequence = ${explicitRangeInputSequence.toString()};
           const setInput = async (input, value, controlLabel) => {
             if (!(input instanceof HTMLInputElement) || !valueSetter) {
               const visibleLabels = [...(chatSettingsDrawer?.querySelectorAll('label, div span') || [])]
@@ -10421,10 +10445,15 @@ async function main() {
                 + ' | visible labels: ' + JSON.stringify(visibleLabels),
               );
             }
-            valueSetter.call(input, String(value));
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            await new Promise((resolve) => setTimeout(resolve, 50));
+            const sequence = input.type === 'range'
+              ? explicitRangeInputSequence(input.value, value, input.min || 0, input.max || 100)
+              : [value];
+            for (const selected of sequence) {
+              valueSetter.call(input, String(selected));
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
           };
           const rangeValueFor = (label) => {
             const input = [...(chatSettingsDrawer?.querySelectorAll('input[type="range"]') || [])].find((candidate) => {

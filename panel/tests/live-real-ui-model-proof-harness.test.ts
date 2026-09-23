@@ -34,6 +34,7 @@ import {
   correlateTerminalResponseToCacheExecution,
   cssEscapeIdentifier,
   expectedUiToolCallCount,
+  explicitRangeInputSequence,
   expectedRawMatrixRoutes,
   extractPersistedReasoningMathLinkage,
   isCacheRequestCorrelationVerified,
@@ -6979,5 +6980,27 @@ describe("completed reasoning rail expansion", () => {
       readRows: () => [{ expectsReasoning: false, rails: [] }],
     });
     expect(result.clicks).toBe(0);
+  });
+});
+
+
+describe("explicit sampler controls and verbatim receipts", () => {
+  it("produces a real transition when explicitly selecting an already displayed default", () => {
+    expect(explicitRangeInputSequence(0, 0, 0, 100)).toEqual([100, 0]);
+    expect(explicitRangeInputSequence(1, 1, 0, 1)).toEqual([0, 1]);
+    expect(explicitRangeInputSequence(0.9, 0, 0, 2)).toEqual([0]);
+    expect(() => explicitRangeInputSequence(0, -1, 0, 100)).toThrow();
+    expect(() => explicitRangeInputSequence(1, 1, 1, 1)).toThrow();
+    expect(() => explicitRangeInputSequence(0, NaN, 0, 100)).toThrow();
+  });
+  it("rejects a corrupted copy-only receipt even when currency and math still render", () => {
+    const result = goodResult();
+    const receipt = "Third UI turn: REAL_UI_LIVE_TOOL_ONE REAL_UI_LIVE_TOOL_TWO\nCurrency: $43\nMath: \\(2 + 2 = 4\\)";
+    result.requestContract.promptThree = "Return this exact three-line rendering receipt and nothing else.\n" + receipt;
+    const record = result.assistantRecords.find(row => row.id === result.assistantMessageIds[2]);
+    record.content = receipt.replace("TOOL_ONE", "TO<NL>ONE");
+    expect(validateRenderedDomEvidence(result)).toContain("final assistant answer did not preserve the requested verbatim receipt");
+    record.content = receipt;
+    expect(validateRenderedDomEvidence(result)).not.toContain("final assistant answer did not preserve the requested verbatim receipt");
   });
 });

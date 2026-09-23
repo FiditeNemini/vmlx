@@ -2073,9 +2073,11 @@
     "loadProgress": {
       "initializing": "Initializing...",
       "scanningModelFiles": "Scanning model files...",
-      "bundleRepairNotice": "This bundle needs an alignment repair before loading. This is a one-time step for the current files; unchanged files will not need it again. Please wait while each shard is copied, validated and atomically replaced.",
+      "bundleRepairNotice": "This bundle needs an alignment repair before loading. This is a one-time step for the current files; unchanged files will not need it again. Please wait while each affected shard is validated and replaced in place. One temporary shard is needed during replacement; no second model copy is created.",
       "bundleRepairDetected": "Misaligned tensors detected: {shard}",
-      "bundleRepairCopying": "Repairing {shard}: copying{detail}",
+      "bundleRepairCopying": "Repairing {shard} in place{detail}. Please wait.",
+      "bundleRepairHashVerified": "Verified downloaded bytes for {shard}; preparing repair. Please wait.",
+      "bundleRepairMetadataUpdated": "Updated local download metadata for repaired {shard}",
       "bundleRepairValidated": "Repairing {shard}: tensor payloads validated",
       "bundleRepairCommitted": "Repairing {shard}: validated replacement committed",
       "bundleRepairFinished": "Repaired {shard}; continuing bundle check",

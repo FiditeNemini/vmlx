@@ -10,6 +10,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import struct
@@ -19,6 +20,94 @@ import time
 
 CHUNK_BYTES = 4 * 1024 * 1024
 JOURNAL = ".vmlx-alignment-transaction.json"
+
+
+def _local_cache_path(root: Path, path: Path) -> bool:
+    """Never follow cache-directory links while inspecting or invalidating metadata."""
+    return path.is_relative_to(root) and not any(
+        part.is_symlink() for part in (path, *path.parents) if part != root and part.is_relative_to(root)
+    )
+
+
+def _hf_remote_tree(root: Path, metadata: Path, value: object, shard: Path) -> bool:
+    """Recognize HF's immutable REMOTE tree, not a digest of the local bundle.
+
+    Keep it unchanged: rewriting it with local hashes would falsely describe
+    the published commit. Unknown schemas/signatures still fail closed.
+    """
+    from .model_bundle_integrity import BundleIntegrityError
+    if (metadata.parent != root / ".cache/huggingface/trees"
+        or not re.fullmatch(r"[0-9a-f]{40}\.json", metadata.name)
+        or not _local_cache_path(root, metadata)
+        or not isinstance(value, dict) or set(value) != {"format_version", "files"}
+        or type(value["format_version"]) is not int or value["format_version"] != 1
+        or not isinstance(value["files"], dict)):
+        return False
+    for name, entry in value["files"].items():
+        if (not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts
+            or not isinstance(entry, dict) or not {"size", "blob_id"} <= entry.keys()
+            or entry.keys() - {"size", "blob_id", "lfs_sha256", "lfs_size", "xet_hash"}
+            or type(entry["size"]) is not int or entry["size"] < 0
+            or not isinstance(entry["blob_id"], str) or not re.fullmatch(r"[0-9a-f]{40}", entry["blob_id"])):
+            return False
+        if "lfs_sha256" in entry and (
+            not isinstance(entry["lfs_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", entry["lfs_sha256"])
+            or type(entry.get("lfs_size")) is not int or entry["lfs_size"] != entry["size"]
+        ):
+            return False
+        if "lfs_size" in entry and "lfs_sha256" not in entry:
+            return False
+        if "xet_hash" in entry and (not isinstance(entry["xet_hash"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["xet_hash"])):
+            return False
+    entry = value["files"].get(shard.relative_to(root).as_posix())
+    if not entry or not entry.get("lfs_sha256"):
+        return False
+    if entry["size"] != shard.stat().st_size or entry["lfs_sha256"] != _file_digest(shard):
+        raise BundleIntegrityError(f"{shard}: HF source digest mismatch; alignment repair cannot bless changed weights")
+    return True
+
+
+def _download_metadata(root: Path, shard: Path) -> list[dict]:
+    """Invalidate only this shard's local download receipt after replacement."""
+    from .model_bundle_integrity import BundleIntegrityError
+    target = root / ".cache/huggingface/download" / (shard.relative_to(root).as_posix() + ".metadata")
+    if not _local_cache_path(root, target):
+        raise BundleIntegrityError(f"{target}: download metadata must not use symlinks")
+    if not target.exists():
+        return []
+    if not target.is_file() or target.stat().st_size > 4096:
+        raise BundleIntegrityError(f"{target}: unsupported download metadata")
+    raw = target.read_text()
+    lines = raw.splitlines()
+    try:
+        valid = (len(lines) == 3 and re.fullmatch(r"[0-9a-f]{40}", lines[0])
+                 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", lines[1])
+                 and 0 <= float(lines[2]) < float("inf"))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise BundleIntegrityError(f"{target}: unsupported download metadata format")
+    return [{"path": target.relative_to(root).as_posix(), "sha256": _file_digest(target)}]
+
+
+def _check_download_invalidations(root: Path, shard: Path, records: list[dict]) -> list[Path]:
+    from .model_bundle_integrity import BundleIntegrityError
+    expected = root / ".cache/huggingface/download" / (shard.relative_to(root).as_posix() + ".metadata")
+    if not isinstance(records, list) or len(records) > 1:
+        raise BundleIntegrityError("unsupported alignment download metadata transaction")
+    targets = []
+    for record in records:
+        if (not isinstance(record, dict) or set(record) != {"path", "sha256"}
+            or record["path"] != expected.relative_to(root).as_posix()
+            or not isinstance(record["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+            or not _local_cache_path(root, expected)):
+            raise BundleIntegrityError("unsafe alignment download metadata transaction")
+        if expected.exists():
+            if not expected.is_file() or expected.stat().st_size > 4096 or _file_digest(expected) != record["sha256"]:
+                raise BundleIntegrityError("download metadata changed during repair; recovery refused")
+            targets.append(expected)
+    return targets
 
 
 def _file_digest(path: Path) -> str:
@@ -61,6 +150,7 @@ def recover_alignment_transaction(root: Path) -> None:
         raise BundleIntegrityError("invalid alignment recovery temporary name")
     digest = _file_digest(shard)
     if digest == state["new_sha256"]:
+        invalidations = _check_download_invalidations(root, shard, state.get("download_metadata", []))
         stamp = state.get("stamp")
         if stamp:
             target = local(stamp["path"])
@@ -81,6 +171,10 @@ def recover_alignment_transaction(root: Path) -> None:
             if current != stamp["after"]:
                 _atomic_json_write(target, stamp["after"])
                 _sync_directory(target.parent)
+        for target in invalidations:
+            target.unlink()
+            _sync_directory(target.parent)
+            _event("DOWNLOAD_METADATA_INVALIDATED", shard, metadata=target.relative_to(root).as_posix())
         _sync_directory(shard.parent)
         _event("TRANSACTION_COMMITTED", shard, sha256=digest)
     elif digest == state["old_sha256"]:
@@ -124,7 +218,9 @@ def _tensor_digests(handle, header: dict) -> dict[str, str]:
 def _digest_bound_stamp(root: Path, path: Path) -> dict | None:
     """A container rewrite cannot silently invalidate a signed/file-hash contract.
 
-    Only the explicit local proposal-head stamp has a supported migration.
+    The explicit local proposal-head stamp has a supported migration. HF remote
+    tree listings retain their original published hashes; they are provenance,
+    not a contract that the locally repaired container has identical bytes.
     Unknown signatures/hash manifests remain fail-closed.
     """
     from .model_bundle_integrity import BundleIntegrityError
@@ -156,6 +252,10 @@ def _digest_bound_stamp(root: Path, path: Path) -> dict | None:
             word in raw.lower() for word in ("sha256", "sha512", '"checksum"', '"signature"')
         ):
             value = json.loads(raw)
+            if _hf_remote_tree(root, metadata, value, path):
+                _event("REMOTE_HASH_VERIFIED", path, metadata=metadata.relative_to(root).as_posix(),
+                       remote_metadata_preserved=True)
+                continue
             artifact = value.get("draft_artifact", {})
             if (metadata == root / "vmlx_mtp_proposal_head.json"
                 and not metadata.is_symlink()
@@ -203,6 +303,7 @@ def repair_shard_alignment(root: Path, path: Path, header: dict) -> dict:
         if unknown:
             raise BundleIntegrityError(f"{path}: unknown alignment contract for dtypes {sorted(unknown)}")
         stamp = _digest_bound_stamp(root, path)
+        download_metadata = _download_metadata(root, path)
         # Largest natural alignment first makes a contiguous payload aligned
         # without inserting forbidden holes between tensor ranges.
         keys = sorted(header["tensors"], key=lambda k: (
@@ -233,6 +334,7 @@ def repair_shard_alignment(root: Path, path: Path, header: dict) -> dict:
             "shard": path.relative_to(root).as_posix(),
             "temporary": temporary.relative_to(root).as_posix(),
             "old_sha256": _file_digest(path), "new_sha256": None, "stamp": None,
+            "download_metadata": download_metadata,
         }
         try:
             _atomic_json_write(root / JOURNAL, transaction)
@@ -287,6 +389,7 @@ def repair_shard_alignment(root: Path, path: Path, header: dict) -> dict:
             stamp["after"] = copy.deepcopy(stamp["before"])
             stamp["after"]["draft_artifact"]["sha256"] = new_digest
         transaction.update(new_sha256=new_digest, stamp=stamp)
+        _check_download_invalidations(root, path, download_metadata)
         if _identity(path) != before:
             raise BundleIntegrityError(f"{path}: original changed during validation")
         _atomic_json_write(root / JOURNAL, transaction)
@@ -302,6 +405,7 @@ def repair_shard_alignment(root: Path, path: Path, header: dict) -> dict:
             os.close(directory_fd)
         recover_alignment_transaction(root)
         _event("REPAIRED_ON_DISK", path, tensors=len(keys), bytes=needed,
+               old_sha256=transaction["old_sha256"], new_sha256=new_digest,
                elapsed_seconds=round(time.monotonic() - started, 3))
         candidate["relative_path"] = path.name
         return candidate

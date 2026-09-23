@@ -8,7 +8,9 @@ export interface BundleRepairMessage {
 
 const stages: Record<string, [string, string]> = {
   MISALIGNED_DETECTED: ['bundleRepairDetected', 'Misaligned tensors detected: {shard}'],
-  COPYING: ['bundleRepairCopying', 'Repairing {shard}: copying{detail}'],
+  COPYING: ['bundleRepairCopying', 'Repairing {shard} in place{detail}. Please wait.'],
+  REMOTE_HASH_VERIFIED: ['bundleRepairHashVerified', 'Verified downloaded bytes for {shard}; preparing repair. Please wait.'],
+  DOWNLOAD_METADATA_INVALIDATED: ['bundleRepairMetadataUpdated', 'Updated local download metadata for repaired {shard}'],
   VALIDATED: ['bundleRepairValidated', 'Repairing {shard}: tensor payloads validated'],
   TRANSACTION_COMMITTED: ['bundleRepairCommitted', 'Repairing {shard}: validated replacement committed'],
   REPAIRED_ON_DISK: ['bundleRepairFinished', 'Repaired {shard}; continuing bundle check'],
@@ -38,7 +40,7 @@ export function createBundleRepairProgressReporter(
     if (!announced) {
       announced = true
       publish({
-        label: 'This bundle needs an alignment repair before loading. This is a one-time step for the current files; unchanged files will not need it again. Please wait while each shard is copied, validated and atomically replaced.',
+        label: 'This bundle needs an alignment repair before loading. This is a one-time step for the current files; unchanged files will not need it again. Please wait while each affected shard is validated and replaced in place. One temporary shard is needed during replacement; no second model copy is created.',
         labelKey: 'main.loadProgress.bundleRepairNotice',
       }, true)
     }

@@ -12,7 +12,9 @@ const SERVER_SETTINGS = [
   'maxContextLength', 'maxTokens', 'defaultMaxNewTokens', 'defaultTemperature',
   'defaultTopP', 'defaultTopK', 'defaultMinP', 'defaultRepetitionPenalty',
   'reasoningParser', 'toolCallParser', 'enableAutoToolChoice', 'kvCacheQuantization',
-  'kvCacheQuantizationBits', 'blockSize', 'maxNumBlocks', 'prefixCacheEnabled',
+  'kvCacheGroupSize', 'pagedCacheBlockSize', 'maxCacheBlocks', 'enablePrefixCache',
+  'enableBlockDiskCache', 'blockDiskCacheMaxPercent', 'blockDiskCacheMaxGb',
+  'usePagedCache', 'prefillBatchSize', 'prefillStepSize', 'maxNumSeqs', 'streamInterval',
   'enableThinking', 'reasoningEffort', 'imageTokenBudget', 'videoFps', 'videoMaxFrames',
   'videoMaxPixels', 'videoTokenBudget',
 ] as const
@@ -87,6 +89,7 @@ export function renderSessionMarkdown(chat: Chat, messages: Message[], now = new
     `Exported: ${now.toISOString()}`, `Created: ${new Date(chat.createdAt).toISOString()}`, '',
     '## Conversation identity', '',
     literalBlock(JSON.stringify({ chatId: chat.id, modelId: chat.modelId, modelPath: chat.modelPath ?? null }, null, 2), 'json'), '',
+    'Settings units: requestSettings and serverDefaults use API units. serverSettings preserves the app configuration; defaultTemperature, defaultTopP, defaultMinP and defaultRepetitionPenalty are stored as integer percentages. Omitted request fields inherit the recorded server defaults when available.', '',
     'The conversation identity is the saved chat association. Per-generation records below identify the model used for each recorded request.', '',
     'Reasoning is the full trace recorded by this app, when supplied by the model/provider. Unavailable historical settings are not reconstructed from current defaults. Request overrides and server-reported defaults are recorded separately; provider-internal choices are not inferred.', '',
   ]

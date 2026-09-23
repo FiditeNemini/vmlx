@@ -8,7 +8,7 @@ const message = (extra: Partial<Message>): Message => ({ id: 'm', chatId: 'chat'
 describe('session request provenance', () => {
   it('freezes every pass with actual instructions, schemas and explicit zero/false overrides', () => {
     const body = { model: 'alias', temperature: 0, enable_thinking: false, chat_template_kwargs: { enable_thinking: false }, instructions: 'system at generation', tools: [{name:'lookup',parameters:{type:'object'}}], authorization: 'SECRET' }
-    const server = { maxContextLength: 32768, defaultTemperature: 1, apiKey: 'SECRET' }
+    const server = { maxContextLength: 32768, defaultTemperature: 100, pagedCacheBlockSize: 64, maxCacheBlocks: 513, blockDiskCacheMaxPercent: 0.5, kvCacheQuantization: 'none', apiKey: 'SECRET' }
     const health = { effective_defaults: {temperature:1,top_p:0.95}, sampling_defaults:{temperature:1}, active_parsers:{tool_call_parser:'xml_function'} }
     const first = captureGenerationPass({body,serverConfig:server,health,wireApi:'responses',modelPath:'/models/mimo',now:123})
     body.instructions = 'changed later'; body.chat_template_kwargs.enable_thinking = true; server.maxContextLength = 999; health.effective_defaults.temperature = 8
@@ -16,6 +16,7 @@ describe('session request provenance', () => {
     expect(first.serverDefaults).toEqual({temperature:1,top_p:0.95})
     expect(first.instructions).toBe('system at generation')
     expect(first.maxPromptTokens).toBe(32768)
+    expect(first.serverSettings).toMatchObject({defaultTemperature:100,pagedCacheBlockSize:64,maxCacheBlocks:513,blockDiskCacheMaxPercent:0.5,kvCacheQuantization:'none'})
     expect(JSON.stringify(first)).not.toContain('SECRET')
     const second = captureGenerationPass({body:{model:'other',messages:[{role:'system',content:'replacement'},{role:'user',content:'hi'}]},serverConfig:{},wireApi:'completions',modelPath:'/models/nemotron'})
     expect(second.modelPath).toBe('/models/nemotron')

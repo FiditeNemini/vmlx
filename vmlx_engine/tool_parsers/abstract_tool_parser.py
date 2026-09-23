@@ -118,9 +118,10 @@ class ToolParser(ABC):
 
     @classmethod
     def _argument_properties(cls, request: dict[str, Any] | None, name: str) -> dict[str, Any]:
+        from .schema_types import xml_parameter_type_hints
+
         schema = cls._function_schema_for_tool(request, name)
-        props = schema.get("properties") if isinstance(schema, dict) else None
-        return props if isinstance(props, dict) else {}
+        return xml_parameter_type_hints(schema) if isinstance(schema, dict) else {}
 
     # Class attribute to declare native format support.
     # Set to True in subclasses whose corresponding model chat templates

@@ -368,7 +368,7 @@ echo "==> Installing dependencies..."
   "numpy>=1.24.0" "pillow>=10.0.0" \
   "opencv-python==$OPENCV_VERSION" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \
-  "mcp==$MCP_VERSION" "jsonschema>=4.0.0" \
+  "mcp==$MCP_VERSION" "jsonschema>=4.0.0" "referencing>=0.37.0" \
   "psutil>=5.9.0" "tqdm>=4.66.0" "pyyaml>=6.0" \
   "requests>=2.28.0" "tabulate>=0.9.0" "mlx-embeddings>=0.0.5" \
   "tiktoken>=0.7.0" \

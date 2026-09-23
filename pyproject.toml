@@ -85,6 +85,7 @@ dependencies = [
     "mcp>=1.0.0",
     # JSON Schema validation for structured output
     "jsonschema>=4.0.0",
+    "referencing>=0.37.0",
     # Note: mlx-audio remains optional for non-Electron installs.
     "mlx-embeddings>=0.0.5",
     # JANG / MXTQ / JANGTQ runtime — REQUIRED, not optional. Every modern JANG

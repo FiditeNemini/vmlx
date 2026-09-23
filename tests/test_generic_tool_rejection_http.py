@@ -1,0 +1,84 @@
+"""All HTTP surfaces hide malformed generic tool control and report termination."""
+import json
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from vmlx_engine import server
+from vmlx_engine.engine.base import GenerationOutput
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("finish", ["stop", "length"])
+async def test_generic_control_rejection_http(monkeypatch, api, stream, finish):
+    class Engine:
+        tokenizer = SimpleNamespace(has_thinking=False)
+        is_mllm = False
+        preserve_native_tool_format = True
+
+        async def chat(self, **kwargs):
+            return GenerationOutput(text="<tool_call>UNSAFE_ORPHAN_SUFFIX", tokens=[],
+                                    prompt_tokens=12, completion_tokens=2,
+                                    finished=True, finish_reason=finish)
+
+        async def stream_chat(self, **kwargs):
+            text = ""
+            for i, delta in enumerate(["<tool_call>", "UNSAFE_ORPHAN_SUFFIX"]):
+                text += delta
+                yield GenerationOutput(text=text, new_text=delta, tokens=[],
+                                       prompt_tokens=12, completion_tokens=i+1,
+                                       finished=bool(i), finish_reason=finish if i else None)
+
+    monkeypatch.setattr(server, "_engine", Engine())
+    for field in ("_model_name", "_served_model_name"):
+        monkeypatch.setattr(server, field, "generic-rejection-control")
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_reasoning_parser", None)
+    monkeypatch.setattr(server, "_tool_call_parser", "auto")
+    monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+    monkeypatch.setattr(server, "_api_key", None)
+    fn = {"name": "file_info", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+    body = {"model": "generic-rejection-control", "stream": stream, "tool_choice": "auto"}
+    if api == "chat":
+        body.update(messages=[{"role": "user", "content": "Inspect if needed."}],
+                    tools=[{"type": "function", "function": fn}], max_tokens=64)
+        if stream:
+            body["stream_options"] = {"include_usage": True}
+    else:
+        body.update(input="Inspect if needed.", tools=[{"type": "function", **fn}], max_output_tokens=64)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
+        response = await client.post("/v1/" + ("chat/completions" if api == "chat" else "responses"), json=body)
+    assert "UNSAFE_ORPHAN_SUFFIX" not in response.text
+    assert "<tool_call>" not in response.text
+    if not stream:
+        data = response.json()
+        if api == "chat" and finish == "stop":
+            assert response.status_code == 502
+            assert data["detail"]["code"] == "tool_calls_rejected"
+        elif api == "chat":
+            assert response.status_code == 200
+            assert not data["choices"][0]["message"]["content"]
+            assert data["choices"][0]["finish_reason"] == "length"
+            assert data["warnings"]
+        else:
+            assert response.status_code == 200
+            assert data["status"] == "incomplete" and data["output_text"] is None
+            assert data["output"] == []
+            assert data["incomplete_details"]["reason"] == ("max_output_tokens" if finish == "length" else "tool_calls_rejected")
+        return
+    assert response.status_code == 200
+    events = [json.loads(line[5:]) for line in response.text.splitlines() if line.startswith("data:") and line[5:].strip() != "[DONE]"]
+    if api == "chat":
+        errors = [e["error"]["code"] for e in events if e.get("error")]
+        terminals = [c["finish_reason"] for e in events for c in e.get("choices", []) if c.get("finish_reason")]
+        assert errors == (["tool_calls_rejected"] if finish == "stop" else [])
+        assert terminals == (["length"] if finish == "length" else [])
+        assert response.text.rstrip().endswith("data: [DONE]")
+        assert [e["usage"]["completion_tokens"] for e in events if e.get("usage")] == [2]
+    else:
+        terminals = [e for e in events if e.get("type") in {"response.completed", "response.incomplete", "response.failed"}]
+        assert len(terminals) == 1 and terminals[0]["type"] == "response.incomplete"
+        assert terminals[0]["response"]["incomplete_details"]["reason"] == ("max_output_tokens" if finish == "length" else "tool_calls_rejected")

@@ -7845,6 +7845,18 @@ def _parse_tool_calls_with_parser(
         bare_cleaned, bare_calls = _repair_required_single_tool_bare_json_args(text)
         if bare_calls:
             return bare_cleaned, bare_calls
+        if _effective_tools_for_tool_parsing(request):
+            safe_prefix = _visible_prefix_before_unparsed_tool_markup(text)
+            if safe_prefix != text:
+                # Generic/native-auto parsing must obey the same fail-closed
+                # contract as streaming. Otherwise nonstream endpoints expose
+                # raw rejected control blocks as successful assistant prose.
+                _record_tool_call_drop(
+                    "Buffered native tool markup did not produce a usable function "
+                    "call. Its control suffix was hidden. Inspect the parser and "
+                    "validation diagnostics; this alone does not establish output-token truncation."
+                )
+                return safe_prefix, None
         return text, None
 
     # Determine which parser to use.
@@ -26721,7 +26733,10 @@ async def stream_chat_completion(
                 if request_parser
                 else accumulated_text.strip()
             )
-            if _visible_prefix_before_unparsed_tool_markup(full) != full:
+            if (
+                not _TOOL_CALL_REJECTED.get()
+                and _visible_prefix_before_unparsed_tool_markup(full) != full
+            ):
                 # Generic parsers can return malformed markup unchanged without
                 # recording a rejection. Hiding it below must still produce a
                 # diagnostic and, when nothing usable remains, an error terminal.

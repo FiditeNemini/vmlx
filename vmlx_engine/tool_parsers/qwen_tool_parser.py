@@ -381,6 +381,18 @@ class QwenToolParser(ToolParser):
         # disk. JSON scalars still coerce (" 42 " -> 42) because the parse runs
         # on the stripped copy.
         candidate = value.strip()
+        declared = prop_schema.get("type", []) if isinstance(prop_schema, dict) else []
+        declared = [declared] if isinstance(declared, str) else declared
+        if (
+            isinstance(declared, (list, tuple))
+            and "boolean" in declared
+            and "string" not in declared
+            and candidate.lower() in {"true", "false"}
+        ):
+            # Native XML may use Python-style False/True. Resolve only when
+            # the schema excludes strings; JSON-native arguments bypass this
+            # decoder and retain their generated types.
+            return candidate.lower() == "true"
         try:
             return json.loads(candidate)
         except (json.JSONDecodeError, ValueError):

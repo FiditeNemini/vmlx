@@ -16,8 +16,35 @@ the ~180 ms hash, so the source id is computed ONLY inside a git checkout.
 """
 
 import pathlib
+from types import SimpleNamespace
 
 from vmlx_engine import prefix_cache
+
+
+def test_same_version_different_metal_wheels_have_distinct_cache_identity(monkeypatch):
+    platform = {"mlx": "14", "mlx-metal": "14"}
+    monkeypatch.setattr(prefix_cache.importlib.metadata, "version", lambda _: "0.32.2")
+    monkeypatch.setattr(prefix_cache.importlib.metadata, "distribution", lambda name:
+        SimpleNamespace(read_text=lambda _: f"Tag: py3-none-macosx_{platform[name]}_0_arm64\n"))
+    compat = prefix_cache._resolve_runtime_cache_fingerprint()
+    platform["mlx-metal"] = "26"
+    metal_changed = prefix_cache._resolve_runtime_cache_fingerprint()
+    assert metal_changed != compat
+    platform["mlx"] = "26"
+    native = prefix_cache._resolve_runtime_cache_fingerprint()
+    assert native != metal_changed
+    assert native == prefix_cache._resolve_runtime_cache_fingerprint()
+    platform.update({"mlx": "14", "mlx-metal": "14"})
+    assert prefix_cache._resolve_runtime_cache_fingerprint() == compat
+
+
+def test_wheel_metadata_failure_does_not_change_running_identity(monkeypatch):
+    baseline = prefix_cache.runtime_cache_fingerprint()
+    def unavailable(_):
+        raise OSError("metadata unavailable")
+    monkeypatch.setattr(prefix_cache.importlib.metadata, "distribution", unavailable)
+    assert prefix_cache.runtime_cache_fingerprint() == baseline
+    assert "mlx_wheel=unknown" in prefix_cache._resolve_runtime_cache_fingerprint()
 
 
 def test_source_id_is_deterministic():

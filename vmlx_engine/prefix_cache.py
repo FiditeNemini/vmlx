@@ -124,7 +124,7 @@ def _resolve_runtime_cache_fingerprint() -> str:
     except Exception:
         engine_version = "unknown"
     parts.append(f"vmlx_engine={engine_version}")
-    for package in ("jang", "mlx", "mlx-lm", "mlx-vlm"):
+    for package in ("jang", "mlx", "mlx-metal", "mlx-lm", "mlx-vlm"):
         try:
             version = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -132,6 +132,20 @@ def _resolve_runtime_cache_fingerprint() -> str:
         except Exception:
             version = "unknown"
         parts.append(f"{package}={version}")
+    # MLX publishes compatibility and native Metal wheels at the SAME version.
+    # Their kernels need not produce identical cache tensors. Never restore a
+    # compatibility-wheel checkpoint into a native-wheel process (or vice versa).
+    for package in ("mlx", "mlx-metal"):
+        try:
+            wheel = importlib.metadata.distribution(package).read_text("WHEEL") or ""
+            tags = sorted({line[4:].strip() for line in wheel.splitlines()
+                           if line.startswith("Tag:")})
+            identity = ";".join(tags) or "unrecorded"
+        except importlib.metadata.PackageNotFoundError:
+            identity = "missing"
+        except Exception:
+            identity = "unknown"
+        parts.append(f"{package}_wheel={identity}")
     source_id = _resolve_source_checkout_id()
     if source_id:
         parts.append(f"src={source_id}")

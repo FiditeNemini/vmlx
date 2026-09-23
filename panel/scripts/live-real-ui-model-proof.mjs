@@ -218,6 +218,46 @@ export function ownedUiProducerPid({
   return pid
 }
 
+// ReasoningBox auto-collapses one second after completion. A single read/click
+// followed by 250ms can race that timer and falsely report missing reasoning.
+// Exercise the real toggle, then require stable expanded content before capture.
+export async function expandCompletedReasoningRails({
+  readRows,
+  timeoutMs = 6000,
+  stableMs = 1250,
+  pollMs = 50,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const started = now()
+  let stableSince = null
+  let clicks = 0
+  while (now() - started <= timeoutMs) {
+    const rows = readRows()
+    let ready = true
+    for (const row of rows) {
+      if (row.expectsReasoning && row.rails.length === 0) ready = false
+      for (const rail of row.rails) {
+        if (!rail.complete || !rail.visible) {
+          ready = false
+        } else if (!rail.expanded) {
+          rail.expand()
+          clicks++
+          ready = false
+        }
+      }
+    }
+    if (ready) {
+      stableSince ??= now()
+      if (now() - stableSince >= stableMs) return { clicks, stableMs, elapsedMs: now() - started }
+    } else {
+      stableSince = null
+    }
+    await sleep(pollMs)
+  }
+  throw new Error('Completed reasoning rails did not remain visibly expanded before capture')
+}
+
 export async function createChatThroughVisibleControl({
   chats, modelPath, click, timeoutMs = 30_000, pollMs = 100,
 } = {}) {
@@ -11300,17 +11340,26 @@ async function main() {
               uiTurnCount + ' assistant typewriter buffers to drain',
             );
           }
-          for (const messageId of assistantMessageIds) {
-            const root = document.querySelector(
-              '[data-vmlx-proof-message-id="' + CSS.escape(String(messageId)) + '"]'
-            );
-            for (const rail of root?.querySelectorAll('[data-vmlx-proof-reasoning-rail="true"]') || []) {
-              if (!rail.querySelector('[data-vmlx-proof-reasoning-content="true"]')) {
-                rail.querySelector('button')?.click();
-              }
-            }
-          }
-          await new Promise((resolve) => setTimeout(resolve, 250));
+          const expandCompletedReasoningRails = ${expandCompletedReasoningRails.toString()};
+          const reasoningRailExpansion = await expandCompletedReasoningRails({
+            readRows: () => assistantMessageIds.map((messageId) => {
+              const root = document.querySelector(
+                '[data-vmlx-proof-message-id="' + CSS.escape(String(messageId)) + '"]'
+              );
+              const stored = assistants.find((message) => message.id === messageId);
+              let segments = [];
+              try { segments = JSON.parse(stored?.reasoningSegmentsJson || '[]'); } catch (_) {}
+              return {
+                expectsReasoning: Array.isArray(segments) && segments.some((text) => typeof text === 'string' && text.trim()),
+                rails: [...(root?.querySelectorAll('[data-vmlx-proof-reasoning-rail="true"]') || [])].map((rail) => ({
+                  complete: rail.getAttribute('data-vmlx-proof-reasoning-state') === 'complete',
+                  visible: isVisible(rail),
+                  expanded: Boolean(rail.querySelector('[data-vmlx-proof-reasoning-content="true"]')),
+                  expand: () => rail.querySelector('button')?.click(),
+                })),
+              };
+            }),
+          });
           const renderedMessages = assistantMessageIds
             .map((messageId) => snapshotMessage(messageId, 'final'))
             .filter(Boolean);
@@ -11540,6 +11589,7 @@ async function main() {
             firstAssistantContent: first,
             secondAssistantContent: second,
             thirdAssistantContent: third,
+            reasoningRailExpansion,
             persistedReasoningByMessage,
             persistedToolsByMessage,
             persistedOaiCallsByMessage,

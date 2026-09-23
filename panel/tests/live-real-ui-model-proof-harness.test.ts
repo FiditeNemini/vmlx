@@ -26,6 +26,7 @@ import {
   captureRequiredScreenshot,
   captureBundleGenerationContract,
   createChatThroughVisibleControl,
+  expandCompletedReasoningRails,
   resolveDevElectronExecutable,
   visiblePagedCachePolicy,
   collectOllamaStream,
@@ -6911,5 +6912,53 @@ describe("visible SSD-only cache policy", () => {
   });
   it("does not let policy prose override a conflicting real RAM control", () => {
     expect(visiblePagedCachePolicy({present: true, checked: true, disabled: false, policyVisible: true})).toEqual({established: true, usePagedCache: true, lockedOff: false});
+  });
+});
+
+
+describe("completed reasoning rail expansion", () => {
+  it("reopens a rail collapsed by the pending completion timer before taking proof", async () => {
+    let time = 0;
+    let expanded = true;
+    let collapsePending = true;
+    let clicks = 0;
+    const result = await expandCompletedReasoningRails({
+      now: () => time,
+      sleep: async (ms: number) => {
+        time += ms;
+        if (collapsePending && time >= 200) {
+          expanded = false;
+          collapsePending = false;
+        }
+      },
+      readRows: () => [{ expectsReasoning: true, rails: [{
+        complete: true, visible: true, expanded,
+        expand: () => { clicks++; expanded = true; },
+      }] }],
+    });
+    expect(clicks).toBe(1);
+    expect(expanded).toBe(true);
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(1450);
+  });
+
+  it.each(["missing", "hidden", "streaming", "unresponsive"])("rejects %s reasoning instead of weakening the visible-content gate", async (kind) => {
+    let time = 0;
+    await expect(expandCompletedReasoningRails({
+      timeoutMs: 100, stableMs: 50, pollMs: 10,
+      now: () => time, sleep: async (ms: number) => { time += ms; },
+      readRows: () => [{ expectsReasoning: true, rails: kind === "missing" ? [] : [{
+        complete: kind !== "streaming", visible: kind !== "hidden",
+        expanded: kind !== "unresponsive", expand: () => {},
+      }] }],
+    })).rejects.toThrow(/did not remain visibly expanded/);
+  });
+
+  it("accepts a no-reasoning turn without inventing a rail", async () => {
+    let time = 0;
+    const result = await expandCompletedReasoningRails({
+      now: () => time, sleep: async (ms: number) => { time += ms; },
+      readRows: () => [{ expectsReasoning: false, rails: [] }],
+    });
+    expect(result.clicks).toBe(0);
   });
 });

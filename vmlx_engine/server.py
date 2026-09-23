@@ -23203,6 +23203,7 @@ async def create_response(
                 "continuing with request input only",
                 request.previous_response_id,
             )
+    messages = _canonicalize_mimo_v26_tool_history(messages)
     if _preserve_mm:
         messages = _coerce_orphan_tool_messages_for_template(messages)
     if engine.is_mllm and _should_coerce_zaya_vl_tool_history(request.model):
@@ -23248,7 +23249,6 @@ async def create_response(
         history_messages,
         preserve_native_order=_is_dsv4_resp_msgs,
     )
-    messages = _canonicalize_mimo_v26_tool_history(messages)
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
     # Strip <think> blocks from history when thinking is OFF (same as Chat Completions path)

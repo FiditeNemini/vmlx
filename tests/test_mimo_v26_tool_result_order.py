@@ -117,3 +117,49 @@ def test_mllm_rejects_before_generic_last_user_fallback(history, monkeypatch):
     model.processor = SimpleNamespace(_mimo_v26_runtime=True)
     with pytest.raises(ValueError, match='complete, unique tool-result batch'):
         model._apply_chat_template(history[:-1])
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.asyncio
+async def test_responses_rejects_unknown_ids_before_orphan_fallback(tmp_path, monkeypatch, stream):
+    from fastapi import HTTPException, Request
+    from vmlx_engine import server
+    from vmlx_engine.api.models import ResponsesRequest
+    (tmp_path/'config.json').write_text('{"model_type":"mimo_v2"}')
+    (tmp_path/'jang_config.json').write_text('{"weight_format":"mixed_affine_mxfp4"}')
+    monkeypatch.setattr(server, '_model_path', str(tmp_path))
+    monkeypatch.setattr(server, '_resolve_model_name', lambda: 'test')
+    monkeypatch.setattr(server, 'get_engine', lambda: SimpleNamespace(is_mllm=True))
+    def unexpected(messages):pytest.fail('Malformed IDs reached orphan coercion')
+    monkeypatch.setattr(server, '_coerce_orphan_tool_messages_for_template', unexpected)
+    request = ResponsesRequest(model='test', stream=stream, input=[
+        {'type':'function_call','call_id':'a','name':'lookup','arguments':'{}'},
+        {'type':'function_call_output','call_id':'wrong','output':'value'}])
+    with pytest.raises(HTTPException) as error:
+        await server.create_response(request, Request({'type':'http','headers':[]}))
+    assert error.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_responses_restored_history_and_instructions_keep_associations(history, tmp_path, monkeypatch):
+    from fastapi import Request
+    from vmlx_engine import server
+    from vmlx_engine.api.models import ResponsesRequest
+    (tmp_path/'config.json').write_text('{"model_type":"mimo_v2"}')
+    (tmp_path/'jang_config.json').write_text('{"weight_format":"mixed_affine_mxfp4"}')
+    monkeypatch.setattr(server, '_model_path', str(tmp_path))
+    monkeypatch.setattr(server, '_resolve_model_name', lambda: 'test')
+    monkeypatch.setattr(server, 'get_engine', lambda: SimpleNamespace(is_mllm=True))
+    monkeypatch.setattr(server, '_responses_get_history', lambda response_id: history[:2])
+    class Prepared(Exception):pass
+    def capture(messages):
+        assert [m['tool_call_id'] for m in messages if m['role']=='tool'] == ['a','b']
+        assert next(m for m in messages if m['role']=='assistant')['reasoning_content'] == history[1]['reasoning_content']
+        assert any(m['role']=='system' and m['content']=='Use prior results.' for m in messages)
+        raise Prepared
+    monkeypatch.setattr(server, '_coerce_orphan_tool_messages_for_template', capture)
+    request = ResponsesRequest(model='test', previous_response_id='prior', instructions='Use prior results.', input=[
+        {'type':'function_call_output','call_id':'b','output':'HELD'},
+        {'type':'function_call_output','call_id':'a','output':'READY'}])
+    with pytest.raises(Prepared):
+        await server.create_response(request, Request({'type':'http','headers':[]}))

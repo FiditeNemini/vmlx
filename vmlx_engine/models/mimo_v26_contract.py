@@ -28,7 +28,10 @@ def canonicalize_mimo_v26_tool_results(messages: list[dict]) -> list[dict]:
         message = messages[index]
         if message.get("role") != "tool":
             output.append(message)
-            calls = (message.get("tool_calls") or []) if message.get("role") == "assistant" else []
+            if message.get("role") == "assistant":
+                calls = message.get("tool_calls") or []
+            elif message.get("role") not in ("system", "developer"):
+                calls = []
             index += 1
             continue
         end = index + 1

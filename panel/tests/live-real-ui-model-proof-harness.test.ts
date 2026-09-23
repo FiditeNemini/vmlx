@@ -25,6 +25,7 @@ import {
   assertCdpExpressionSyntax,
   captureRequiredScreenshot,
   captureBundleGenerationContract,
+  createChatThroughVisibleControl,
   collectOllamaStream,
   deriveProvenSurfaces,
   correlateTerminalResponseToCacheExecution,
@@ -77,6 +78,40 @@ import {
   waitForOwnedUiReleaseSentinel,
   writePrivateArtifactFile,
 } from "../scripts/live-real-ui-model-proof.mjs";
+
+describe("visible New Chat creation", () => {
+  it("clicks the actual control and ignores existing rows while waiting for the new row", async () => {
+    const old = { id: "old", title: "same title", modelPath: "/model" };
+    const fresh = { id: "fresh", title: "same title", modelPath: "/model" };
+    let clicks = 0;
+    let reads = 0;
+    const result = await createChatThroughVisibleControl({
+      chats: { getByModel: async () => ++reads < 3 ? [old] : [fresh, old] },
+      modelPath: "/model", click: () => { clicks++; }, pollMs: 1,
+    });
+    expect(result).toEqual(fresh);
+    expect(clicks).toBe(1);
+    expect(reads).toBe(3);
+  });
+
+  it("does not accept a stale row when the click creates nothing", async () => {
+    await expect(createChatThroughVisibleControl({
+      chats: { getByModel: async () => [{ id: "old", modelPath: "/model" }] },
+      modelPath: "/model", click: () => {}, timeoutMs: 5, pollMs: 1,
+    })).rejects.toThrow("did not create a new model-bound chat row");
+  });
+
+  it.each([
+    [[{ id: "wrong", modelPath: "/other" }], "wrong model"],
+    [[{ id: "a", modelPath: "/model" }, { id: "b", modelPath: "/model" }], "ambiguous"],
+  ])("rejects incorrect or ambiguous new rows", async (created, message) => {
+    let clicked = false;
+    await expect(createChatThroughVisibleControl({
+      chats: { getByModel: async () => clicked ? created : [] },
+      modelPath: "/model", click: () => { clicked = true; },
+    })).rejects.toThrow(message);
+  });
+});
 
 const sha = "a".repeat(64);
 const otherSha = "b".repeat(64);

@@ -218,6 +218,30 @@ export function ownedUiProducerPid({
   return pid
 }
 
+export async function createChatThroughVisibleControl({
+  chats, modelPath, click, timeoutMs = 30_000, pollMs = 100,
+} = {}) {
+  if (!chats || typeof chats.getByModel !== 'function'
+    || typeof click !== 'function' || !String(modelPath || '').trim()) {
+    throw new Error('Visible New Chat has an invalid contract')
+  }
+  const before = new Set((await chats.getByModel(modelPath)).map((chat) => chat.id))
+  await click()
+  const deadline = Date.now() + timeoutMs
+  do {
+    const created = (await chats.getByModel(modelPath)).filter((chat) => !before.has(chat.id))
+    if (created.length > 1) throw new Error('Visible New Chat created ambiguous chat rows')
+    if (created.length === 1) {
+      if (!created[0].id || created[0].modelPath !== modelPath) {
+        throw new Error('Visible New Chat created a row for the wrong model')
+      }
+      return created[0]
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  } while (Date.now() < deadline)
+  throw new Error('Visible New Chat did not create a new model-bound chat row')
+}
+
 export function waitForCurrentSessionStart({
   sessions,
   sessionId,
@@ -10262,24 +10286,32 @@ async function main() {
             .catch((error) => ({ error: String(error?.message || error) }));
           const cacheBefore = await window.api.cache.stats(endpoint, created.session.id)
             .catch((error) => ({ error: String(error?.message || error) }));
-          const chat = await window.api.chat.create(
-            'Real UI live model proof',
-            servedModel,
-            undefined,
-            created.session.modelPath,
-          );
           const requestedMaxTokens = ${JSON.stringify(requestMaxTokens ?? null)};
           const rendererGenerationDefaults = await window.api.models.getGenerationDefaults(modelPath)
             .catch((error) => ({ error: String(error?.message || error) }));
 
           window.dispatchEvent(new CustomEvent('vmlx:navigate', { detail: { mode: 'chat' } }));
+          const newChatButton = await waitFor(() => {
+            const button = document.querySelector('[data-vmlx-control="chat-new"]');
+            return button instanceof HTMLButtonElement && isVisible(button) && !button.disabled
+              ? button : null;
+          }, 'visible New Chat control');
+          const createChatThroughVisibleControl = ${createChatThroughVisibleControl.toString()};
+          const chat = await createChatThroughVisibleControl({
+            chats: window.api.chat,
+            modelPath: created.session.modelPath,
+            click: () => {
+              newChatButton.scrollIntoView({ block: 'center' });
+              newChatButton.click();
+            },
+          });
           const chatRow = await waitFor(() => {
             const title = [...document.querySelectorAll('span')]
-              .find((element) => (element.textContent || '').trim() === 'Real UI live model proof');
+              .find((element) => (element.textContent || '').trim() === chat.title
+                && element.closest('.cursor-pointer')?.classList.contains('bg-accent'));
             return title?.closest('.cursor-pointer') || null;
-          }, 'new chat row in the visible sidebar');
+          }, 'new active chat row in the visible sidebar');
           chatRow.scrollIntoView({ block: 'center' });
-          chatRow.click();
           await waitFor(
             () => document.querySelector('textarea:not([disabled])'),
             'active chat composer',

@@ -4868,7 +4868,14 @@ export function validateGenerationDefaultsEvidence(result) {
     ?? result?.serverCacheControls?.persistedConfig?.nativeMtpMode
     ?? 'auto'
   const nativeMtpGreedy = result?.server?.health?.mtp?.runtime_active === true
-    && persistedNativeMtpMode === 'deterministic'
+    && ['auto', 'deterministic'].includes(persistedNativeMtpMode)
+  if (nativeMtpGreedy) {
+    const expectedPolicy = persistedNativeMtpMode === 'deterministic'
+      ? 'greedy-only' : 'deterministic-defaults'
+    if (result.server.health.mtp.request_policy !== expectedPolicy) {
+      failures.push('Native MTP sampling policy does not match the persisted session mode')
+    }
+  }
   const explicitFields = Object.entries(explicit).filter(([, value]) => value != null)
   const turnEvidence = Array.isArray(result?.uiTurnEvidence)
     ? result.uiTurnEvidence.slice(0, expectedTurns)
@@ -5091,8 +5098,8 @@ export function validateGenerationDefaultsEvidence(result) {
       )
     }
     const healthValue = numericField(effective, engineKey)
-    if (!approximatelyEqual(Number(healthValue), Number(expected))) {
-      failures.push(`health effective ${engineKey}=${healthValue} does not match bundle ${expected}`)
+    if (!approximatelyEqual(Number(healthValue), Number(effectiveExpected))) {
+      failures.push(`health effective ${engineKey}=${healthValue} does not match effective startup default ${effectiveExpected}`)
     }
     if (requestCorrelationVerified) {
       // Greedy neutralization applies only to values the request did NOT set.
@@ -10645,9 +10652,9 @@ async function main() {
               && current.disabled
               && current.getAttribute('data-vmlx-state') === 'saved';
           }, 'Chat Settings save completion');
-          // Auto can run native MTP with the bundle/request distribution via
-          // stochastic verification. Only the explicit Deterministic mode
-          // pins the visible Chat Settings tuple to greedy values.
+          // Auto and Deterministic both start with greedy defaults. Auto
+          // still honors explicit per-chat sampling through stochastic MTP;
+          // Deterministic enforces greedy values and disables those sliders.
           const persistedNativeMtpMode = nativeMtpSelection?.persistedMode
             ?? (() => {
               try {
@@ -10658,20 +10665,18 @@ async function main() {
             })();
           const nativeMtpGreedyUi =
             preloadHealthBefore?.mtp?.runtime_active === true
-            && persistedNativeMtpMode === 'deterministic';
+            && ['auto', 'deterministic'].includes(persistedNativeMtpMode ?? 'auto');
+          const explicitUiSampling = persistedNativeMtpMode === 'deterministic'
+            ? {} : samplingOverrides;
           const expectedUiValues = {
-            Temperature: nativeMtpGreedyUi
-              ? 0
-              : samplingOverrides.temperature ?? independentBundleDefaults?.temperature,
-            'Top P': nativeMtpGreedyUi
-              ? 1
-              : samplingOverrides.topP ?? independentBundleDefaults?.topP,
-            'Top K': nativeMtpGreedyUi
-              ? 0
-              : samplingOverrides.topK ?? independentBundleDefaults?.topK,
-            'Min P': nativeMtpGreedyUi
-              ? 0
-              : samplingOverrides.minP ?? independentBundleDefaults?.minP,
+            Temperature: explicitUiSampling.temperature
+              ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.temperature),
+            'Top P': explicitUiSampling.topP
+              ?? (nativeMtpGreedyUi ? 1 : independentBundleDefaults?.topP),
+            'Top K': explicitUiSampling.topK
+              ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.topK),
+            'Min P': explicitUiSampling.minP
+              ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.minP),
             'Repetition Penalty':
               samplingOverrides.repeatPenalty ?? independentBundleDefaults?.repeatPenalty,
           };

@@ -574,10 +574,10 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).toContain(
       'const persistedNativeMtpMode = nativeMtpSelection?.persistedMode',
     );
-    expect(harnessSource).toContain("&& persistedNativeMtpMode === 'deterministic';");
-    expect(harnessSource).toContain("'Top P': nativeMtpGreedyUi");
-    expect(harnessSource).toContain("'Top K': nativeMtpGreedyUi");
-    expect(harnessSource).toContain("'Min P': nativeMtpGreedyUi");
+    expect(harnessSource).toContain("['auto', 'deterministic'].includes(persistedNativeMtpMode ?? 'auto')");
+    expect(harnessSource).toContain("'Top P': explicitUiSampling.topP");
+    expect(harnessSource).toContain("'Top K': explicitUiSampling.topK");
+    expect(harnessSource).toContain("'Min P': explicitUiSampling.minP");
     expect(harnessSource).not.toContain(
       "(button.textContent || '').replace(/\\\\s+/g, ' ').trim() === 'Save'",
     );
@@ -3788,20 +3788,15 @@ describe("real UI model proof harness", () => {
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
   });
 
-  it("keeps sampled Auto defaults when the native MTP runtime is active", () => {
+  it.each(["auto", "deterministic"])("grades Native-MTP %s effective greedy startup values separately from bundle defaults", (mode) => {
     const result = structuredClone(goodResult());
     result.server.health.mtp.runtime_active = true;
-    result.nativeMtpSelection = { persistedMode: "auto" };
-    result.effectiveSessionConfig = { nativeMtpMode: "auto" };
-
-    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
-  });
-
-  it("grades Native-MTP effective greedy values separately from bundle defaults", () => {
-    const result = structuredClone(goodResult());
-    result.server.health.mtp.runtime_active = true;
-    result.nativeMtpSelection = { persistedMode: "deterministic" };
-    result.effectiveSessionConfig = { nativeMtpMode: "deterministic" };
+    result.nativeMtpSelection = { persistedMode: mode };
+    result.effectiveSessionConfig = { nativeMtpMode: mode };
+    result.server.health.mtp.request_policy = mode === "auto" ? "deterministic-defaults" : "greedy-only";
+    result.server.health.effective_defaults = {
+      ...result.server.health.effective_defaults, temperature: 0, top_p: 1, top_k: 0, min_p: 0,
+    };
     result.chatSettingsDom.values = {
       ...result.chatSettingsDom.values,
       temperature: 0,
@@ -3826,6 +3821,30 @@ describe("real UI model proof harness", () => {
       delete record.values.min_p;
     }
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+  });
+
+  it("preserves explicit Auto sampling while checking greedy engine startup defaults", () => {
+    const result = structuredClone(goodResult());
+    result.server.health.mtp.runtime_active = true;
+    result.server.health.mtp.request_policy = "deterministic-defaults";
+    result.nativeMtpSelection = { persistedMode: "auto" };
+    result.effectiveSessionConfig = { nativeMtpMode: "auto" };
+    result.server.health.effective_defaults = {
+      ...result.server.health.effective_defaults, temperature: 0, top_p: 1, top_k: 0, min_p: 0,
+    };
+    const explicit = { temperature: 0.25, topP: 0.8, topK: 10, minP: 0.02 };
+    result.requestContract.samplingOverrides = explicit;
+    Object.assign(result.chatOverrides, explicit);
+    Object.assign(result.chatSettingsDom.values, explicit);
+    const wire = { temperature: 0.25, top_p: 0.8, top_k: 10, min_p: 0.02 };
+    Object.assign(result.resolvedSamplingKwargs, wire);
+    for (const record of result.resolvedSamplingRecords) Object.assign(record.values, wire);
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+    result.server.health.effective_defaults.temperature = 1;
+    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/effective startup default/);
+    result.server.health.effective_defaults.temperature = 0;
+    result.server.health.mtp.request_policy = "compatible-only";
+    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/sampling policy/);
   });
 
   it("allows an exact one-token reasoning segment to arrive in one delta", () => {

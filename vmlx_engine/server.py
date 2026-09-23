@@ -26535,7 +26535,18 @@ async def stream_chat_completion(
                 ],
             }
             yield f"data: {_dump_chat_chunk(tc_data_chunk)}\n\n"
-            # Finish chunk: empty delta with finish_reason="tool_calls"
+            # Parsed calls can be complete even when generation kept narrating
+            # until its token cap. Preserve that terminal cause for clients,
+            # just as Responses reports max_output_tokens/incomplete. A parser
+            # that deliberately stopped at a complete call still finishes as
+            # tool_calls; it did not exhaust the model's output budget.
+            _parsed_tool_finish_reason = (
+                "length"
+                if last_output
+                and last_output.finish_reason == "length"
+                and not _early_stopped_tool_text
+                else "tool_calls"
+            )
             tc_finish_chunk = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
@@ -26545,7 +26556,7 @@ async def stream_chat_completion(
                     {
                         "index": 0,
                         "delta": {},
-                        "finish_reason": "tool_calls",
+                        "finish_reason": _parsed_tool_finish_reason,
                     }
                 ],
             }

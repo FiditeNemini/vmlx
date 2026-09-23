@@ -3378,7 +3378,8 @@ describe("Issue #15: perf/cache IPC timeouts must survive inference load", () =>
   it("performance.ts health timeout must be >= 30 seconds", () => {
     const fs = require("fs");
     const source = fs.readFileSync("src/main/ipc/performance.ts", "utf-8");
-    const match = source.match(/AbortSignal\.timeout\((\d+)\)/);
+    const healthHandler = source.slice(source.indexOf("ipcMain.handle('performance:health'"));
+    const match = healthHandler.match(/AbortSignal\.timeout\((\d+)\)/);
     expect(match).toBeTruthy();
     const timeoutMs = parseInt(match![1]);
     expect(timeoutMs).toBeGreaterThanOrEqual(30000);

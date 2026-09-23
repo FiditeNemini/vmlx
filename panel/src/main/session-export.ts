@@ -112,17 +112,19 @@ export function renderSessionMarkdown(chat: Chat, messages: Message[], now = new
       if (value) lines.push(`### ${title}`, '', jsonBlock(value), '')
     }
     if (m.toolCallId) lines.push('Tool call ID:', '', literalBlock(m.toolCallId), '')
+    if (m.toolCapabilityFingerprint) lines.push('### Tool schema fingerprint', '', literalBlock(m.toolCapabilityFingerprint), '')
   })
   return lines.join('\n')
 }
 
 /** Parse this export's literal blocks without treating fenced model text as headings. */
-export function parseSessionMarkdown(raw: string): { title: string; messages: Partial<Message>[] } | null {
+export function parseSessionMarkdown(raw: string): { title: string; modelId?: string; modelPath?: string; createdAt?: number; messages: Partial<Message>[] } | null {
   if (!raw.startsWith('# Session export\n')) return null
   const messages: Partial<Message>[] = []
   let current: Partial<Message> | undefined
   let section = ''
   let title: string | undefined
+  const identity: { modelId?: string; modelPath?: string; createdAt?: number } = {}
   let fence: string | undefined
   let block: string[] = []
   for (const line of raw.split('\n')) {
@@ -130,6 +132,13 @@ export function parseSessionMarkdown(raw: string): { title: string; messages: Pa
       if (line === fence) {
         const value = block.join('\n')
         if (title === undefined) title = value
+        else if (!current && section === 'Conversation identity') {
+          try {
+            const saved = JSON.parse(value)
+            if (typeof saved?.modelId === 'string') identity.modelId = saved.modelId
+            if (typeof saved?.modelPath === 'string') identity.modelPath = saved.modelPath
+          } catch { /* Edited/legacy exports may not contain structured identity. */ }
+        }
         else if (current) {
           const field = ({
             'Content': 'content', 'Recorded reasoning': 'reasoningContent',
@@ -137,6 +146,7 @@ export function parseSessionMarkdown(raw: string): { title: string; messages: Pa
             'Generation record': 'generationRecordJson', 'Tool calls': 'toolCallsOaiJson',
             'Tool results': 'toolResultsOaiJson', 'Tool activity': 'toolCallsJson',
             'Warnings': 'warningsJson', 'Metrics': 'metricsJson',
+            'Tool call ID': 'toolCallId', 'Tool schema fingerprint': 'toolCapabilityFingerprint',
           } as const)[section as 'Content']
           if (field) current[field] = value
         }
@@ -152,11 +162,17 @@ export function parseSessionMarkdown(raw: string): { title: string; messages: Pa
       current = { role: turn[1] as Message['role'], content: '' }
       messages.push(current)
       section = ''
-    } else if (line.startsWith('### ')) section = line.slice(4)
+    } else if (line === '## Conversation identity') section = 'Conversation identity'
+    else if (line === 'Tool call ID:') section = 'Tool call ID'
+    else if (line.startsWith('### ')) section = line.slice(4)
+    else if (line.startsWith('Created: ') && !current) {
+      const time = Date.parse(line.slice(9))
+      if (Number.isFinite(time)) identity.createdAt = time
+    }
     else if (line.startsWith('Timestamp: ') && current) {
       const time = Date.parse(line.slice(11))
       if (Number.isFinite(time)) current.timestamp = time
     }
   }
-  return { title: title ?? 'Imported session', messages }
+  return { title: title ?? 'Imported session', ...identity, messages }
 }

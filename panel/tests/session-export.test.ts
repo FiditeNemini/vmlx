@@ -26,6 +26,12 @@ describe('session request provenance', () => {
 })
 
 describe('full session Markdown', () => {
+  it('round trips identity, timestamps and tool IDs without overwriting content', () => {
+    const rows = [message({ content: 'Original answer', toolCallId: 'call-한글', toolCapabilityFingerprint: 'schema-v1' })]
+    const parsed = parseSessionMarkdown(renderSessionMarkdown(chat, rows, new Date(0)))!
+    expect(parsed).toMatchObject({ modelId: chat.modelId, modelPath: chat.modelPath, createdAt: chat.createdAt })
+    expect(parsed.messages[0]).toMatchObject({ content: 'Original answer', timestamp: 3, toolCallId: 'call-한글', toolCapabilityFingerprint: 'schema-v1' })
+  })
   it('retains reasoning-only turns, tool history, status and literal embedded fences in order', () => {
     const reason = 'Reflect.\n```json\n{"x":1}\n```\n## 999. assistant\n</details>'
     const rows = [message({id:'u',role:'user',content:'안녕'}),message({id:'a',reasoningContent:reason,reasoningSegmentsJson:JSON.stringify(['first','','last']),generationRecordJson:JSON.stringify({version:1,status:'interrupted',passes:[{modelPath:'/models/mimo',toolExchange:[{role:'tool',tool_call_id:'id-1',content:'full result'}]}]}),toolCallsOaiJson:'[{"id":"id-1","function":{"name":"lookup","arguments":"{}"}}]',warningsJson:'["length"]'})]

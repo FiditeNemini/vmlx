@@ -37,6 +37,7 @@ export function registerExportHandlers(): void {
       default: {
         content = JSON.stringify({
           title: chat.title,
+          modelId: chat.modelId,
           modelPath: chat.modelPath,
           createdAt: chat.createdAt,
           messages: messages.map(m => ({
@@ -104,6 +105,9 @@ export function registerExportHandlers(): void {
     stopAccess?.()
 
     let title = 'Imported Chat'
+    let savedModelId: string | undefined
+    let savedModelPath: string | undefined
+    let savedCreatedAt: number | undefined
     let messages: Array<Partial<Message> & { role: string; content: string; reasoning?: string }> = []
 
     if (filePath.endsWith('.json')) {
@@ -125,9 +129,13 @@ export function registerExportHandlers(): void {
       // vMLX native format
       else if (parsed.messages && Array.isArray(parsed.messages)) {
         title = parsed.title || 'Imported Chat'
+        if (typeof parsed.modelId === 'string') savedModelId = parsed.modelId
+        if (typeof parsed.modelPath === 'string') savedModelPath = parsed.modelPath
+        if (Number.isFinite(parsed.createdAt)) savedCreatedAt = parsed.createdAt
         messages = parsed.messages.map((m: any) => ({
           role: m.role || 'user',
           content: m.content || '',
+          ...(Number.isFinite(m.timestamp) ? { timestamp: m.timestamp } : {}),
           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
           ...(m.generationRecord ? { generationRecordJson: JSON.stringify(m.generationRecord) } : {})
         }))
@@ -136,6 +144,9 @@ export function registerExportHandlers(): void {
       const session = parseSessionMarkdown(raw)
       if (session) {
         title = session.title
+        savedModelId = session.modelId
+        savedModelPath = session.modelPath
+        savedCreatedAt = session.createdAt
         messages = session.messages.map(m => ({ ...m, role: m.role || 'user', content: m.content || '' }))
       } else {
         // Parse legacy markdown: ## User / ## Assistant / ## System sections
@@ -176,10 +187,10 @@ export function registerExportHandlers(): void {
     db.createChat({
       id: chatId,
       title,
-      modelId: 'default',
-      modelPath: modelPath || '',
+      modelId: modelPath ? 'default' : savedModelId || 'default',
+      modelPath: modelPath || savedModelPath || '',
       folderId: undefined,
-      createdAt: now,
+      createdAt: savedCreatedAt ?? now,
       updatedAt: now
     })
 
@@ -189,12 +200,14 @@ export function registerExportHandlers(): void {
         chatId,
         role: msg.role as 'system' | 'user' | 'assistant',
         content: msg.content,
-        timestamp: now,
+        timestamp: msg.timestamp ?? now,
         ...(msg.reasoning || msg.reasoningContent ? { reasoningContent: msg.reasoning || msg.reasoningContent } : {}),
         generationRecordJson: msg.generationRecordJson,
         reasoningSegmentsJson: msg.reasoningSegmentsJson,
         toolCallsOaiJson: msg.toolCallsOaiJson,
         toolResultsOaiJson: msg.toolResultsOaiJson,
+        toolCallId: msg.toolCallId,
+        toolCapabilityFingerprint: msg.toolCapabilityFingerprint,
         toolCallsJson: msg.toolCallsJson,
         warningsJson: msg.warningsJson,
         metricsJson: msg.metricsJson,

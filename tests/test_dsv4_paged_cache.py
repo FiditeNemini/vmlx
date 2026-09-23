@@ -576,22 +576,22 @@ def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
     settings = Path("panel/src/renderer/src/components/sessions/SessionSettings.tsx").read_text()
     sessions = Path("panel/src/main/sessions.ts").read_text()
 
-    assert "const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs" in form
-    assert "const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize" in form
-    assert "const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize" in form
-    assert "const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)" in sessions
+    assert "const effectiveMaxNumSeqs = dsv4Active ? 1 : concurrency.maxNumSeqs!" in form
+    assert "const effectivePrefillBatchSize = dsv4Active ? 1 : concurrency.prefillBatchSize!" in form
+    assert "const effectiveCompletionBatchSize = dsv4Active ? 1 : concurrency.completionBatchSize!" in form
+    assert "const prefillBatchSize = finitePositiveInteger(concurrency.prefillBatchSize)" in sessions
     assert "if (!dsv4Active && prefillBatchSize != null)" in sessions
     assert "const prefillStepSize = finitePositiveInteger(config.prefillStepSize)" in sessions
     assert "if (prefillStepSize != null)" in sessions
     assert "if (!dsv4Active && prefillStepSize != null)" not in sessions
-    assert "const completionBatchSize = finitePositiveInteger(config.completionBatchSize)" in sessions
+    assert "const completionBatchSize = finitePositiveInteger(concurrency.completionBatchSize)" in sessions
     assert "if (!dsv4Active && completionBatchSize != null)" in sessions
-    assert "const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)" in settings
+    assert "const prefillBatchSize = finitePositiveInteger(concurrency.prefillBatchSize)" in settings
     assert "if (!dsv4Active && prefillBatchSize != null)" in settings
     assert "const prefillStepSize = finitePositiveInteger(config.prefillStepSize)" in settings
     assert "if (prefillStepSize != null)" in settings
     assert "if (!dsv4Active && prefillStepSize != null)" not in settings
-    assert "const completionBatchSize = finitePositiveInteger(config.completionBatchSize)" in settings
+    assert "const completionBatchSize = finitePositiveInteger(concurrency.completionBatchSize)" in settings
     assert "if (!dsv4Active && completionBatchSize != null)" in settings
 
 

@@ -1365,6 +1365,33 @@ def check_and_inject_fallback_tools(
                     return command
             if not request_text:
                 return ""
+            # Explicit assignments must win over the bare ``name word``
+            # fallback. Otherwise "flag to boolean false" teaches ``to`` as
+            # the value, and even "path is panel/package.json" loses the path.
+            # Keep literal JSON source intact: schema-aware native parsers own
+            # its eventual string-versus-JSON interpretation.
+            assignment = re.search(
+                rf"\b{re.escape(param)}(?!\w)\s*(?:(?:argument|parameter(?:\s+content)?)\s+)?"
+                r"(?:must\s+be\b|to\b|is\b|=|:)\s*"
+                r"(?:(?:the\s+)?(?:literal\s+)?(?:string|boolean|integer|number)\s+)?",
+                request_text,
+                flags=re.IGNORECASE,
+            )
+            if assignment:
+                remainder = request_text[assignment.end():]
+                if remainder.startswith(('"', '{', '[')):
+                    try:
+                        decoded, end = json.JSONDecoder().raw_decode(remainder)
+                        return decoded if isinstance(decoded, str) else remainder[:end]
+                    except json.JSONDecodeError:
+                        # Do not fall back to an assignment word or a truncated
+                        # JSON example when the explicit value is incomplete.
+                        return ""
+                if remainder.startswith(("`", "'")):
+                    end = remainder.find(remainder[0], 1)
+                    return remainder[1:end] if end >= 0 else ""
+                scalar = re.match(r"[A-Za-z0-9_~@%+=:./+-]{1,240}", remainder)
+                return scalar.group(0).rstrip(".,;:!?") if scalar else ""
             if normalized_param in {"path", "file", "filename"}:
                 if normalized_tool == "read_file":
                     read_file = re.search(

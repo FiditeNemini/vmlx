@@ -798,9 +798,8 @@ def merge_ollama_stream_terminal(
         and any(key in current for key in ("eval_count", "prompt_eval_count", "total_duration"))
     )
 
-    if message.get("tool_calls"):
-        merged["done_reason"] = "tool_calls"
-    elif (
+    # Complete call payloads do not erase the model's token-limit terminal.
+    if current_reason == "length" or (
         previous_reason == "length"
         and current_is_usage_only
         and current_reason in (None, "stop")
@@ -809,6 +808,8 @@ def merge_ollama_stream_terminal(
         # adapter fabricates a done row for that usage with done_reason="stop";
         # do not let that accounting-only row hide a prior max-token terminal.
         merged["done_reason"] = "length"
+    elif message.get("tool_calls"):
+        merged["done_reason"] = "tool_calls"
     else:
         merged["done_reason"] = current_reason or previous_reason
     return merged

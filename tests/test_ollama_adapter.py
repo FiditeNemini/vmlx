@@ -818,6 +818,30 @@ def test_ollama_terminal_merge_preserves_truncated_answer_after_usage():
     assert merged["prompt_eval_count"] == 73
 
 
+def test_ollama_complete_calls_preserve_length_terminal_and_following_usage():
+    from vmlx_engine.api.ollama_adapter import merge_ollama_stream_terminal
+
+    calls = [{"function": {"name": "record_payload", "arguments": {"flag": False}}}]
+    first = {
+        "model": "tool-budget-test",
+        "message": {"role": "assistant", "content": "", "tool_calls": calls},
+        "done": True, "done_reason": "tool_calls",
+    }
+    terminal = {
+        "model": "tool-budget-test",
+        "message": {"role": "assistant", "content": ""},
+        "done": True, "done_reason": "length",
+    }
+    merged = merge_ollama_stream_terminal(first, terminal)
+    assert merged["done_reason"] == "length"
+    merged = merge_ollama_stream_terminal(merged, {
+        **terminal, "done_reason": "stop", "eval_count": 128,
+    })
+    assert merged["done_reason"] == "length"
+    assert merged["message"]["tool_calls"] == calls
+    assert merged["eval_count"] == 128
+
+
 def test_ollama_generate_terminal_merge_retains_usage_on_single_done_row():
     from vmlx_engine.api.ollama_adapter import (
         merge_ollama_generate_stream_terminal,

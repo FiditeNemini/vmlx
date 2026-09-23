@@ -99,6 +99,23 @@ def test_stop_reason_tool_use_when_finish_is_tool_calls():
     assert stop == "tool_use", f"expected tool_use, got {stop}"
 
 
+def test_open_tool_block_does_not_hide_token_budget_exhaustion():
+    events, _ = _run([
+        _chunk({"role": "assistant"}),
+        _chunk({"tool_calls": [{
+            "index": 0, "id": "call_1", "type": "function",
+            "function": {"name": "record_payload", "arguments": '{"flag":false}'},
+        }]}),
+        _chunk({}, finish="length"),
+    ])
+    payloads = [json.loads(line[6:]) for event in events for line in event.splitlines()
+                if line.startswith("data: ")]
+    assert [p["delta"]["stop_reason"] for p in payloads
+            if p.get("type") == "message_delta"] == ["max_tokens"]
+    assert sum(p.get("type") == "content_block_stop" for p in payloads) == 1
+    assert sum(p.get("type") == "message_stop" for p in payloads) == 1
+
+
 def test_signature_delta_emitted_for_thinking():
     events, _ = _run([
         _chunk({"role": "assistant"}),

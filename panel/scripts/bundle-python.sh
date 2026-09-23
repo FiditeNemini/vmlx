@@ -262,7 +262,9 @@ mkdir -p "$BUNDLE_DIR"
 # Download python-build-standalone (Astral's relocatable Python builds)
 TARBALL="cpython-${PYTHON_VERSION}+${BUILD_DATE}-${ARCH}-install_only.tar.gz"
 URL="https://github.com/astral-sh/python-build-standalone/releases/download/${BUILD_DATE}/${TARBALL}"
-STANDALONE_TARBALL="$(mktemp "${TMPDIR:-/tmp}/vmlx-python-standalone.XXXXXX.tar.gz")"
+# BSD mktemp randomizes only trailing Xs; adding .tar.gz creates a literal
+# shared filename and makes concurrent flavor builds collide.
+STANDALONE_TARBALL="$(mktemp "${TMPDIR:-/tmp}/vmlx-python-standalone.XXXXXX")"
 
 restore_python_runtime_files() {
   local RESTORE_TMP

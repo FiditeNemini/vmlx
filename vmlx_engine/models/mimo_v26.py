@@ -22,7 +22,11 @@ from jang_tools.mimo_v2 import v26_model as text_port
 from jang_tools.mimo_v2 import v26_omni as omni_port
 from jang_tools.mimo_v2 import mlx_register as registration_port
 from jang_tools.mimo_v2.v26_omni import MiMoV26Omni
-from .mimo_v26_contract import mimo_v26_cache_identity, mimo_v26_runtime_source_identity
+from .mimo_v26_contract import (
+    canonicalize_mimo_v26_tool_results,
+    mimo_v26_cache_identity,
+    mimo_v26_runtime_source_identity,
+)
 
 
 # These modules live outside the engine source tree. Their distribution version
@@ -105,6 +109,7 @@ class Model(nn.Module):
 
 class MiMoV26Processor:
     model_type = "mimo_v2"
+    _mimo_v26_runtime = True
     supports_video_timestamps = True
 
     def __init__(self, tokenizer, omni):
@@ -119,7 +124,9 @@ class MiMoV26Processor:
         return getattr(self.tokenizer, name)
 
     def apply_chat_template(self, messages, **kwargs):
-        return self.tokenizer.apply_chat_template(messages, **kwargs)
+        return self.tokenizer.apply_chat_template(
+            canonicalize_mimo_v26_tool_results(messages), **kwargs,
+        )
 
     @staticmethod
     def _audio(value):

@@ -1545,6 +1545,21 @@ def _strip_residual_think_markup_for_display(
     return stripped.strip()
 
 
+def _canonicalize_mimo_v26_tool_history(messages: list[dict]) -> list[dict]:
+    """Validate positional native tool history before any streaming response."""
+    if not any(message.get("role") == "tool" for message in messages):
+        return messages
+    from .models.mimo_v26_contract import (
+        canonicalize_mimo_v26_tool_results, read_mimo_v26_contract,
+    )
+    if read_mimo_v26_contract(_model_path or _model_name) is None:
+        return messages
+    try:
+        return canonicalize_mimo_v26_tool_results(messages)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 def _drop_contentless_assistant_turns(messages: list) -> list:
     """Drop replayed assistant turns that carry neither text nor a tool call.
 
@@ -16899,6 +16914,7 @@ async def create_anthropic_message(
     # thinking-only assistant turn 500s on strict templates while the same
     # conversation succeeds through chat/responses.
     messages_dump = _drop_contentless_assistant_turns(messages_dump)
+    messages_dump = _canonicalize_mimo_v26_tool_history(messages_dump)
 
     # Force usage accounting so message_delta reports real input/output tokens
     # (Anthropic clients otherwise log zero tokens).
@@ -17878,6 +17894,7 @@ async def ollama_chat(fastapi_request: Request):
     # downstream and 500s on strict templates while stream:false (which
     # delegates to create_chat_completion) succeeds.
     messages = _drop_contentless_assistant_turns(messages)
+    messages = _canonicalize_mimo_v26_tool_history(messages)
 
     # Ollama's `format` (JSON mode). The adapter already mapped it onto
     # response_format, but THIS streaming branch builds its own chat_kwargs
@@ -19963,6 +19980,7 @@ async def create_chat_completion(
         messages,
         preserve_native_order=_is_loaded_dsv4_model(request.model),
     )
+    messages = _canonicalize_mimo_v26_tool_history(messages)
 
     # When thinking is explicitly disabled, strip <think> blocks from prior assistant
     # messages in the conversation history. Without this, the model sees prior thinking
@@ -23230,6 +23248,7 @@ async def create_response(
         history_messages,
         preserve_native_order=_is_dsv4_resp_msgs,
     )
+    messages = _canonicalize_mimo_v26_tool_history(messages)
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
     # Strip <think> blocks from history when thinking is OFF (same as Chat Completions path)

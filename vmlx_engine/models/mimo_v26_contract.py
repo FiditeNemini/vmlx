@@ -13,6 +13,54 @@ import hashlib
 from pathlib import Path
 
 
+def canonicalize_mimo_v26_tool_results(messages: list[dict]) -> list[dict]:
+    """Preserve ID associations through the native template's positional format.
+
+    The vendor template renders neither call IDs nor result IDs. Complete
+    ID-bearing result batches can be reordered without altering their meaning.
+    Partial/unknown/duplicate IDs cannot be represented safely and are rejected.
+    Native histories with no result-ID fields retain their supplied order.
+    """
+    output = []
+    calls = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") != "tool":
+            output.append(message)
+            calls = (message.get("tool_calls") or []) if message.get("role") == "assistant" else []
+            index += 1
+            continue
+        end = index + 1
+        while end < len(messages) and messages[end].get("role") == "tool":
+            end += 1
+        results = messages[index:end]
+        if any("tool_call_id" in result for result in results):
+            call_ids = [call.get("id") for call in calls if isinstance(call, dict)]
+            result_ids = [result.get("tool_call_id") for result in results]
+            valid_calls = (
+                len(call_ids) == len(calls) and bool(call_ids)
+                and all(isinstance(value, str) and value for value in call_ids)
+                and len(set(call_ids)) == len(call_ids)
+            )
+            valid_results = (
+                all(isinstance(value, str) and value for value in result_ids)
+                and len(set(result_ids)) == len(result_ids)
+            )
+            if not (valid_calls and valid_results and set(result_ids) == set(call_ids)):
+                raise ValueError(
+                    "MiMo-V2.6 requires a complete, unique tool-result batch "
+                    "matching the preceding assistant tool-call IDs; its native "
+                    "template cannot represent ambiguous or partial ID associations"
+                )
+            by_id = dict(zip(result_ids, results))
+            results = [by_id[call_id] for call_id in call_ids]
+        output.extend(results)
+        calls = []
+        index = end
+    return output
+
+
 def mimo_v26_runtime_source_identity(files: dict[str, Path]) -> str:
     """Freeze external runtime sources at import, independently of package version."""
     digest = hashlib.sha256()

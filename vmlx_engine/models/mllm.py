@@ -5481,6 +5481,11 @@ class MLXMultimodalLM:
             template_kwargs.setdefault("clear_thinking", True)
         if model_type == "mimo_v2":
             chat_messages = self._normalize_mimo_audio_messages_for_template(chat_messages)
+        if getattr(self.processor, "_mimo_v26_runtime", False):
+            from .mimo_v26_contract import canonicalize_mimo_v26_tool_results
+            # Validate before the generic template fallback: losing tool-result
+            # associations must never fall back to only the last user message.
+            chat_messages = canonicalize_mimo_v26_tool_results(chat_messages)
 
         formatted_prompt = None
         try:

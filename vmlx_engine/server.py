@@ -10587,6 +10587,11 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
         or profile_bits
         or q_cfg.get("bits")
     )
+    mixed_precision = q_jang.get("method") == "mixed"
+    if mixed_precision:
+        # The config default describes fallback modules, not the whole bundle.
+        # Mixed affine/MXFP4 bundles may have no single target bit width.
+        target_bits = q_jang.get("target_bits")
     actual_bits = (
         q_jang.get("actual_bits")
         or q_jang.get("actual_bits_per_weight")
@@ -10715,6 +10720,7 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
         "routed_expert_bits_by_projection": routed_expert_bits_by_projection,
         "routed_expert_bits_label": routed_expert_bits_label,
         "target_bits": target_bits,
+        "mixed_precision": mixed_precision,
         "actual_bits": actual_bits,
         "config_bits": q_cfg.get("bits"),
         "group_size": q_cfg.get("group_size") or q_jang.get("group_size") or q_jang.get("block_size"),

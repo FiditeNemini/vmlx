@@ -23,6 +23,14 @@ def validate_tool_schemas(tools):
         if not isinstance(parameters, dict):
             raise ValueError(f"tools[{index}].parameters must be a JSON Schema object")
         try:
+            json.dumps(parameters, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"tools[{index}].parameters must contain finite JSON values") from exc
+        declared = parameters.get("$schema")
+        if declared is not None:
+            if not isinstance(declared, str) or validator_for(parameters, default=None) is None:
+                raise ValueError(f"tools[{index}].parameters declares an unsupported JSON Schema draft")
+        try:
             # Respect explicitly declared older drafts (for example draft-04
             # boolean exclusiveMinimum), as jsonschema's value validator does.
             validator_for(parameters, default=Draft202012Validator).check_schema(parameters)

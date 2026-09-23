@@ -128,3 +128,16 @@ def test_real_server_rejects_nonfinite_tool_history_without_loading_model(path):
         endpoint, content=json.dumps(request), headers={"Content-Type": "application/json"})
     assert result.status_code == 422
     assert result.json()['detail'][0]['type'] == 'value_error'
+
+
+@pytest.mark.parametrize("path", ["/chat", "/responses"])
+@pytest.mark.parametrize("schema", [
+    {"$schema": "https://example.invalid/unknown-draft", "type": "object"},
+    {"$schema": 123, "type": "object"},
+    {"type": "object", "properties": {"value": {"minimum": float("nan")}}},
+])
+def test_unsupported_drafts_and_nonfinite_schemas_are_client_errors(path, schema):
+    request = body(path, {"name": "lookup", "parameters": schema})
+    result = client.post(path, content=json.dumps(request), headers={"Content-Type": "application/json"})
+    assert result.status_code == 422
+    assert "parameters" in result.text

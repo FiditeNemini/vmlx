@@ -11304,6 +11304,40 @@ class MLLMBatchGenerator:
             self._maybe_capture_mixed_swa_boundary(request, cache)
             return logits
 
+    def _prefill_mimo_v26_text(self, request, input_ids, cache, kwargs, *, step):
+        """Advance an uncached text tail in bounded spans to the absolute N-1 checkpoint."""
+        lm = self.language_model
+        original = list(getattr(request, "_original_token_ids", None) or [])
+        cached = int(getattr(request, "_cached_tokens", 0) or 0)
+        # input_ids is already sliced after the restored prefix. The clean
+        # checkpoint is absolute; using it directly as a tail index, or only
+        # splitting cold requests, submits growing tool results in one giant
+        # forward. A real 4,286-token hit plus 9,077-token tail exhausted Metal.
+        boundary = len(original) - 1 - cached
+        seq_len = int(input_ids.shape[1])
+        if not 0 < boundary < seq_len:
+            return lm(input_ids, **kwargs)
+        logger.info(
+            "MiMo-V2.6 text prefill: cached=%d tail=%d checkpoint_tail=%d chunk=%d",
+            cached, seq_len, boundary, step,
+        )
+
+        def span_kwargs(begin, end):
+            span = dict(kwargs)
+            if "position_ids" in span:
+                span["position_ids"] = span["position_ids"][..., begin:end]
+            return span
+
+        for begin in range(0, boundary, step):
+            end = min(begin + step, boundary)
+            lm(input_ids[:, begin:end], **span_kwargs(begin, end))
+            _materialize_prefill_cache_state(cache)
+            request._prefill_tokens_done = end
+            mx.clear_cache()
+            _raise_if_prefill_cancelled(request)
+        self._maybe_capture_mixed_swa_boundary(request, cache)
+        return lm(input_ids[:, boundary:], **span_kwargs(boundary, seq_len))
+
     def _run_vision_encoding_inner(self, request: "MLLMBatchRequest", cache: Optional[List[Any]] = None) -> "mx.array":
         kwargs = dict(request.extra_kwargs)
         # Only pass pixel_values when non-None. Smelt-loaded models use a
@@ -11795,21 +11829,11 @@ class MLLMBatchGenerator:
                     # Use the same N-1 checkpoint partition for cold and SSD
                     # resumed requests. A separate clean re-prefill changes
                     # bf16 reduction shapes and can change greedy wording.
-                    original = list(getattr(request, "_original_token_ids", None) or [])
-                    boundary = len(original) - 1
-                    if int(getattr(request, "_cached_tokens", 0) or 0) == 0 and 0 < boundary < seq_len:
-                        step = max(1, min(int(self.prefill_step_size),
-                                          int(_tight_text_prefill_step_size)))
-                        for begin in range(0, boundary, step):
-                            lm(input_ids[:, begin:min(begin+step, boundary)], **kwargs)
-                            _materialize_prefill_cache_state(cache)
-                            request._prefill_tokens_done = min(begin+step, boundary)
-                            mx.clear_cache()
-                            _raise_if_prefill_cancelled(request)
-                        self._maybe_capture_mixed_swa_boundary(request, cache)
-                        output = lm(input_ids[:, boundary:], **kwargs)
-                    else:
-                        output = lm(input_ids, **kwargs)
+                    output = self._prefill_mimo_v26_text(
+                        request, input_ids, cache, kwargs,
+                        step=max(1, min(int(self.prefill_step_size),
+                                        int(_tight_text_prefill_step_size))),
+                    )
                 else:
                     output = lm(input_ids, **kwargs)
                 request.vision_encoded = True

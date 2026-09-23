@@ -2753,6 +2753,10 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     .createHash("sha256")
     .update(canonicalPythonPath)
     .digest("hex");
+  const installedPythonFingerprints = [...new Set([
+    pythonPathSha,
+    crypto.createHash("sha256").update(pythonPath).digest("hex"),
+  ])].sort();
   const pythonPrefixSha = crypto
     .createHash("sha256")
     .update(canonicalPythonPrefix)
@@ -2801,8 +2805,8 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     python_executable_path: canonicalPythonPath,
     python_executable_fingerprint_sha256: pythonPathSha,
     checkout_python_invocation_fingerprints_sha256: [],
-    installed_python_invocation_fingerprints_sha256: [pythonPathSha],
-    accepted_python_invocation_fingerprints_sha256: [pythonPathSha],
+    installed_python_invocation_fingerprints_sha256: installedPythonFingerprints,
+    accepted_python_invocation_fingerprints_sha256: installedPythonFingerprints,
     python_prefix_path: canonicalPythonPrefix,
     python_prefix_fingerprint_sha256: pythonPrefixSha,
     producer_executable_path: pythonIdentity.path,
@@ -4606,6 +4610,42 @@ describe("real UI model proof harness", () => {
       );
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("binds the live backend invocation alias to the same manifest-attested target", () => {
+    const result = goodResult();
+    const fixture = createInstalledPairedArtifact(result);
+    try {
+      const binding = result.uiRuntimeProvenance.backend_python_process_binding;
+      result.healthProvenance.after.binding.runtime_source_hashes.python_executable_fingerprint_sha256 =
+        binding.invoked_executable_path_fingerprint_sha256;
+      expect(validateUiRuntimeProvenance(result)).toEqual([]);
+      result.healthProvenance.after.binding.runtime_source_hashes.python_executable_fingerprint_sha256 = "f".repeat(64);
+      expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(/manifest-attested bundled Python/);
+      result.healthProvenance.after.binding.runtime_source_hashes.python_executable_fingerprint_sha256 =
+        binding.invoked_executable_path_fingerprint_sha256;
+      rmSync(fixture.pythonPath);
+      symlinkSync(testExecutablePath, fixture.pythonPath);
+      expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(/independently bound/);
+    } finally { rmSync(fixture.directory, { recursive: true, force: true }); }
+  });
+
+  it("rejects extra or omitted installed Python invocation fingerprints", () => {
+    for (const extra of [true, false]) {
+      const result = goodResult();
+      const fixture = createInstalledPairedArtifact(result);
+      try {
+        const value = structuredClone(fixture.artifact.value);
+        for (const phase of ["before", "after"]) {
+          const runner = value.identity.runner[phase];
+          const hashes = runner.installed_python_invocation_fingerprints_sha256;
+          runner.installed_python_invocation_fingerprints_sha256 = extra ? [...hashes, "f".repeat(64)].sort() : hashes.slice(0, 1);
+          runner.accepted_python_invocation_fingerprints_sha256 = runner.installed_python_invocation_fingerprints_sha256;
+        }
+        result.pairedApiArtifact = writePairedArtifactValue(fixture.directory, "bad-aliases.json", value);
+        expect(validatePairedApiEvidence(result).join("\n")).toMatch(/installed-runtime runner identity/);
+      } finally { rmSync(fixture.directory, { recursive: true, force: true }); }
     }
   });
 

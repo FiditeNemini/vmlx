@@ -5738,6 +5738,7 @@ export function validateUiRuntimeProvenance(result) {
     )
     if (
       python.sha256 !== backend.executable_sha256
+      || realpathSync(backend.invoked_executable_path || '') !== python.path
       || sha256Text(python.path) !== backend.executable_path_fingerprint_sha256
     ) {
       failures.push('Python backend executable path/bytes are not independently bound to its listener')
@@ -5897,8 +5898,10 @@ export function validateUiRuntimeProvenance(result) {
       }
     }
     if (
-      manifest.bundled_python_executable_fingerprint_sha256
-        !== runtimeSource.python_executable_fingerprint_sha256
+      ![
+        backend.invoked_executable_path_fingerprint_sha256,
+        backend.executable_path_fingerprint_sha256,
+      ].includes(runtimeSource.python_executable_fingerprint_sha256)
       || manifest.bundled_python_executable_fingerprint_sha256
         !== backend.executable_path_fingerprint_sha256
     ) {
@@ -7069,6 +7072,12 @@ function validateMatrixIdentity(value, result) {
     try {
       expectedPythonPrefix = realpathSync(expectedPythonPrefix)
     } catch {}
+    // Match the producer's exact invocation + resolved target set. A normal
+    // bundled python3 -> python3.12 symlink contributes two path hashes, but
+    // both paths must resolve to the independently reopened bundled bytes.
+    const expectedInstalledFingerprints = [...new Set([
+      sha256Text(expectedPythonInvocationPath), sha256Text(expectedPythonPath),
+    ])].sort()
     const sourceBinding = installed.source_binding || {}
     const expectedSourceBinding = {
       head: uiSourceAfter.commit,
@@ -7085,9 +7094,9 @@ function validateMatrixIdentity(value, result) {
       || runnerBefore.repo_python !== false
       || !validFingerprintList(checkoutFingerprints, true)
       || !validFingerprintList(installedFingerprints)
-      || installedFingerprints.length !== 1
+      || canonicalJson(installedFingerprints) !== canonicalJson(expectedInstalledFingerprints)
       || canonicalJson(acceptedFingerprints) !== canonicalJson(installedFingerprints)
-      || installedFingerprints[0]
+      || sha256Text(expectedPythonPath)
         !== runnerBefore.python_executable_fingerprint_sha256
       || installed.schema !== 'vmlx-agentic-installed-runtime-v1'
     ) {

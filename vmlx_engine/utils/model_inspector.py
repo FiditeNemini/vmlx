@@ -266,20 +266,16 @@ class ModelInfo:
         return self.n_routed_experts is not None and self.n_routed_experts > 0
 
     @property
-    def active_params_billions(self) -> float:
-        """For MoE models, estimate active parameters per token."""
+    def active_params_billions(self) -> Optional[float]:
+        """Estimate active weights from the same architecture dimensions as total weights.
+
+        Only routed expert matrices are sparsely selected. Shared experts,
+        latent projections, routing gates, attention and SSM weights stay active.
+        """
         if not self.is_moe or not self.num_experts_per_tok:
             return self.param_count_billions
-        # Rough: non-expert params + (experts_per_tok / total_experts) * expert_params
-        # Expert params are roughly (num_layers * intermediate * hidden * 3 * n_experts)
-        # This is an approximation
-        if self.n_routed_experts > 0:
-            expert_fraction = self.num_experts_per_tok / self.n_routed_experts
-            # Assume ~60% of params are in experts for typical MoE
-            non_expert = self.param_count_billions * 0.4
-            expert = self.param_count_billions * 0.6 * expert_fraction
-            return non_expert + expert
-        return self.param_count_billions
+        estimate = _estimate_param_count(self.config, active_experts=True)
+        return estimate if estimate > 0 else None
 
 
 def inspect_model(model_path: str) -> ModelInfo:
@@ -449,7 +445,7 @@ def inspect_model(model_path: str) -> ModelInfo:
     )
 
 
-def _estimate_param_count(config: dict) -> float:
+def _estimate_param_count(config: dict, *, active_experts: bool = False) -> float:
     """
     Estimate total parameter count in billions from config dimensions.
 
@@ -515,7 +511,13 @@ def _estimate_param_count(config: dict) -> float:
         if latent_size:
             # LatentMoE: experts operate in latent space
             expert_input_dim = latent_size
-        expert_params = n_experts * (
+        parameter_experts = n_experts
+        if active_experts:
+            selected = _get("num_experts_per_tok")
+            if not isinstance(selected, int) or not 0 < selected <= n_experts:
+                return 0.0  # Active count is unknown without valid routing metadata.
+            parameter_experts = selected
+        expert_params = parameter_experts * (
             expert_proj_count * expert_input_dim * moe_intermediate
         )
 
@@ -825,13 +827,15 @@ def format_model_info(info: ModelInfo) -> str:
     lines.append(f"Parameters: {info.param_count_billions:.1f}B total")
 
     if info.is_moe:
+        active = info.active_params_billions
+        active_text = f"~{active:.1f}B active" if active is not None else "active parameter estimate unavailable"
         lines.append(
             f"  MoE: {info.n_routed_experts} experts, "
             f"{info.num_experts_per_tok} active per token, "
-            f"~{info.active_params_billions:.1f}B active"
+            f"{active_text}"
         )
     if info.needs_latent_moe:
-        lines.append(f"  LatentMoE: latent_size={info.moe_latent_size} (vMLX patched)")
+        lines.append(f"  LatentMoE: latent_size={info.moe_latent_size} (native or patched runtime required)")
     if info.is_hybrid:
         m = info.hybrid_pattern.count("M") if info.hybrid_pattern else 0
         e = info.hybrid_pattern.count("E") if info.hybrid_pattern else 0

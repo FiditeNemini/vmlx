@@ -73,3 +73,20 @@ def test_doctor_recognizes_nemotron_embeddings_without_masking_missing(tmp_path)
     save_file(weights,str(tmp_path/filename))
     _,warnings=_check_weights(str(tmp_path),info)
     assert any("embedding layer" in w for w in warnings)
+
+
+@pytest.mark.parametrize("latent", [None, 64])
+def test_active_parameter_estimate_only_discounts_routed_matrices(latent):
+    from vmlx_engine.utils.model_inspector import _estimate_param_count
+    config = dict(model_type="nemotron_h",hidden_size=128,num_hidden_layers=3,
+                  vocab_size=128,num_attention_heads=2,num_key_value_heads=1,
+                  intermediate_size=128,moe_intermediate_size=256,moe_latent_size=latent,
+                  n_routed_experts=8,num_experts_per_tok=2,n_shared_experts=1,
+                  moe_shared_expert_intermediate_size=128,hybrid_override_pattern="E*E")
+    total = _estimate_param_count(config)
+    active = _estimate_param_count(config,active_experts=True)
+    # Two MoE layers, six inactive experts, two ReLU-squared expert matrices.
+    inactive = 2 * (8-2) * 2 * (latent or 128) * 256 / 1e9
+    assert total-active == pytest.approx(inactive)
+    config["num_experts_per_tok"] = 8
+    assert _estimate_param_count(config,active_experts=True) == total

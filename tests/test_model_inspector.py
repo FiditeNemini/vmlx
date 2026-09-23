@@ -216,10 +216,18 @@ class TestModelInfo:
             n_routed_experts=512,
             num_experts_per_tok=22,
         )
+        # Expert count alone cannot determine the dense/expert split.
+        assert info.active_params_billions is None
+        info.config = {
+            "model_type": "nemotron_h", "hidden_size": 4096,
+            "num_hidden_layers": 2, "hybrid_override_pattern": "EE",
+            "vocab_size": 131072, "intermediate_size": 2688,
+            "moe_latent_size": 1024, "n_routed_experts": 512,
+            "num_experts_per_tok": 22,
+        }
         active = info.active_params_billions
-        # Should be much less than total for sparse MoE
-        assert active < info.param_count_billions
-        assert active > 0
+        assert active is not None
+        assert 0 < active < info.param_count_billions
 
     def test_active_params_dense(self):
         from vmlx_engine.utils.model_inspector import ModelInfo

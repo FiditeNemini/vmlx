@@ -11902,6 +11902,27 @@ async function main() {
           // no button (sectionClickResults recorded found: false, which is why
           // that guess was visible rather than silent).
           await clickSection('Tool Integration (MCP)');
+          // MTP lives under Speculative Decoding, which starts collapsed.
+          // Expand the real section before measuring the controls; absence
+          // inside an unopened accordion is not evidence of missing support.
+          const mtpSectionButton = drawer?.querySelector(
+            'button[data-vmlx-control="section-specDecode"]'
+          );
+          if (mtpSectionButton instanceof HTMLButtonElement) {
+            mtpSectionButton.scrollIntoView({ block: 'center' });
+            if (mtpSectionButton.getAttribute('data-vmlx-state') !== 'open') {
+              mtpSectionButton.click();
+            }
+            await wait(
+              () => mtpSectionButton.getAttribute('data-vmlx-state') === 'open',
+              'expanded Speculative Decoding controls for capture',
+            );
+          }
+          sectionClickResults.push({
+            title: 'Speculative Decoding',
+            found: !!mtpSectionButton,
+            text: (mtpSectionButton?.innerText || '').trim(),
+          });
           // Optionally load a REAL MCP config and import it, so the proof shows
           // servers and tools actually discovered in the app rather than an
           // empty section. Typing the path is not enough — Import is what reads

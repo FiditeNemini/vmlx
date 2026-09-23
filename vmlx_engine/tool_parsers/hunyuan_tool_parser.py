@@ -22,9 +22,9 @@ Format::
 
 Multiple ``<tool_call>`` blocks may appear inside a single
 ``<tool_calls>`` envelope. ``<tool_sep>`` separates the function name
-from the argument body. Argument values are coerced via ``json.loads``
-when possible (so ``"true"`` becomes ``True``, ``"42"`` becomes
-``42``), otherwise kept as strings.
+from the argument body. The native template emits strings verbatim and JSON
+encodes non-strings. Declared strings therefore retain their bytes; values with
+non-string or ambiguous schemas retain the legacy JSON decoding behavior.
 
 Every tag may carry a ``:variant`` suffix. The handoff doc above shows the
 bare form, but the shipped ``tencent/Hy3`` tokenizer defines *only* the
@@ -76,7 +76,7 @@ class HunyuanToolParser(ToolParser):
         re.DOTALL,
     )
     ARG_VALUE_PATTERN = re.compile(
-        rf"<arg_value{_V}>\s*(.*?)\s*</arg_value{_V}>",
+        rf"<arg_value{_V}>(.*?)</arg_value{_V}>",
         re.DOTALL,
     )
     TOOL_SEP_PATTERN = re.compile(rf"<tool_sep{_V}>")
@@ -84,9 +84,14 @@ class HunyuanToolParser(ToolParser):
     TOOL_CALLS_OPEN = re.compile(rf"<tool_calls{_V}>")
     TOOL_CALLS_CLOSE = re.compile(rf"</tool_calls{_V}>")
 
-    @staticmethod
-    def _coerce(value: str) -> Any:
-        """Match the contract's value coercion: try JSON, fall back to string."""
+    @classmethod
+    def _coerce(cls, value: str, schema: Any = None) -> Any:
+        """Honor native literal strings before decoding JSON-shaped values."""
+        if cls._schema_is_string_or_null(schema):
+            if cls._schema_allows_null(schema) and value.strip().lower() in cls._NULL_SPELLINGS:
+                return None
+            return value
+        value = value.strip()
         if not value:
             return value
         try:
@@ -115,9 +120,11 @@ class HunyuanToolParser(ToolParser):
                 # template emission, both lists should be the same length.
                 keys = self.ARG_KEY_PATTERN.findall(args_blob)
                 values = self.ARG_VALUE_PATTERN.findall(args_blob)
+                properties = self._argument_properties(request, name.strip())
                 arguments: dict[str, Any] = {}
                 for key, value in zip(keys, values):
-                    arguments[key.strip()] = self._coerce(value.strip())
+                    key = key.strip()
+                    arguments[key] = self._coerce(value, properties.get(key))
                 tool_calls.append(
                     {
                         "id": generate_tool_id(),
@@ -151,9 +158,12 @@ class HunyuanToolParser(ToolParser):
         # extract the full block (mirrors zaya_tool_parser.py's approach).
         if not self.TOOL_CALLS_OPEN.search(current_text):
             return {"content": delta_text}
-        if self.TOOL_CALLS_CLOSE.search(delta_text):
+        if self.TOOL_CALLS_CLOSE.search(current_text):
             result = self.extract_tool_calls(current_text, request=request)
-            if result.tools_called:
+            previous = self.extract_tool_calls(previous_text, request=request)
+            completed_count = len(previous.tool_calls)
+            new_calls = result.tool_calls[completed_count:]
+            if new_calls:
                 return {
                     "tool_calls": [
                         {
@@ -165,7 +175,7 @@ class HunyuanToolParser(ToolParser):
                                 "arguments": tc["arguments"],
                             },
                         }
-                        for i, tc in enumerate(result.tool_calls)
+                        for i, tc in enumerate(new_calls, start=completed_count)
                     ]
                 }
         return None

@@ -2908,6 +2908,22 @@ def _is_loaded_dsv4_model(model: str = "") -> bool:
         return False
 
 
+def _preserves_native_system_order(model: str = "") -> bool:
+    """Use loaded bundle metadata to select templates that preserve role order."""
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+
+    return _is_loaded_dsv4_model(model) or read_mimo_v26_contract(
+        _model_path or _model_name or model
+    ) is not None
+
+
+def _preserves_native_developer_role(model: str = "") -> bool:
+    """MiMo's vendor template renders developer as a distinct literal role."""
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+
+    return read_mimo_v26_contract(_model_path or _model_name or model) is not None
+
+
 def _is_loaded_qwen4_exp_model(model: str = "") -> bool:
     """Return whether the loaded bundle is Qwen3.8 Flash-Next/qwen4_exp."""
     try:
@@ -14891,10 +14907,11 @@ def _cache_contract_render_and_tokenize(
         dry_request.input,
         dry_request.instructions,
         preserve_multimodal=False,
+        preserve_native_roles=_preserves_native_developer_role(model),
     )
     messages = _normalize_leading_system_messages(
         messages,
-        preserve_native_order=_is_loaded_dsv4_model(model),
+        preserve_native_order=_preserves_native_system_order(model),
     )
     ct_kwargs = _merge_ct_kwargs(
         dry_request.chat_template_kwargs,
@@ -19922,7 +19939,7 @@ async def create_chat_completion(
             else:
                 msg_dict = dict(msg)
             # Map "developer" role to "system" (OpenAI API compatibility)
-            if msg_dict.get("role") == "developer":
+            if msg_dict.get("role") == "developer" and not _preserves_native_developer_role(request.model):
                 msg_dict["role"] = "system"
             messages.append(msg_dict)
         images, videos = [], []  # MLLM extracts these from messages
@@ -19978,7 +19995,7 @@ async def create_chat_completion(
         messages = _coerce_zaya_vl_tool_history_for_template(messages)
     messages = _normalize_leading_system_messages(
         messages,
-        preserve_native_order=_is_loaded_dsv4_model(request.model),
+        preserve_native_order=_preserves_native_system_order(request.model),
     )
     messages = _canonicalize_mimo_v26_tool_history(messages)
 
@@ -21860,12 +21877,12 @@ def _normalize_leading_system_messages(
     prepended before a new request with instructions. Treat system/developer
     content as global instructions and keep non-system turns in order.
 
-    DeepSeek V4 is the explicit exception: its official Python encoder owns
-    message order and has a distinct ``latest_reminder`` role for tail
-    reminders.  Hoisting a later system message changes the beginning of the
-    token sequence and destroys an otherwise reusable prompt prefix.  Callers
-    must opt into native ordering only after resolving the loaded family; this
-    helper never rewrites ``system`` into ``latest_reminder``.
+    DeepSeek V4's official encoder and MiMo-V2.6's native template preserve
+    message order. MiMo also preserves distinct system/developer roles and
+    repeated instructions. Hoisting later messages changes their native prompt
+    and destroys an otherwise reusable prefix. Callers opt into native ordering
+    only after resolving the loaded bundle; this helper never invents roles
+    such as DeepSeek's ``latest_reminder``.
     """
     if not messages:
         return messages
@@ -21907,6 +21924,7 @@ def _responses_input_to_messages(
     input_data: str | list,
     instructions: str | None = None,
     preserve_multimodal: bool = False,
+    preserve_native_roles: bool = False,
 ) -> list[dict]:
     """Convert Responses API input to chat messages format.
 
@@ -22036,8 +22054,8 @@ def _responses_input_to_messages(
     # function_call_output becomes a tool message
 
     def _normalize_role(role: str) -> str:
-        """Map 'developer' role to 'system' (OpenAI API compatibility)."""
-        return "system" if role == "developer" else role
+        """Preserve native roles only for explicitly selected bundle contracts."""
+        return "system" if role == "developer" and not preserve_native_roles else role
 
     pending_reasoning_parts: list[str] = []
     pending_visible_assistant: dict | None = None
@@ -23174,11 +23192,13 @@ async def create_response(
         request.input,
         None,
         preserve_multimodal=_preserve_mm,
+        preserve_native_roles=_preserves_native_developer_role(request.model),
     )
     messages = _responses_input_to_messages(
         request.input,
         request.instructions,
         preserve_multimodal=_preserve_mm,
+        preserve_native_roles=_preserves_native_developer_role(request.model),
     )
     if request.previous_response_id:
         previous_messages = _responses_get_history(request.previous_response_id)
@@ -23241,13 +23261,13 @@ async def create_response(
             messages = _inject_json_instruction(messages, json_instruction)
     messages = _normalize_leading_system_messages(
         messages,
-        preserve_native_order=_is_dsv4_resp_msgs,
+        preserve_native_order=_preserves_native_system_order(request.model),
     )
     # Persist only explicit input system/developer messages. Template-only
     # coercions and request-scoped instructions remain generation-local.
     history_messages = _normalize_leading_system_messages(
         history_messages,
-        preserve_native_order=_is_dsv4_resp_msgs,
+        preserve_native_order=_preserves_native_system_order(request.model),
     )
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 

@@ -28,6 +28,53 @@ class NativeTokenizer:
         return self.template.render(messages=messages, add_generation_prompt=True, **kwargs)
 
 
+@pytest.mark.parametrize('thinking', [False, True])
+@pytest.mark.parametrize('endpoint', ['chat', 'responses'])
+@pytest.mark.asyncio
+async def test_request_preparation_preserves_native_history_order(tmp_path, monkeypatch, thinking, endpoint):
+    from fastapi import Request
+    from vmlx_engine import server
+    from vmlx_engine.api.models import ChatCompletionRequest, ResponsesRequest
+    (tmp_path/'config.json').write_text('{"model_type":"mimo_v2"}')
+    (tmp_path/'jang_config.json').write_text('{"weight_format":"mixed_affine_mxfp4"}')
+    monkeypatch.setattr(server, '_model_path', str(tmp_path))
+    monkeypatch.setattr(server, '_resolve_model_name', lambda: 'test')
+    monkeypatch.setattr(server, 'get_engine', lambda: SimpleNamespace(is_mllm=True))
+    messages = [
+        {'role':'system', 'content':'  Preserve the ledger.  '},
+        {'role':'user', 'content':'Start with 18.'},
+        {'role':'assistant', 'content':'18', 'reasoning_content':'The initial balance is 18.'},
+        {'role':'developer', 'content':'  The corrected starting balance is 20.  '},
+        {'role':'system', 'content':'  Preserve the ledger.  '},
+        {'role':'user', 'content':'Add 7. What is the balance?'}]
+    original = copy.deepcopy(messages)
+    tokenizer = NativeTokenizer()
+    normalize = server._normalize_leading_system_messages
+    class Prepared(Exception): pass
+    captures = []
+    def capture(items, **kwargs):
+        normalized = normalize(items, **kwargs)
+        assert [m['role'] for m in normalized] == [m['role'] for m in messages]
+        assert [m.get('content') for m in normalized] == [m['content'] for m in messages]
+        assert tokenizer.apply_chat_template(normalized, enable_thinking=thinking) == tokenizer.apply_chat_template(messages, enable_thinking=thinking)
+        assert messages == original
+        captures.append(normalized)
+        if endpoint == 'chat' or len(captures) == 2:
+            raise Prepared
+        return normalized
+    monkeypatch.setattr(server, '_normalize_leading_system_messages', capture)
+    if endpoint == 'chat':
+        request = ChatCompletionRequest(model='test', messages=messages, enable_thinking=thinking)
+        handler = server.create_chat_completion
+    else:
+        monkeypatch.setattr(server, '_responses_get_history', lambda response_id: messages[:3])
+        request = ResponsesRequest(model='test', previous_response_id='prior', input=messages[3:], enable_thinking=thinking)
+        handler = server.create_response
+    with pytest.raises(Prepared):
+        await handler(request, Request({'type':'http','headers':[]}))
+    assert len(captures) == (1 if endpoint == 'chat' else 2)
+
+
 @pytest.fixture
 def history():
     return [{'role':'user','content':'Look up P17 and P29.'},
@@ -36,6 +83,39 @@ def history():
                 {'id':'b','type':'function','function':{'name':'lookup','arguments':{'id':'P29'}}}]},
             {'role':'tool','tool_call_id':'a','content':'READY'},
             {'role':'tool','tool_call_id':'b','content':'HELD'}]
+
+
+@pytest.mark.parametrize('family,weight_format,dsv4,expected', [
+    ('mimo_v2', 'mixed_affine_mxfp4', False, True),
+    ('mimo_v2', 'affine', False, False),
+    ('another_family', 'mixed_affine_mxfp4', False, False),
+    ('another_family', 'affine', True, True),
+])
+def test_native_order_is_metadata_scoped(tmp_path, monkeypatch, family, weight_format, dsv4, expected):
+    from vmlx_engine import server
+    (tmp_path/'config.json').write_text(json.dumps({'model_type':family}))
+    (tmp_path/'jang_config.json').write_text(json.dumps({'weight_format':weight_format}))
+    monkeypatch.setattr(server, '_model_path', str(tmp_path))
+    monkeypatch.setattr(server, '_is_loaded_dsv4_model', lambda model: dsv4)
+    assert server._preserves_native_system_order('MiMo-V2.6-Flash-RL') is expected
+    assert server._preserves_native_developer_role('MiMo-V2.6-Flash-RL') is (family == 'mimo_v2' and weight_format == 'mixed_affine_mxfp4')
+
+
+def test_native_order_preserves_prefix_and_prior_reasoning_when_thinking_off(tmp_path, monkeypatch):
+    from vmlx_engine import server
+    (tmp_path/'config.json').write_text('{"model_type":"mimo_v2"}')
+    (tmp_path/'jang_config.json').write_text('{"weight_format":"mixed_affine_mxfp4"}')
+    monkeypatch.setattr(server, '_model_path', str(tmp_path))
+    base = [{'role':'user', 'content':'Start the ledger.'},
+            {'role':'assistant', 'content':'Ready.', 'reasoning_content':'I should preserve the balance.'}]
+    later = base + [{'role':'developer','content':'Keep the corrected value.'},
+                    {'role':'user','content':'Continue.'}]
+    normalized = server._normalize_leading_system_messages(later, preserve_native_order=server._preserves_native_system_order())
+    assert server._strip_prior_reasoning_for_thinking_off(normalized) == later
+    tokenizer = NativeTokenizer()
+    prefix = tokenizer.template.render(messages=base, add_generation_prompt=False)
+    for thinking in (False, True):
+        assert tokenizer.apply_chat_template(normalized, enable_thinking=thinking).startswith(prefix)
 
 
 @pytest.mark.parametrize('thinking', [False, True])

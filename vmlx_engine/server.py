@@ -24957,6 +24957,22 @@ async def _terminal_finish_guard(
     error_seen = False
     first_chunk_meta = None
     usage_field_seen = False
+    required_call_parts = {}
+    pending_required_terminal = None
+    pending_required_usage = []
+
+    def _has_complete_required_call() -> bool:
+        # These are already parser-filtered outgoing deltas. An ID-only start
+        # or partial JSON is not a delivered call. Keep fragments across ticks.
+        for call in required_call_parts.values():
+            if not call["name"]:
+                continue
+            try:
+                if isinstance(json.loads(call["arguments"]), dict):
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
 
     def _synthetic_terminal() -> dict | None:
         if first_chunk_meta is None:
@@ -25006,6 +25022,18 @@ async def _terminal_finish_guard(
                     pass
             _finish_reasons = []
             if isinstance(_p, dict):
+                if required_tool_call:
+                    for choice in _p.get("choices") or []:
+                        for call in (choice.get("delta") or {}).get("tool_calls") or []:
+                            key = (choice.get("index", 0), call.get("index", 0))
+                            parts = required_call_parts.setdefault(
+                                key, {"name": "", "arguments": ""}
+                            )
+                            function = call.get("function") or {}
+                            for field in parts:
+                                value = function.get(field)
+                                if isinstance(value, str):
+                                    parts[field] += value
                 _finish_reasons = [
                     choice.get("finish_reason")
                     for choice in (_p.get("choices") or [])
@@ -25022,9 +25050,23 @@ async def _terminal_finish_guard(
                     # provisional and must not precede that decision: strict
                     # clients stop at the first non-null finish_reason and would
                     # otherwise miss the later tool_calls_required error.
+                    # A complete call followed by genuine budget exhaustion is
+                    # also valid. Defer that terminal until final diagnostics;
+                    # do not relabel it tool_calls or let it hide a later error.
+                    pending_required_terminal = sse
                     suppress_frame = True
                 else:
                     finish_seen = True
+            if (
+                required_tool_call
+                and pending_required_terminal is not None
+                and not finish_seen
+                and isinstance(_p, dict)
+                and _p.get("choices") == []
+                and _p.get("usage") is not None
+            ):
+                pending_required_usage.append(sse)
+                suppress_frame = True
             # include_usage's choices-empty total must remain the last JSON
             # chunk before [DONE]. If the generator omitted finish_reason,
             # insert the guard chunk *before* that usage tail, not at [DONE]
@@ -25041,36 +25083,45 @@ async def _terminal_finish_guard(
                 if terminal is not None:
                     yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
                     finish_seen = True
-        elif (
-            sse.startswith("data: [DONE]")
-            and not finish_seen
-            and not error_seen
-        ):
-            if required_tool_call and not required_tool_finish_seen:
-                # Defensive fail-closed fallback. stream_chat_completion normally
-                # emits this error itself after final parsing, but the route guard
-                # must never synthesize a successful stop if a future branch exits
-                # before that enforcement point.
-                meta = first_chunk_meta or {}
-                error = {
-                    "id": meta.get("id"),
-                    "object": "chat.completion.chunk",
-                    "error": {
-                        "message": (
-                            "tool_choice='required' was set but the model did not "
-                            "produce any tool calls."
-                        ),
-                        "type": "invalid_request_error",
-                        "code": "tool_calls_required",
-                    },
-                }
-                yield f"data: {json.dumps(error, ensure_ascii=True)}\n\n"
-                error_seen = True
-            else:
-                terminal = _synthetic_terminal()
-                if terminal is not None:
-                    yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
-                    finish_seen = True
+        elif sse.startswith("data: [DONE]"):
+            if (
+                required_tool_call
+                and pending_required_terminal is not None
+                and not finish_seen
+                and not error_seen
+                and _has_complete_required_call()
+            ):
+                yield pending_required_terminal
+                finish_seen = True
+                required_tool_finish_seen = True
+            if not finish_seen and not error_seen:
+                if required_tool_call and not required_tool_finish_seen:
+                    # Defensive fail-closed fallback. The generator normally
+                    # emits this error after parsing. Never synthesize success
+                    # if a future branch exits before that enforcement point.
+                    meta = first_chunk_meta or {}
+                    error = {
+                        "id": meta.get("id"),
+                        "object": "chat.completion.chunk",
+                        "error": {
+                            "message": (
+                                "tool_choice='required' was set but the model did not "
+                                "produce any tool calls."
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "tool_calls_required",
+                        },
+                    }
+                    yield f"data: {json.dumps(error, ensure_ascii=True)}\n\n"
+                    error_seen = True
+                else:
+                    terminal = _synthetic_terminal()
+                    if terminal is not None:
+                        yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
+                        finish_seen = True
+            for usage_frame in pending_required_usage:
+                yield usage_frame
+            pending_required_usage.clear()
         if not suppress_frame:
             yield sse
 

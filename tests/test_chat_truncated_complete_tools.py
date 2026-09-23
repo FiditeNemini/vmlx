@@ -11,7 +11,8 @@ from vmlx_engine.engine.base import GenerationOutput
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish", ["stop", "length"])
-async def test_chat_parsed_calls_preserve_budget_terminal(monkeypatch, finish):
+@pytest.mark.parametrize("required", [False, True])
+async def test_chat_parsed_calls_preserve_budget_terminal(monkeypatch, finish, required):
     call = (
         '<tool_call><function=record_payload>'
         '<parameter=content>{"n":1}</parameter>'
@@ -52,12 +53,12 @@ async def test_chat_parsed_calls_preserve_budget_terminal(monkeypatch, finish):
     messages = [{"role": "user", "content": "Record the values."}]
     request = server.ChatCompletionRequest(
         model="tool-budget-test", messages=messages, tools=tools,
-        stream=True, max_tokens=128,
+        stream=True, max_tokens=128, tool_choice="required" if required else "auto",
     )
     iterator = server.stream_chat_completion(
         engine, messages, request, fastapi_request=None, tools=tools, max_tokens=128,
     )
-    chunks = [chunk async for chunk in server._terminal_finish_guard(iterator)]
+    chunks = [chunk async for chunk in server._terminal_finish_guard(iterator, required_tool_call=required)]
     events = [json.loads(line[6:]) for chunk in chunks for line in chunk.splitlines()
               if line.startswith("data: ") and line != "data: [DONE]"]
     choices = [choice for event in events for choice in event.get("choices", [])]
@@ -69,3 +70,4 @@ async def test_chat_parsed_calls_preserve_budget_terminal(monkeypatch, finish):
                for call in calls)
     terminals = [choice["finish_reason"] for choice in choices if choice.get("finish_reason")]
     assert terminals == ["length" if finish == "length" else "tool_calls"]
+    assert not any(event.get("error") for event in events)

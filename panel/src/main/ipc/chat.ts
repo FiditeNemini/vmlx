@@ -90,7 +90,7 @@ import {
   stripStreamingToolTags,
   toolMarkupHoldbackLength,
 } from "../../shared/toolMarkupSanitizer";
-import { appendVisibleToolContent } from "../../shared/toolContent";
+import { appendVisibleToolContent, visibleToolStreamContent } from "../../shared/toolContent";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay";
 import {
@@ -2935,10 +2935,6 @@ export function registerChatHandlers(
             }
             if (!suppressVisibleToolDelta) {
               fullContent += delta;
-              // Update content offset immediately (not throttled) for accurate tool call positioning
-              lastEmittedContentLength = allGeneratedContent
-                ? allGeneratedContent.length + 2 + fullContent.length
-                : fullContent.length;
             }
           }
           // Client-side counting (fallback when server doesn't send usage in each chunk).
@@ -2977,6 +2973,15 @@ export function registerChatHandlers(
           // Suppress rendering (but not counting/TPS) when tool call content is detected
           if (!isReasoningDelta && suppressVisibleToolDelta) return;
 
+          const displayContent = isReasoningDelta
+            ? currentReasoningContent()
+            : visibleToolStreamContent(allGeneratedContent, fullContent);
+          // Keep token/TPS accounting above, but do not publish whitespace that
+          // a tool-only pass will discard. Preserve meaningful leading whitespace
+          // once the first visible character arrives, including code indentation.
+          if (displayContent === null) return;
+          if (!isReasoningDelta) lastEmittedContentLength = displayContent.length;
+
           // === IPC emission — every token emitted immediately ===
           // Renderer-side useTypewriter handles smooth character reveal via rAF.
 
@@ -3002,13 +3007,6 @@ export function registerChatHandlers(
           try {
             const win = getWindow();
             if (win && !win.isDestroyed()) {
-              // Include pre-tool content so UI doesn't lose earlier text when fullContent resets
-              const displayContent =
-                !isReasoningDelta && allGeneratedContent
-                  ? allGeneratedContent + "\n\n" + fullContent
-                  : isReasoningDelta
-                    ? currentReasoningContent()
-                    : fullContent;
               win.webContents.send("chat:stream", {
                 chatId,
                 messageId: assistantMessage.id,

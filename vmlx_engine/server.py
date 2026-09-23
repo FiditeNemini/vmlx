@@ -18057,7 +18057,8 @@ async def ollama_chat(fastapi_request: Request):
                             "message", {"role": "assistant", "content": ""}
                         )
                         _msg["tool_calls"] = buffered_tcs
-                        _ndjson_obj["done_reason"] = "tool_calls"
+                        if _ndjson_obj.get("done_reason") != "length":
+                            _ndjson_obj["done_reason"] = "tool_calls"
                         ndjson = json.dumps(_ndjson_obj) + "\n"
                         buffered_tcs = []
                 except (json.JSONDecodeError, TypeError):

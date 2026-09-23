@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,7 @@ def _run_streaming_ollama_chat(
     body: dict,
     reasoning_parser=None,
     preserve_native_tool_format: bool = False,
+    frames: list | None = None,
 ) -> dict:
     import vmlx_engine.server as server
 
@@ -47,6 +49,11 @@ def _run_streaming_ollama_chat(
     ):
         captured["messages"] = copy.deepcopy(messages)
         captured["kwargs"] = copy.deepcopy(kwargs)
+        if frames is not None:
+            for frame in frames:
+                yield "data: " + json.dumps(frame) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
         yield (
             'data: {"id":"chatcmpl-test","object":"chat.completion.chunk",'
             '"created":1,"model":"test","choices":[{"index":0,'
@@ -95,6 +102,7 @@ def _run_streaming_ollama_chat(
     assert response.status_code == 200
     assert '"done": true' in response.text or '"done":true' in response.text
     assert captured, "streaming route did not hand the request to generation"
+    captured["response_text"] = response.text
     return captured
 
 
@@ -269,3 +277,28 @@ def test_ollama_streaming_respects_engine_native_tool_history_format(
         assert messages[2]["role"] == "user"
         assert "[Tool Result ()]" in messages[2]["content"]
         assert "Size: 5.2 KB" in messages[2]["content"]
+
+
+@pytest.mark.parametrize("finish", ["length", "tool_calls"])
+def test_ollama_route_keeps_budget_reason_with_buffered_tools(monkeypatch, finish):
+    call = {"index": 0, "id": "call_one", "type": "function",
+            "function": {"name": "record_payload", "arguments": '{"flag":false}'}}
+    base = {"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 1, "model": "test"}
+    frames = [
+        {**base, "choices": [{"index": 0, "delta": {"tool_calls": [call]}}]},
+        {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
+        {**base, "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 128}},
+    ]
+    captured = _run_streaming_ollama_chat(
+        monkeypatch, family_name="qwen3_5", model_type="qwen3_5", frames=frames,
+        body={"model": "test", "messages": [{"role": "user", "content": "Record."}],
+              "stream": True, "think": False},
+    )
+    rows = [json.loads(line) for line in captured["response_text"].splitlines()]
+    terminal = [row for row in rows if row.get("done")]
+    assert len(terminal) == 1
+    assert terminal[0]["done_reason"] == finish
+    assert terminal[0]["eval_count"] == 128
+    assert terminal[0]["message"]["tool_calls"] == [
+        {"function": {"name": "record_payload", "arguments": {"flag": False}}}
+    ]

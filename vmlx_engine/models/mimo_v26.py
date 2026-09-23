@@ -18,7 +18,20 @@ from mlx_vlm.models.base import InputEmbeddingsFeatures, LanguageModelOutput
 
 from jang_tools.mimo_v2 import v26_audio as audio_port
 from jang_tools.mimo_v2 import v26_vision as vision_port
+from jang_tools.mimo_v2 import v26_model as text_port
+from jang_tools.mimo_v2 import v26_omni as omni_port
+from jang_tools.mimo_v2 import mlx_register as registration_port
 from jang_tools.mimo_v2.v26_omni import MiMoV26Omni
+from .mimo_v26_contract import mimo_v26_cache_identity, mimo_v26_runtime_source_identity
+
+
+# These modules live outside the engine source tree. Their distribution version
+# can stay unchanged during development, so the engine fingerprint alone is
+# insufficient. Freeze at import, like the shared runtime cache fingerprint.
+_MIMO_RUNTIME_IDENTITY = mimo_v26_runtime_source_identity({
+    module.__name__: Path(module.__file__)
+    for module in (audio_port, vision_port, text_port, omni_port, registration_port)
+})
 
 
 class LanguageModel(nn.Module):
@@ -207,4 +220,12 @@ def load_mimo_v26(bundle):
     text, tokenizer = load(str(bundle))
     config = json.loads((Path(bundle) / "config.json").read_text())
     omni = MiMoV26Omni(bundle, text, tokenizer)
-    return Model(text, omni, config), MiMoV26Processor(tokenizer, omni), config
+    model = Model(text, omni, config)
+    identity = mimo_v26_cache_identity(bundle, _MIMO_RUNTIME_IDENTITY, {
+        "vision_dtype": str(omni.vision_dtype),
+        "audio_tokenizer_dtype": str(omni.audio_tokenizer_dtype),
+        "merger_norm": omni.merger_norm,
+    })
+    for owner in (model, model.language_model, text):
+        owner._vmlx_runtime_artifact_identity = identity
+    return model, MiMoV26Processor(tokenizer, omni), config

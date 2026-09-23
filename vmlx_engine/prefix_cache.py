@@ -394,6 +394,9 @@ def compute_model_cache_key(
     parts: List[str] = []
 
     # 1. Architecture identity (cheap and safe even if path is unknown)
+    runtime_artifacts = getattr(model, "_vmlx_runtime_artifact_identity", None)
+    if isinstance(runtime_artifacts, str) and runtime_artifacts:
+        parts.append(f"runtime_artifacts={runtime_artifacts}")
     projection_layout = getattr(model, "_vmlx_attention_projection_layout", None)
     if isinstance(projection_layout, str) and projection_layout:
         parts.append(f"attention_projection_layout={projection_layout}")

@@ -9,7 +9,45 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from pathlib import Path
+
+
+def mimo_v26_runtime_source_identity(files: dict[str, Path]) -> str:
+    """Freeze external runtime sources at import, independently of package version."""
+    digest = hashlib.sha256()
+    for name, path in sorted(files.items()):
+        digest.update(name.encode() + b"\0")
+        digest.update(Path(path).read_bytes())
+    return digest.hexdigest()
+
+
+def mimo_v26_cache_identity(bundle: str | Path, runtime_identity: str,
+                           settings: dict) -> str:
+    """Bind lazy media dependencies omitted by the main weight index.
+
+    Weight stat identity follows the main-shard policy; it is not a substitute
+    for bundle integrity verification. Bundles must remain immutable while loaded.
+    Missing optional media files get explicit markers; unreadable files fail closed.
+    """
+    bundle = Path(bundle)
+    digest = hashlib.sha256(b"mimo-v26-media-runtime-v1\0")
+    digest.update(runtime_identity.encode() + b"\0")
+    digest.update(json.dumps(settings, sort_keys=True).encode())
+    for name in ("config.json", "audio_tokenizer/config.json"):
+        path = bundle / name
+        digest.update(b"\0" + name.encode() + b"\0")
+        try:
+            digest.update(path.read_bytes())
+        except FileNotFoundError:
+            digest.update(b"missing")
+    path = bundle / "audio_tokenizer/model.safetensors"
+    try:
+        stat = path.stat()
+        digest.update(f"audio_weights:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    except FileNotFoundError:
+        digest.update(b"audio_weights:missing")
+    return digest.hexdigest()
 
 
 def read_mimo_v26_contract(bundle_path: str | Path | None) -> dict | None:

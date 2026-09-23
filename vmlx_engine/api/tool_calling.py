@@ -1916,13 +1916,21 @@ def check_and_inject_fallback_tools(
             params = func.get("parameters", {}) or {}
             props = params.get("properties", {}) if isinstance(params, dict) else {}
             required = set(params.get("required", []) if isinstance(params, dict) else [])
+            # This fallback removes the template's tools kwarg. Retain the full
+            # validation schema, including refs/nested constraints, and derive
+            # readable type labels without pretending an absent type is string.
+            from ..tool_parsers.schema_types import xml_parameter_type_hints
+
+            type_hints = xml_parameter_type_hints(params) if isinstance(params, dict) else {}
+            qwen_lines.append("  Parameter JSON Schema: " + json.dumps(params, ensure_ascii=False))
             if props:
                 qwen_lines.append("  parameters:")
                 for p_name, p_schema in props.items():
+                    allowed_types = type_hints.get(p_name, {}).get("type", [])
                     p_type = (
-                        p_schema.get("type", "string")
-                        if isinstance(p_schema, dict)
-                        else "string"
+                        " or ".join(allowed_types)
+                        if allowed_types and len(allowed_types) < 7
+                        else "any JSON value"
                     )
                     req = "required" if p_name in required else "optional"
                     p_desc = (

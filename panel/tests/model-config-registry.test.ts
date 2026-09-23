@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { loadLocalModelPaths } from './helpers/local-model-paths'
 import { detectModelConfigFromDir } from '../src/main/model-config-registry'
 import { resolveEffectiveToolParser } from '../src/shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
@@ -2525,8 +2526,7 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
     expect(detected.runtimeModalities).toEqual(media ? ['text', 'vision', 'video', 'audio'] : ['text'])
     expect(!!detected.forceTextOnly).toBe(!media)
   })
-  it('matches current local high-risk model paths to panel parser cache and modality policy', () => {
-    const rows: Array<{
+  const rows: Array<{
       name: string
       path: string
       family: string
@@ -2632,7 +2632,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'nemotron',
         reasoningParser: 'deepseek_r1',
-        isMultimodal: false,
+        // Verified config_omni.json plus vision/audio encoder and projector tensors.
+        isMultimodal: true,
       },
       {
         name: 'nemotron_mxfp4',
@@ -2645,20 +2646,18 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
       },
     ]
 
-    const missing = rows.filter(row => !existsSync(row.path)).map(row => row.path)
-    if (missing.length > 0) {
-      return
-    }
-
-    for (const row of rows) {
-      const detected = detectModelConfigFromDir(row.path)
+  const paths = loadLocalModelPaths(process.env.VMLX_TEST_LOCAL_MODEL_PATHS, rows.map(row => row.name))
+  for (const row of rows) {
+    const modelPath = paths[row.name] ?? row.path
+    it.skipIf(!existsSync(modelPath))(`matches local high-risk artifact ${row.name} to panel parser cache and modality policy`, () => {
+      const detected = detectModelConfigFromDir(modelPath)
       expect(detected.family, row.name).toBe(row.family)
       expect(detected.cacheType, row.name).toBe(row.cacheType)
       expect(detected.toolParser, row.name).toBe(row.toolParser)
       expect(detected.reasoningParser, row.name).toBe(row.reasoningParser)
       expect(detected.isMultimodal, row.name).toBe(row.isMultimodal)
-    }
-  })
+    })
+  }
 })
 
 describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {

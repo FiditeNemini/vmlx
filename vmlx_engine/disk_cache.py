@@ -1692,19 +1692,14 @@ class DiskCacheManager:
 
         conn = self._pool.get()
         try:
-            # Get entries ordered by cache_type priority then LRU.
-            # Eviction preference: assistant (1) → user (2) → system (3),
-            # within each type oldest-first. This mirrors PrefixCacheManager
-            # cache_type LRU on disk so cross-restart shared system prompts
-            # survive eviction even when the disk is full of assistant entries.
+            # Whole-prompt records contain the entire conversation, not an
+            # independently reusable system segment. Role-first eviction can
+            # pin an old large conversation and immediately discard every new
+            # assistant/tool snapshot. Use access recency across all roles;
+            # retain cache_type metadata for consumers that cache segments.
             rows = conn.execute(
                 "SELECT token_hash, file_name, file_size FROM cache_entries "
-                "ORDER BY CASE COALESCE(cache_type, 'assistant') "
-                "  WHEN 'assistant' THEN 1 "
-                "  WHEN 'user' THEN 2 "
-                "  WHEN 'system' THEN 3 "
-                "  ELSE 1 END ASC, "
-                "last_accessed ASC"
+                "ORDER BY last_accessed ASC, created_at ASC, token_hash ASC"
             ).fetchall()
 
             evicted = 0

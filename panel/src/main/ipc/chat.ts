@@ -7,6 +7,7 @@ import type { ClientRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
+import { captureGenerationPass, type GenerationRecord } from "../session-export";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
 import {
   readDetectedModelConfig,
@@ -89,6 +90,7 @@ import {
   stripStreamingToolTags,
   toolMarkupHoldbackLength,
 } from "../../shared/toolMarkupSanitizer";
+import { appendVisibleToolContent, visibleToolStreamContent } from "../../shared/toolContent";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay";
 import {
@@ -2153,6 +2155,13 @@ export function registerChatHandlers(
       // Periodic DB save interval — saves content every 5s so it survives navigation/crashes
       let periodicSaveInterval: ReturnType<typeof setInterval> | null = null;
 
+      const generationRecord: GenerationRecord = { version: 1, status: 'in_progress', passes: [] };
+      const saveGenerationRecord = () => {
+        generationRecord.toolExchange = JSON.parse(JSON.stringify(requestMessages.slice(currentTurnToolStart)));
+        assistantMessage.generationRecordJson = JSON.stringify(generationRecord);
+        db.updateMessageGenerationRecord(assistantMessage.id, assistantMessage.generationRecordJson);
+      };
+
       // Pre-insert assistant message to DB immediately so periodic updates have a row to update.
       // Uses INSERT OR REPLACE so the final addMessage at completion overwrites cleanly.
       db.addMessage(assistantMessage);
@@ -2166,6 +2175,8 @@ export function registerChatHandlers(
               : allGeneratedContent
             : fullContent;
           const saveReasoning = currentReasoningContent();
+          try { saveGenerationRecord(); }
+          catch (error) { console.warn('[CHAT] Could not checkpoint generation record', error); }
           if (saveContent || saveReasoning) {
             try {
               db.updateMessageContent(
@@ -2208,6 +2219,7 @@ export function registerChatHandlers(
           `[CHAT] Sending to: ${apiUrl} (wire: ${wireApi}, remote: ${isRemote})`,
         );
 
+        let generationHealth: Record<string, any> | undefined;
         // Get model name: remote uses configured model, local reads from health endpoint
         let modelName = isRemote
           ? resolvedSession?.remoteModel || chat.modelId || "default"
@@ -2215,10 +2227,12 @@ export function registerChatHandlers(
         if (!isRemote) {
           try {
             const healthRes = await fetch(`${baseUrl}/health`, {
+              headers: authHeaders,
               signal: AbortSignal.timeout(1000),
             });
             if (healthRes.ok) {
               const health = await healthRes.json();
+              generationHealth = health;
               if (health.model_name) modelName = health.model_name;
             }
           } catch (_) {
@@ -2331,6 +2345,16 @@ export function registerChatHandlers(
           const finalizeRequestBody = (obj: Record<string, any>) => {
             applyPostToolAnswerPolicy(obj);
             previousToolRequestFields = captureToolRequestFields(obj);
+            generationRecord.passes.push(captureGenerationPass({
+              body: obj,
+              modelPath: resolvedSession?.modelPath || chat.modelPath,
+              family: chatDetectedFamily,
+              wireApi,
+              serverConfig: chatSessionConfig,
+              health: generationHealth,
+              toolExchange: requestMessages.slice(currentTurnToolStart),
+            }));
+            saveGenerationRecord();
             return obj;
           };
           if (useResponsesApi) {
@@ -2911,10 +2935,6 @@ export function registerChatHandlers(
             }
             if (!suppressVisibleToolDelta) {
               fullContent += delta;
-              // Update content offset immediately (not throttled) for accurate tool call positioning
-              lastEmittedContentLength = allGeneratedContent
-                ? allGeneratedContent.length + 2 + fullContent.length
-                : fullContent.length;
             }
           }
           // Client-side counting (fallback when server doesn't send usage in each chunk).
@@ -2953,6 +2973,15 @@ export function registerChatHandlers(
           // Suppress rendering (but not counting/TPS) when tool call content is detected
           if (!isReasoningDelta && suppressVisibleToolDelta) return;
 
+          const displayContent = isReasoningDelta
+            ? currentReasoningContent()
+            : visibleToolStreamContent(allGeneratedContent, fullContent);
+          // Keep token/TPS accounting above, but do not publish whitespace that
+          // a tool-only pass will discard. Preserve meaningful leading whitespace
+          // once the first visible character arrives, including code indentation.
+          if (displayContent === null) return;
+          if (!isReasoningDelta) lastEmittedContentLength = displayContent.length;
+
           // === IPC emission — every token emitted immediately ===
           // Renderer-side useTypewriter handles smooth character reveal via rAF.
 
@@ -2978,13 +3007,6 @@ export function registerChatHandlers(
           try {
             const win = getWindow();
             if (win && !win.isDestroyed()) {
-              // Include pre-tool content so UI doesn't lose earlier text when fullContent resets
-              const displayContent =
-                !isReasoningDelta && allGeneratedContent
-                  ? allGeneratedContent + "\n\n" + fullContent
-                  : isReasoningDelta
-                    ? currentReasoningContent()
-                    : fullContent;
               win.webContents.send("chat:stream", {
                 chatId,
                 messageId: assistantMessage.id,
@@ -4321,8 +4343,7 @@ export function registerChatHandlers(
             // Preserve content before tool execution so abort can recover it
             flushToolTagHoldback();
             if (fullContent.trim()) {
-              allGeneratedContent +=
-                (allGeneratedContent ? "\n\n" : "") + fullContent.trim();
+              allGeneratedContent = appendVisibleToolContent(allGeneratedContent, fullContent);
             }
             // Flush accumulated content to renderer before blocking on tool execution
             try {
@@ -4466,8 +4487,7 @@ export function registerChatHandlers(
               `[CHAT] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES}: model stopped with ${iterationTokenCount} tokens (iteration), content=${hasContent}`,
             );
             if (hasContent) {
-              allGeneratedContent +=
-                (allGeneratedContent ? "\n\n" : "") + fullContent.trim();
+              allGeneratedContent = appendVisibleToolContent(allGeneratedContent, fullContent);
               if (useResponsesApi) {
                 requestMessages.push({
                   type: "output_text",
@@ -4955,6 +4975,9 @@ export function registerChatHandlers(
         } catch (_persistErr) {
           /* Non-fatal: persistence is best-effort; UI still works without it. */
         }
+        generationRecord.status = 'completed';
+        generationRecord.finishReason = lastFinishReason;
+        saveGenerationRecord();
         db.addMessage(assistantMessage);
 
         // Send final metrics
@@ -5163,6 +5186,9 @@ export function registerChatHandlers(
               abortReasoningSegments,
             );
           }
+          generationRecord.status = 'interrupted';
+          generationRecord.finishReason = lastFinishReason;
+          saveGenerationRecord();
           db.addMessage(assistantMessage);
 
           try {

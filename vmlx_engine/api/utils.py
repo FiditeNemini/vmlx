@@ -554,6 +554,19 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
     # file-based checks (jang_config.json, config.json) actually find the files.
     local_path = resolve_to_local_path(model_name)
 
+    # Mixed affine/native-MXFP4 MiMo bundles use the fresh text runtime.
+    # A preserved vision_config must not select the older V2.5 VLM adapter.
+    from ..models.mimo_v26_contract import (
+        read_mimo_v26_contract,
+        mimo_v26_media_enabled,
+    )
+    _mimo26 = read_mimo_v26_contract(local_path)
+    if _mimo26 is not None:
+        if mimo_v26_media_enabled(_mimo26):
+            return True
+        _logger.info("is_mllm_model(%s): tier=mimo_v26_text_runtime result=False", model_name)
+        return False
+
     # MiniMax-M3 VL: always route through the text engine. The generic mlx_vlm
     # loader has no minimax_m3_vl runtime; vMLX's source-owned M3 model handles
     # MSA cache and (when VMLX_M3_VL is set by CLI/panel) image preprocessing in

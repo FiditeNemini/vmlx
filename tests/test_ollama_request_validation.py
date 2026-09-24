@@ -198,3 +198,35 @@ def test_invalid_media_control_is_400_before_generation(monkeypatch, path, extra
     assert result.status_code == 400, result.text
     assert 'image_max_pixels' in result.json()['error']
     generation.assert_not_called()
+
+
+@pytest.mark.parametrize('path,extra,handler', [
+    ('/api/chat', {'messages': [{'role': 'user', 'content': 'hi'}]}, 'create_chat_completion'),
+    ('/api/generate', {'prompt': 'hi'}, 'create_chat_completion'),
+    ('/api/generate', {'prompt': 'hi', 'raw': True}, 'create_completion'),
+])
+@pytest.mark.parametrize('controls', [
+    {'skip_prefix_cache': True}, {'cache_salt': 'fresh-request'},
+    {'skip_prefix_cache': False, 'cache_salt': ''},
+])
+def test_cache_controls_reach_canonical_request(monkeypatch, path, extra, handler, controls):
+    from vmlx_engine import server
+    monkeypatch.setattr(server, '_engine', SimpleNamespace(is_mllm=False))
+    monkeypatch.setattr(server, '_api_key', None)
+    monkeypatch.setattr(server, '_standby_state', None)
+    generation = AsyncMock(return_value={
+        'choices': [{'text': 'ok', 'message': {'role': 'assistant', 'content': 'ok'},
+                     'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 1, 'completion_tokens': 1},
+    })
+    monkeypatch.setattr(server, handler, generation)
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        result = client.post(path, json={'model': 'test', 'stream': False, **extra, **controls})
+    assert result.status_code == 200, result.text
+    generation.assert_awaited_once()
+    request = generation.await_args.args[0]
+    for field, value in controls.items():
+        assert getattr(request, field) == value
+    assert server._compute_bypass_prefix_cache(request) is bool(
+        controls.get('skip_prefix_cache') or controls.get('cache_salt')
+    )

@@ -124,7 +124,7 @@ def _resolve_runtime_cache_fingerprint() -> str:
     except Exception:
         engine_version = "unknown"
     parts.append(f"vmlx_engine={engine_version}")
-    for package in ("jang", "mlx", "mlx-lm", "mlx-vlm"):
+    for package in ("jang", "mlx", "mlx-metal", "mlx-lm", "mlx-vlm"):
         try:
             version = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -132,6 +132,20 @@ def _resolve_runtime_cache_fingerprint() -> str:
         except Exception:
             version = "unknown"
         parts.append(f"{package}={version}")
+    # MLX publishes compatibility and native Metal wheels at the SAME version.
+    # Their kernels need not produce identical cache tensors. Never restore a
+    # compatibility-wheel checkpoint into a native-wheel process (or vice versa).
+    for package in ("mlx", "mlx-metal"):
+        try:
+            wheel = importlib.metadata.distribution(package).read_text("WHEEL") or ""
+            tags = sorted({line[4:].strip() for line in wheel.splitlines()
+                           if line.startswith("Tag:")})
+            identity = ";".join(tags) or "unrecorded"
+        except importlib.metadata.PackageNotFoundError:
+            identity = "missing"
+        except Exception:
+            identity = "unknown"
+        parts.append(f"{package}_wheel={identity}")
     source_id = _resolve_source_checkout_id()
     if source_id:
         parts.append(f"src={source_id}")
@@ -394,6 +408,9 @@ def compute_model_cache_key(
     parts: List[str] = []
 
     # 1. Architecture identity (cheap and safe even if path is unknown)
+    runtime_artifacts = getattr(model, "_vmlx_runtime_artifact_identity", None)
+    if isinstance(runtime_artifacts, str) and runtime_artifacts:
+        parts.append(f"runtime_artifacts={runtime_artifacts}")
     projection_layout = getattr(model, "_vmlx_attention_projection_layout", None)
     if isinstance(projection_layout, str) and projection_layout:
         parts.append(f"attention_projection_layout={projection_layout}")
@@ -3061,6 +3078,10 @@ class BlockAwarePrefixCache:
                 "match_kind": match_kind,
                 "origin": origin,
                 "logical_restored_tokens": int(logical_restored_tokens),
+                # Fetch describes the KV candidate. Hybrid worker validation
+                # can subsequently accept a shorter recurrent-state boundary.
+                # None means the consumer has not reported a decision here.
+                "consumer_accepted_tokens": None,
                 "native_companion_boundary": (
                     int(native_companion_boundary)
                     if native_companion_boundary is not None
@@ -6691,6 +6712,16 @@ class BlockAwarePrefixCache:
             accepted = max(0, min(int(accepted_tokens or 0), credited_tokens))
         except (TypeError, ValueError):
             accepted = 0
+        # Preserve the original fetch outcome and annotate the actual accepted
+        # credit on that request, without replacing a newer last-fetch record.
+        # This is observability only: absent/evicted telemetry cannot change
+        # cache accounting or the generation path.
+        try:
+            record = self._fetch_telemetry.get(request_id)
+            if record is not None:
+                record["consumer_accepted_tokens"] = accepted
+        except Exception:
+            logger.debug("Cache consumer telemetry failed for %s", request_id, exc_info=True)
         if accepted >= credited_tokens:
             return False
 

@@ -231,6 +231,14 @@ class StreamOptions(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Request for chat completion."""
 
+    @model_validator(mode="after")
+    def validate_client_tools(self):
+        from .tool_input_validation import validate_tool_history, validate_tool_schemas
+
+        validate_tool_schemas(self.tools)
+        validate_tool_history(self.messages)
+        return self
+
     model: str
     messages: list[Message] = Field(..., min_length=1)
     temperature: float | None = None
@@ -985,6 +993,14 @@ class ResponsesToolDefinition(BaseModel):
 
 class ResponsesRequest(BaseModel):
     """Request for OpenAI Responses API (POST /v1/responses)."""
+
+    @model_validator(mode="after")
+    def validate_client_tools(self):
+        from .tool_input_validation import validate_tool_history, validate_tool_schemas
+
+        validate_tool_schemas(self.tools)
+        validate_tool_history(self.input)
+        return self
 
     model_config = {"extra": "ignore"}
 

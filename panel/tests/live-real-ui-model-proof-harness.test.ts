@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import vm from "node:vm";
+// @ts-expect-error Plain Node proof harness exports.
+import * as proofHarness from "../scripts/live-real-ui-model-proof.mjs";
 import { createServer } from "node:http";
 import {
   chmodSync,
@@ -25,11 +28,16 @@ import {
   assertCdpExpressionSyntax,
   captureRequiredScreenshot,
   captureBundleGenerationContract,
+  createChatThroughVisibleControl,
+  expandCompletedReasoningRails,
+  resolveDevElectronExecutable,
+  visiblePagedCachePolicy,
   collectOllamaStream,
   deriveProvenSurfaces,
   correlateTerminalResponseToCacheExecution,
   cssEscapeIdentifier,
   expectedUiToolCallCount,
+  explicitRangeInputSequence,
   expectedRawMatrixRoutes,
   extractPersistedReasoningMathLinkage,
   isCacheRequestCorrelationVerified,
@@ -77,6 +85,40 @@ import {
   waitForOwnedUiReleaseSentinel,
   writePrivateArtifactFile,
 } from "../scripts/live-real-ui-model-proof.mjs";
+
+describe("visible New Chat creation", () => {
+  it("clicks the actual control and ignores existing rows while waiting for the new row", async () => {
+    const old = { id: "old", title: "same title", modelPath: "/model" };
+    const fresh = { id: "fresh", title: "same title", modelPath: "/model" };
+    let clicks = 0;
+    let reads = 0;
+    const result = await createChatThroughVisibleControl({
+      chats: { getByModel: async () => ++reads < 3 ? [old] : [fresh, old] },
+      modelPath: "/model", click: () => { clicks++; }, pollMs: 1,
+    });
+    expect(result).toEqual(fresh);
+    expect(clicks).toBe(1);
+    expect(reads).toBe(3);
+  });
+
+  it("does not accept a stale row when the click creates nothing", async () => {
+    await expect(createChatThroughVisibleControl({
+      chats: { getByModel: async () => [{ id: "old", modelPath: "/model" }] },
+      modelPath: "/model", click: () => {}, timeoutMs: 5, pollMs: 1,
+    })).rejects.toThrow("did not create a new model-bound chat row");
+  });
+
+  it.each([
+    [[{ id: "wrong", modelPath: "/other" }], "wrong model"],
+    [[{ id: "a", modelPath: "/model" }, { id: "b", modelPath: "/model" }], "ambiguous"],
+  ])("rejects incorrect or ambiguous new rows", async (created, message) => {
+    let clicked = false;
+    await expect(createChatThroughVisibleControl({
+      chats: { getByModel: async () => clicked ? created : [] },
+      modelPath: "/model", click: () => { clicked = true; },
+    })).rejects.toThrow(message);
+  });
+});
 
 const sha = "a".repeat(64);
 const otherSha = "b".repeat(64);
@@ -536,10 +578,10 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).toContain(
       'const persistedNativeMtpMode = nativeMtpSelection?.persistedMode',
     );
-    expect(harnessSource).toContain("&& persistedNativeMtpMode === 'deterministic';");
-    expect(harnessSource).toContain("'Top P': nativeMtpGreedyUi");
-    expect(harnessSource).toContain("'Top K': nativeMtpGreedyUi");
-    expect(harnessSource).toContain("'Min P': nativeMtpGreedyUi");
+    expect(harnessSource).toContain("['auto', 'deterministic'].includes(persistedNativeMtpMode ?? 'auto')");
+    expect(harnessSource).toContain("'Top P': explicitUiSampling.topP");
+    expect(harnessSource).toContain("'Top K': explicitUiSampling.topK");
+    expect(harnessSource).toContain("'Min P': explicitUiSampling.minP");
     expect(harnessSource).not.toContain(
       "(button.textContent || '').replace(/\\\\s+/g, ' ').trim() === 'Save'",
     );
@@ -2716,6 +2758,10 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     .createHash("sha256")
     .update(canonicalPythonPath)
     .digest("hex");
+  const installedPythonFingerprints = [...new Set([
+    pythonPathSha,
+    crypto.createHash("sha256").update(pythonPath).digest("hex"),
+  ])].sort();
   const pythonPrefixSha = crypto
     .createHash("sha256")
     .update(canonicalPythonPrefix)
@@ -2764,8 +2810,8 @@ function createInstalledPairedArtifact(result: Record<string, any>) {
     python_executable_path: canonicalPythonPath,
     python_executable_fingerprint_sha256: pythonPathSha,
     checkout_python_invocation_fingerprints_sha256: [],
-    installed_python_invocation_fingerprints_sha256: [pythonPathSha],
-    accepted_python_invocation_fingerprints_sha256: [pythonPathSha],
+    installed_python_invocation_fingerprints_sha256: installedPythonFingerprints,
+    accepted_python_invocation_fingerprints_sha256: installedPythonFingerprints,
     python_prefix_path: canonicalPythonPrefix,
     python_prefix_fingerprint_sha256: pythonPrefixSha,
     producer_executable_path: pythonIdentity.path,
@@ -3746,20 +3792,15 @@ describe("real UI model proof harness", () => {
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
   });
 
-  it("keeps sampled Auto defaults when the native MTP runtime is active", () => {
+  it.each(["auto", "deterministic"])("grades Native-MTP %s effective greedy startup values separately from bundle defaults", (mode) => {
     const result = structuredClone(goodResult());
     result.server.health.mtp.runtime_active = true;
-    result.nativeMtpSelection = { persistedMode: "auto" };
-    result.effectiveSessionConfig = { nativeMtpMode: "auto" };
-
-    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
-  });
-
-  it("grades Native-MTP effective greedy values separately from bundle defaults", () => {
-    const result = structuredClone(goodResult());
-    result.server.health.mtp.runtime_active = true;
-    result.nativeMtpSelection = { persistedMode: "deterministic" };
-    result.effectiveSessionConfig = { nativeMtpMode: "deterministic" };
+    result.nativeMtpSelection = { persistedMode: mode };
+    result.effectiveSessionConfig = { nativeMtpMode: mode };
+    result.server.health.mtp.request_policy = mode === "auto" ? "deterministic-defaults" : "greedy-only";
+    result.server.health.effective_defaults = {
+      ...result.server.health.effective_defaults, temperature: 0, top_p: 1, top_k: 0, min_p: 0,
+    };
     result.chatSettingsDom.values = {
       ...result.chatSettingsDom.values,
       temperature: 0,
@@ -3784,6 +3825,30 @@ describe("real UI model proof harness", () => {
       delete record.values.min_p;
     }
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+  });
+
+  it("preserves explicit Auto sampling while checking greedy engine startup defaults", () => {
+    const result = structuredClone(goodResult());
+    result.server.health.mtp.runtime_active = true;
+    result.server.health.mtp.request_policy = "deterministic-defaults";
+    result.nativeMtpSelection = { persistedMode: "auto" };
+    result.effectiveSessionConfig = { nativeMtpMode: "auto" };
+    result.server.health.effective_defaults = {
+      ...result.server.health.effective_defaults, temperature: 0, top_p: 1, top_k: 0, min_p: 0,
+    };
+    const explicit = { temperature: 0.25, topP: 0.8, topK: 10, minP: 0.02 };
+    result.requestContract.samplingOverrides = explicit;
+    Object.assign(result.chatOverrides, explicit);
+    Object.assign(result.chatSettingsDom.values, explicit);
+    const wire = { temperature: 0.25, top_p: 0.8, top_k: 10, min_p: 0.02 };
+    Object.assign(result.resolvedSamplingKwargs, wire);
+    for (const record of result.resolvedSamplingRecords) Object.assign(record.values, wire);
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+    result.server.health.effective_defaults.temperature = 1;
+    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/effective startup default/);
+    result.server.health.effective_defaults.temperature = 0;
+    result.server.health.mtp.request_policy = "compatible-only";
+    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/sampling policy/);
   });
 
   it("allows an exact one-token reasoning segment to arrive in one delta", () => {
@@ -4569,6 +4634,42 @@ describe("real UI model proof harness", () => {
       );
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("binds the live backend invocation alias to the same manifest-attested target", () => {
+    const result = goodResult();
+    const fixture = createInstalledPairedArtifact(result);
+    try {
+      const binding = result.uiRuntimeProvenance.backend_python_process_binding;
+      result.healthProvenance.after.binding.runtime_source_hashes.python_executable_fingerprint_sha256 =
+        binding.invoked_executable_path_fingerprint_sha256;
+      expect(validateUiRuntimeProvenance(result)).toEqual([]);
+      result.healthProvenance.after.binding.runtime_source_hashes.python_executable_fingerprint_sha256 = "f".repeat(64);
+      expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(/manifest-attested bundled Python/);
+      result.healthProvenance.after.binding.runtime_source_hashes.python_executable_fingerprint_sha256 =
+        binding.invoked_executable_path_fingerprint_sha256;
+      rmSync(fixture.pythonPath);
+      symlinkSync(testExecutablePath, fixture.pythonPath);
+      expect(validateUiRuntimeProvenance(result).join("\n")).toMatch(/independently bound/);
+    } finally { rmSync(fixture.directory, { recursive: true, force: true }); }
+  });
+
+  it("rejects extra or omitted installed Python invocation fingerprints", () => {
+    for (const extra of [true, false]) {
+      const result = goodResult();
+      const fixture = createInstalledPairedArtifact(result);
+      try {
+        const value = structuredClone(fixture.artifact.value);
+        for (const phase of ["before", "after"]) {
+          const runner = value.identity.runner[phase];
+          const hashes = runner.installed_python_invocation_fingerprints_sha256;
+          runner.installed_python_invocation_fingerprints_sha256 = extra ? [...hashes, "f".repeat(64)].sort() : hashes.slice(0, 1);
+          runner.accepted_python_invocation_fingerprints_sha256 = runner.installed_python_invocation_fingerprints_sha256;
+        }
+        result.pairedApiArtifact = writePairedArtifactValue(fixture.directory, "bad-aliases.json", value);
+        expect(validatePairedApiEvidence(result).join("\n")).toMatch(/installed-runtime runner identity/);
+      } finally { rmSync(fixture.directory, { recursive: true, force: true }); }
     }
   });
 
@@ -6403,6 +6504,59 @@ describe("native MTP surface / engine parity", () => {
     expect(validateNativeMtpSurfaceParity(mtpBundleResult())).toEqual([]);
   });
 
+  it("accepts hidden controls for witnessed weights-present runtime-unwired capability", () => {
+    const result: any = nonMtpBundleResult();
+    Object.assign(result.server.health.mtp, {
+      index_has_mtp_tensors: true, mtp_tensor_count: 72,
+      runtime_supported: false, runtime_available: false,
+      status: "weights_present_runtime_unwired",
+    });
+    expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
+    result.serverCacheControls.nativeMtpControl.labelVisible = true;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/runtime unwired/);
+  });
+
+  it("accepts hidden MTP controls only with a complete inconsistent-artifact verdict", () => {
+    const result: any = nonMtpBundleResult();
+    Object.assign(result.server.health.mtp, {
+      index_has_mtp_tensors: true, mtp_tensor_count: 42,
+      artifact_available: false, runtime_supported: false,
+      runtime_available: false, runtime_active: false,
+      status: "metadata_inconsistent", runtime_reason: "metadata_inconsistent",
+      issues: ["config declares 1 layer but index has 2"],
+    });
+    expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
+    for (const field of ["artifact_available", "runtime_supported", "runtime_available", "runtime_active"]) {
+      for (const value of [true, undefined]) {
+        const contradictory = structuredClone(result);
+        contradictory.server.health.mtp[field] = value;
+        expect(validateNativeMtpSurfaceParity(contradictory).length).toBeGreaterThan(0);
+      }
+    }
+    for (const issues of [[], undefined]) {
+      const missing = structuredClone(result);
+      missing.server.health.mtp.issues = issues;
+      expect(validateNativeMtpSurfaceParity(missing).length).toBeGreaterThan(0);
+    }
+    result.serverCacheControls.nativeMtpControl.modeSelectPresent = true;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/inconsistent/);
+  });
+
+  it.each(["runtime_supported", "runtime_available", "runtime_active"])(
+    "does not hide supported controls when the unwired %s verdict is contradictory or absent",
+    (field) => {
+      for (const value of [true, undefined]) {
+        const result: any = nonMtpBundleResult();
+        Object.assign(result.server.health.mtp, {
+          index_has_mtp_tensors: true, runtime_supported: false,
+          runtime_available: false, runtime_active: false,
+          status: "weights_present_runtime_unwired", [field]: value,
+        });
+        expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/rendered no Native MTP control/);
+      }
+    },
+  );
+
   it("accepts a visibly selected and persisted fixed D2 runtime", () => {
     const result: any = mtpBundleResult();
     result.requestContract = {
@@ -6789,5 +6943,148 @@ describe("tool loop: per-turn protocol resolution", () => {
     expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
       /referenced the second-turn probe prematurely/,
     );
+  });
+});
+
+
+describe("dev Electron launch identity", () => {
+  it("records the same explicit binary passed to electron-vite", () => {
+    expect(resolveDevElectronExecutable("/panel", { ELECTRON_EXEC_PATH: "/private/Electron" })).toBe("/private/Electron");
+    expect(resolveDevElectronExecutable("/panel", {})).toBe("/panel/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
+  });
+});
+
+describe("visible SSD-only cache policy", () => {
+  it("requires visible policy evidence when the RAM checkbox is omitted", () => {
+    expect(visiblePagedCachePolicy({present: false, checked: false, disabled: false, policyVisible: true})).toEqual({established: true, usePagedCache: false, lockedOff: true});
+    expect(visiblePagedCachePolicy({present: false, checked: false, disabled: false, policyVisible: false}).established).toBe(false);
+  });
+  it("does not let policy prose override a conflicting real RAM control", () => {
+    expect(visiblePagedCachePolicy({present: true, checked: true, disabled: false, policyVisible: true})).toEqual({established: true, usePagedCache: true, lockedOff: false});
+  });
+});
+
+
+describe("completed reasoning rail expansion", () => {
+  it("reopens a rail collapsed by the pending completion timer before taking proof", async () => {
+    let time = 0;
+    let expanded = true;
+    let collapsePending = true;
+    let clicks = 0;
+    const result = await expandCompletedReasoningRails({
+      now: () => time,
+      sleep: async (ms: number) => {
+        time += ms;
+        if (collapsePending && time >= 200) {
+          expanded = false;
+          collapsePending = false;
+        }
+      },
+      readRows: () => [{ expectsReasoning: true, rails: [{
+        complete: true, visible: true, expanded,
+        expand: () => { clicks++; expanded = true; },
+      }] }],
+    });
+    expect(clicks).toBe(1);
+    expect(expanded).toBe(true);
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(1450);
+  });
+
+  it.each(["missing", "hidden", "streaming", "unresponsive"])("rejects %s reasoning instead of weakening the visible-content gate", async (kind) => {
+    let time = 0;
+    await expect(expandCompletedReasoningRails({
+      timeoutMs: 100, stableMs: 50, pollMs: 10,
+      now: () => time, sleep: async (ms: number) => { time += ms; },
+      readRows: () => [{ expectsReasoning: true, rails: kind === "missing" ? [] : [{
+        complete: kind !== "streaming", visible: kind !== "hidden",
+        expanded: kind !== "unresponsive", expand: () => {},
+      }] }],
+    })).rejects.toThrow(/did not remain visibly expanded/);
+  });
+
+  it("accepts a no-reasoning turn without inventing a rail", async () => {
+    let time = 0;
+    const result = await expandCompletedReasoningRails({
+      now: () => time, sleep: async (ms: number) => { time += ms; },
+      readRows: () => [{ expectsReasoning: false, rails: [] }],
+    });
+    expect(result.clicks).toBe(0);
+  });
+});
+
+
+describe("explicit sampler controls and verbatim receipts", () => {
+  it("produces a real transition when explicitly selecting an already displayed default", () => {
+    expect(explicitRangeInputSequence(0, 0, 0, 100)).toEqual([100, 0]);
+    expect(explicitRangeInputSequence(1, 1, 0, 1)).toEqual([0, 1]);
+    expect(explicitRangeInputSequence(0.9, 0, 0, 2)).toEqual([0]);
+    expect(() => explicitRangeInputSequence(0, -1, 0, 100)).toThrow();
+    expect(() => explicitRangeInputSequence(1, 1, 1, 1)).toThrow();
+    expect(() => explicitRangeInputSequence(0, NaN, 0, 100)).toThrow();
+  });
+  it("rejects a corrupted copy-only receipt even when currency and math still render", () => {
+    const result = goodResult();
+    const receipt = "Third UI turn: REAL_UI_LIVE_TOOL_ONE REAL_UI_LIVE_TOOL_TWO\nCurrency: $43\nMath: \\(2 + 2 = 4\\)";
+    result.requestContract.promptThree = "Return this exact three-line rendering receipt and nothing else.\n" + receipt;
+    const record = result.assistantRecords.find(row => row.id === result.assistantMessageIds[2]);
+    record.content = receipt.replace("TOOL_ONE", "TO<NL>ONE");
+    expect(validateRenderedDomEvidence(result)).toContain("final assistant answer did not preserve the requested verbatim receipt");
+    record.content = receipt;
+    expect(validateRenderedDomEvidence(result)).not.toContain("final assistant answer did not preserve the requested verbatim receipt");
+  });
+});
+
+
+describe("media semantics are bound to the submitted attachment turn", () => {
+  function score(answer: string, earlier: string, kind = "video", includeAttachment = true) {
+    const source = readFileSync(path.resolve("scripts/live-real-ui-model-proof.mjs"), "utf8");
+    const start = source.indexOf("          const imageSemanticVerified =");
+    const end = source.indexOf("          const mediaEvidence =", start);
+    expect(start).toBeGreaterThan(0);
+    const content = includeAttachment
+      ? JSON.stringify([{ type: `${kind}_url`, [`${kind}_url`]: { url: "data:fixture" } }])
+      : "no attachment";
+    const messages = [
+      { id: "old-user", role: "user", content: "old" },
+      { id: "old-answer", role: "assistant", content: earlier },
+      { id: "media-user", role: "user", content },
+      { id: "media-answer", role: "assistant", content: answer },
+    ];
+    const binding = { userMessageId: "media-user" };
+    return vm.runInNewContext(source.slice(start, end) + "\n({imageSemanticVerified, videoSemanticVerified, audioSemanticVerified})", {
+      checkMedia: kind === "image", checkVideo: kind === "video", checkAudio: kind === "audio",
+      imageExpectRegex: "^red$", videoExpectRegex: "^right$", audioExpectRegex: "green bicycle",
+      allAssistantText: earlier + "\n" + answer, messages,
+      mediaTurnBindings: { 4: binding, 5: binding, 6: binding },
+      validateMediaTurnAnswer: (proofHarness as any).validateMediaTurnAnswer,
+    });
+  }
+  it("does not accept a word from another turn as the audio transcript", () => {
+    expect(score("I cannot hear it", "green bicycle", "audio").audioSemanticVerified).toBe(false);
+  });
+  it("anchors a direction against its own answer, not the whole conversation", () => {
+    expect(score("right", "Earlier unrelated answer").videoSemanticVerified).toBe(true);
+  });
+  it("requires the attachment on the bound user message", () => {
+    expect(score("green bicycle", "", "audio", false).audioSemanticVerified).toBe(false);
+  });
+});
+
+
+describe("packaged media fixture decoding without data fetch", () => {
+  it("preserves binary bytes without a network or renderer fetch", () => {
+    expect(Array.from((proofHarness as any).decodeProofAttachment({
+      dataUrl: "data:image/png;base64,AAEC/w==", type: "image/png",
+    }))).toEqual([0, 1, 2, 255]);
+  });
+  it("rejects a MIME mismatch instead of injecting a mislabeled attachment", () => {
+    expect(() => (proofHarness as any).decodeProofAttachment({
+      dataUrl: "data:image/png;base64,AAEC/w==", type: "audio/wav",
+    })).toThrow(/MIME/);
+  });
+  it("rejects non-fixture URLs", () => {
+    expect(() => (proofHarness as any).decodeProofAttachment({
+      dataUrl: "https://example.invalid/file", type: "image/png",
+    })).toThrow(/data URL/);
   });
 });

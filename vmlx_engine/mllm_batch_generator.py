@@ -445,7 +445,7 @@ _MLLM_MEDIA_PREFIX_CACHE_DEFAULT_FAMILIES = frozenset(
 )
 
 
-def _mllm_media_prefix_cache_family_enabled(model_type: Any) -> bool:
+def _mllm_media_prefix_cache_family_enabled(model_type: Any, *, mimo_v26_runtime: bool = False) -> bool:
     """One policy source for generator lookup and scheduler publication.
 
     A duplicated allowlist made it possible for one half of the media SSD path
@@ -456,6 +456,10 @@ def _mllm_media_prefix_cache_family_enabled(model_type: Any) -> bool:
     enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
     if enabled in ("0", "false", "no", "off"):
         return False
+    # The fresh bridge has typed mixed-SWA caches and native media embeddings.
+    # The shared family label must not opt legacy V2.5 weights/runtime in.
+    if mimo_v26_runtime is True and str(model_type or "").lower() == "mimo_v2":
+        return True
     if str(model_type or "").lower() in _MLLM_MEDIA_PREFIX_CACHE_DEFAULT_FAMILIES:
         return True
     if enabled not in ("1", "true", "yes", "on"):
@@ -10462,6 +10466,10 @@ class MLLMBatchGenerator:
         assignment_runs = runs
         run_group_sizes: Optional[List[int]] = None
         assignments: Optional[List[Tuple[str, Any]]] = None
+        mimo_grouping = None
+        if getattr(self.model, "_mimo_v26_runtime", False):
+            from .models.mimo_v26_cache import media_item_runs
+            mimo_grouping = media_item_runs(request, token_ids, grouped_ids)
         dots_grouping = _dots3_media_item_runs(
             request,
             token_ids,
@@ -10469,7 +10477,9 @@ class MLLMBatchGenerator:
             model_type=getattr(self, "_model_type", None),
         )
         muse_grouping = None
-        if dots_grouping is not None:
+        if mimo_grouping is not None:
+            assignment_runs, run_group_sizes, assignments = mimo_grouping
+        elif dots_grouping is not None:
             assignment_runs, run_group_sizes, assignments = dots_grouping
         else:
             muse_grouping = _muse_glimmer_media_item_runs(
@@ -10558,7 +10568,7 @@ class MLLMBatchGenerator:
             "modalities": [modality for modality, _source in assignments],
             "boundaries": boundaries,
         }
-        if muse_grouping is not None or dots_grouping is not None:
+        if muse_grouping is not None or dots_grouping is not None or mimo_grouping is not None:
             media_cache_scope["item_ranges"] = [
                 [int(run_start), int(run_end)]
                 for run_start, run_end in assignment_runs
@@ -10628,7 +10638,9 @@ class MLLMBatchGenerator:
         remains a kill switch for every default-enabled family.
         """
         model_type = str(getattr(self, "_model_type", "") or "").lower()
-        if not _mllm_media_prefix_cache_family_enabled(model_type):
+        if not _mllm_media_prefix_cache_family_enabled(
+            model_type, mimo_v26_runtime=getattr(self.model, "_mimo_v26_runtime", False),
+        ):
             return False
         if getattr(request, "_bypass_prefix_cache", False):
             return False
@@ -11292,6 +11304,40 @@ class MLLMBatchGenerator:
             self._maybe_capture_mixed_swa_boundary(request, cache)
             return logits
 
+    def _prefill_mimo_v26_text(self, request, input_ids, cache, kwargs, *, step):
+        """Advance an uncached text tail in bounded spans to the absolute N-1 checkpoint."""
+        lm = self.language_model
+        original = list(getattr(request, "_original_token_ids", None) or [])
+        cached = int(getattr(request, "_cached_tokens", 0) or 0)
+        # input_ids is already sliced after the restored prefix. The clean
+        # checkpoint is absolute; using it directly as a tail index, or only
+        # splitting cold requests, submits growing tool results in one giant
+        # forward. A real 4,286-token hit plus 9,077-token tail exhausted Metal.
+        boundary = len(original) - 1 - cached
+        seq_len = int(input_ids.shape[1])
+        if not 0 < boundary < seq_len:
+            return lm(input_ids, **kwargs)
+        logger.info(
+            "MiMo-V2.6 text prefill: cached=%d tail=%d checkpoint_tail=%d chunk=%d",
+            cached, seq_len, boundary, step,
+        )
+
+        def span_kwargs(begin, end):
+            span = dict(kwargs)
+            if "position_ids" in span:
+                span["position_ids"] = span["position_ids"][..., begin:end]
+            return span
+
+        for begin in range(0, boundary, step):
+            end = min(begin + step, boundary)
+            lm(input_ids[:, begin:end], **span_kwargs(begin, end))
+            _materialize_prefill_cache_state(cache)
+            request._prefill_tokens_done = end
+            mx.clear_cache()
+            _raise_if_prefill_cancelled(request)
+        self._maybe_capture_mixed_swa_boundary(request, cache)
+        return lm(input_ids[:, boundary:], **span_kwargs(boundary, seq_len))
+
     def _run_vision_encoding_inner(self, request: "MLLMBatchRequest", cache: Optional[List[Any]] = None) -> "mx.array":
         kwargs = dict(request.extra_kwargs)
         # Only pass pixel_values when non-None. Smelt-loaded models use a
@@ -11760,7 +11806,8 @@ class MLLMBatchGenerator:
         if (
             not has_media_payload
             and self._model_type == "mimo_v2"
-            and not _mimo_tight_text_prefill_requires_chunking
+            and (not _mimo_tight_text_prefill_requires_chunking
+                 or getattr(self.model, "_mimo_v26_runtime", False))
         ):
             lm = self.language_model
             if lm is not None and cache is not None:
@@ -11778,7 +11825,17 @@ class MLLMBatchGenerator:
                         kwargs["position_ids"] = position_ids
                 _seed_text_rope_delta_for_decode(lm, input_ids)
                 _restore_mrope_module_state(request, lm)
-                output = lm(input_ids, **kwargs)
+                if getattr(self.model, "_mimo_v26_runtime", False):
+                    # Use the same N-1 checkpoint partition for cold and SSD
+                    # resumed requests. A separate clean re-prefill changes
+                    # bf16 reduction shapes and can change greedy wording.
+                    output = self._prefill_mimo_v26_text(
+                        request, input_ids, cache, kwargs,
+                        step=max(1, min(int(self.prefill_step_size),
+                                        int(_tight_text_prefill_step_size))),
+                    )
+                else:
+                    output = lm(input_ids, **kwargs)
                 request.vision_encoded = True
                 if hasattr(output, "logits"):
                     return output.logits
@@ -13444,7 +13501,10 @@ class MLLMBatchGenerator:
             if end == glm_native_boundary:
                 self._store_glm_native_boundary(request, cache)
             if end in clean_boundaries and getattr(request, "_media_clean_snapshot_allowed", True):
-                self._snapshot_native_media_clean_boundary(request, cache, end)
+                if getattr(self.model, "_mimo_v26_runtime", False):
+                    self._maybe_capture_mixed_swa_boundary(request, cache)
+                else:
+                    self._snapshot_native_media_clean_boundary(request, cache, end)
                 if _diag_fingerprints_enabled():
                     logger.info(
                         "restore fingerprint COLD cache-at-boundary for %s at %d: %s",
@@ -13557,6 +13617,16 @@ class MLLMBatchGenerator:
         checkpoint needed by this request's immediate tool continuation.
         """
         request._media_clean_capture_boundaries = ()
+        if getattr(self.model, "_mimo_v26_runtime", False) and cache is not None:
+            # Attention-only mixed-SWA needs a native rotating snapshot, not
+            # the recurrent companion cache used by the generic branch below.
+            original = list(getattr(request, "_original_token_ids", None) or [])
+            boundary = len(original) - 1
+            if int(getattr(request, "_cached_tokens", 0) or 0) == 0 and 0 < boundary < seq_len:
+                request._media_clean_snapshot_allowed = self._media_prefix_cache_allowed(request, original)
+                request._media_clean_capture_boundaries = (boundary,)
+                return boundary
+            return 0
         if os.environ.get("VMLX_DISABLE_NATIVE_MEDIA_BOUNDARY") in ("1", "true", "True", "yes", "on"):
             return 0
         if cache is None or not getattr(self, "_is_hybrid", False) or getattr(self, "_ssm_state_cache", None) is None:
@@ -15217,6 +15287,12 @@ class MLLMBatchGenerator:
                                                             _hit_tokens,
                                                         )
                                                     )
+                                            if _media_tail is None and getattr(self.model, "_mimo_v26_runtime", False):
+                                                from .models.mimo_v26_cache import prepare_media_tail
+                                                _media_tail = prepare_media_tail(
+                                                    req, list(token_list), _hit_tokens,
+                                                    self._media_placeholder_token_ids_by_modality(),
+                                                )
                                             if _media_tail is not None:
                                                 req.input_ids = mx.array(
                                                     [_full_remaining]
@@ -16854,6 +16930,11 @@ class MLLMBatchGenerator:
         without preventing natural stop later.
         """
 
+        # The fresh runtime uses the source template's thinking control. The
+        # legacy EOS/tag suppression was not qualified against these weights.
+        if getattr(getattr(self, "model", None), "_mimo_v26_runtime", False):
+            return []
+
         token_ids = getattr(self, "_mimo_v2_thinking_off_token_ids", None)
         if token_ids is None:
             tokenizer = getattr(self.processor, "tokenizer", self.processor)
@@ -16933,6 +17014,9 @@ class MLLMBatchGenerator:
         the processor releases logits so the model must still generate the
         parameter value and closing XML itself.
         """
+
+        if getattr(getattr(self, "model", None), "_mimo_v26_runtime", False):
+            return []
 
         extra = getattr(request, "extra_kwargs", {}) or {}
         if (

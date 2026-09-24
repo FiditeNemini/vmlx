@@ -83,6 +83,18 @@ def test_zero_percent_is_unlimited_matching_the_slider():
     assert resolve_block_disk_cache_max_gb(args) == 0.0
 
 
+@pytest.mark.parametrize("percent", [0.003, 0.000000001])
+def test_positive_fractional_percent_never_becomes_unlimited(monkeypatch, percent):
+    from types import SimpleNamespace
+    import vmlx_engine.cli as cli
+
+    volume_bytes = 16 * 1024 ** 3
+    monkeypatch.setattr(cli.shutil, "disk_usage", lambda _: SimpleNamespace(total=volume_bytes))
+    resolved = resolve_block_disk_cache_max_gb(_args(block_disk_cache_max_percent=percent))
+    assert int(resolved * 1024 ** 3) >= 1
+    assert resolved == pytest.approx(max(1 / 1024 ** 3, 16 * percent / 100))
+
+
 def test_normalization_is_idempotent():
     """Both scheduler config builders call it; the second call must not treat
     the number the first one produced as an explicit user choice."""

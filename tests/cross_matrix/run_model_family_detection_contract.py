@@ -38,6 +38,7 @@ SOURCE_HASH_FILES = (
     "panel/src/shared/reasoningParserAliases.ts",
     "panel/src/shared/toolParserAliases.ts",
     "panel/tests/model-config-registry.test.ts",
+    "panel/tests/helpers/local-model-paths.ts",
     "panel/tests/settings-flow.test.ts",
     "tests/cross_matrix/run_decode_speed_gate.py",
     "tests/cross_matrix/run_dsv4_long_context_gate.py",
@@ -324,8 +325,9 @@ ROW_MARKERS: dict[str, tuple[str, ...]] = {
         f"test_decode_speed_local_high_risk_rows_match_current_engine_registry[{name}]"
         for name in LOCAL_HIGH_RISK_ROWS
     ),
-    "panel_local_high_risk_rows_match_detector_policy": (
-        "matches current local high-risk model paths to panel parser cache and modality policy",
+    "panel_local_high_risk_rows_match_detector_policy": tuple(
+        f"matches local high-risk artifact {name} to panel parser cache and modality policy"
+        for name in LOCAL_HIGH_RISK_ROWS
     ),
 }
 

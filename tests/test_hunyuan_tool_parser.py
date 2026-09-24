@@ -214,3 +214,65 @@ class TestHunyuanToolParser:
             assert cls is HunyuanToolParser, (
                 f"alias {alias!r} should resolve to HunyuanToolParser, got {cls}"
             )
+
+
+class TestHunyuanNativeSchema:
+    @staticmethod
+    def envelope(value, variant="", name="record_payload"):
+        def tag(n, close=False):
+            return f"<{'/' if close else ''}{n}{variant}>"
+        return (tag("tool_calls") + tag("tool_call") + name + tag("tool_sep")
+                + tag("arg_key") + "label" + tag("arg_key", True)
+                + tag("arg_value") + value + tag("arg_value", True)
+                + tag("tool_call", True) + tag("tool_calls", True))
+
+    @staticmethod
+    def request(api, prop):
+        fn = {"name": "record_payload", "parameters": {
+            "type": "object", "$defs": {"text": {"type": "string"}},
+            "properties": {"label": prop}, "required": ["label"],
+        }}
+        return {"tools": [{"type": "function", "function": fn} if api == "chat"
+                          else {"type": "function", **fn}]}
+
+    @pytest.mark.parametrize("variant", ["", ":opensource"])
+    @pytest.mark.parametrize("api", ["chat", "responses"])
+    @pytest.mark.parametrize("prop", [{"type": "string"}, {"$ref": "#/$defs/text"},
+                                      {"allOf": [{"$ref": "#/$defs/text"}, {"maxLength": 200}]}])
+    @pytest.mark.parametrize("value", ["123", "false", "null", '"quoted"', '{"n":1}',
+                                       "  literal text  ", "\n  source\n", ""])
+    def test_native_strings_preserve_types_bytes_and_streaming(self, parser, variant, api, prop, value):
+        request = self.request(api, prop)
+        raw = self.envelope(value, variant)
+        result = parser.extract_tool_calls(raw, request=request)
+        assert json.loads(result.tool_calls[0]["arguments"]) == {"label": value}
+        calls = []
+        # Every possible tag boundary occurs when the native envelope is streamed one character at a time.
+        for end in range(1, len(raw) + 1):
+            chunk = parser.extract_tool_calls_streaming(raw[:end-1], raw[:end], raw[end-1:end], request=request)
+            if chunk:
+                calls.extend(chunk.get("tool_calls", []))
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"]) == {"label": value}
+        assert not parser.extract_tool_calls_streaming(raw, raw + "\n", "\n", request=request)
+
+    @pytest.mark.parametrize("value,prop,expected", [
+        ("false", {"type": "boolean"}, False),
+        ("123", {"type": "integer"}, 123),
+        ('{"x":1}', {"type": "object"}, {"x": 1}),
+        ("[1,2]", {"type": "array"}, [1, 2]),
+        ("null", {"type": ["string", "null"]}, None),
+        ("123", {"type": ["string", "integer"]}, 123),
+    ])
+    def test_nonstring_and_ambiguous_values_keep_legacy_decoding(self, parser, value, prop, expected):
+        result = parser.extract_tool_calls(self.envelope(value), request=self.request("chat", prop))
+        assert json.loads(result.tool_calls[0]["arguments"]) == {"label": expected}
+
+    def test_later_completed_envelope_does_not_repeat_prior_call(self, parser):
+        request = self.request("chat", {"type": "string"})
+        first = self.envelope("123")
+        second = self.envelope("false")
+        result = parser.extract_tool_calls_streaming(first, first + second, second, request=request)
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["index"] == 1
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {"label": "false"}

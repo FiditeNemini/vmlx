@@ -1111,7 +1111,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               maxInput={100000}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel={t('sessions.config.defaultWithValue', { n: 1000 })}
+              unlimitedLabel={t('sessions.config.defaultWithValue', {
+                n: dsv4Active ? DSV4_MAX_CACHE_BLOCKS : DEFAULT_CONFIG.maxCacheBlocks,
+              })}
             />
           </>
         )}
@@ -1139,6 +1141,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               min={0}
               max={90}
               step={1}
+              allowFractional
+              maxInput={90}
               defaultValue={10}
               allowUnlimited
               unlimitedValue={0}
@@ -2337,12 +2341,14 @@ interface SliderFieldProps {
   disabled?: boolean
   /** Hard upper limit for number input (prevents server crash from out-of-range values) */
   maxInput?: number
+  /** Preserve typed percentages; rounding a positive budget to zero disables its limit. */
+  allowFractional?: boolean
 }
 
 export function SliderField({
   label, tooltip, value, onChange, min, max, step, defaultValue,
   allowUnlimited = false, unlimitedValue = 0, unlimitedLabel = 'Unlimited',
-  disabled = false, maxInput,
+  disabled = false, maxInput, allowFractional = false,
   settingKey
 }: SliderFieldProps) {
   const isUnlimited = allowUnlimited && value === unlimitedValue
@@ -2362,9 +2368,10 @@ export function SliderField({
     setLocalInput(raw)
     if (raw === '') return
 
-    const parsed = Math.round(Number(raw))
+    const parsed = allowFractional ? Number(raw) : Math.round(Number(raw))
     const withinHardMaximum = maxInput == null || parsed <= maxInput
-    if (Number.isFinite(parsed) && parsed >= min && withinHardMaximum) {
+    const explicitUnlimited = allowUnlimited && parsed === unlimitedValue
+    if (Number.isFinite(parsed) && (explicitUnlimited || parsed >= min) && withinHardMaximum) {
       onChange(parsed)
     }
   }
@@ -2381,8 +2388,10 @@ export function SliderField({
       onChange(isUnlimited ? unlimitedValue : defaultValue)
       return
     }
-    const num = Math.round(Number(raw))
-    if (isNaN(num)) {
+    const num = allowFractional ? Number(raw) : Math.round(Number(raw))
+    if (allowUnlimited && num === unlimitedValue) {
+      onChange(unlimitedValue)
+    } else if (isNaN(num)) {
       onChange(defaultValue)
     } else {
       // Clamp to valid range — maxInput enforces hard server-side limits
@@ -2462,8 +2471,8 @@ export function SliderField({
           onBlur={handleInputBlur}
           placeholder={isUnlimited ? unlimitedLabel : undefined}
           disabled={disabled}
-          min={min}
-          step={step}
+          min={allowUnlimited ? Math.min(min, unlimitedValue) : min}
+          step={allowFractional ? 'any' : 1}
         />
       </div>
     </div>

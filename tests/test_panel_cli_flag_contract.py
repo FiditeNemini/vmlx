@@ -321,10 +321,10 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_core_flags() -> Non
 
     for expression in (
         "finitePositiveInteger(config.rateLimit)",
-        "finitePositiveInteger(config.maxNumSeqs)",
-        "finitePositiveInteger(config.prefillBatchSize)",
+        "finitePositiveInteger(concurrency.maxNumSeqs)",
+        "finitePositiveInteger(concurrency.prefillBatchSize)",
         "finitePositiveInteger(config.prefillStepSize)",
-        "finitePositiveInteger(config.completionBatchSize)",
+        "finitePositiveInteger(concurrency.completionBatchSize)",
         # kvCacheGroupSize left this list when generic --kv-cache-quantization
         # emission was retired (stored/live cache is exact everywhere); the
         # panel no longer sends a group size at all.
@@ -420,27 +420,31 @@ def test_metal_oom_startup_errors_surface_wired_limit_guidance() -> None:
         / "SessionConfigForm.tsx"
     ).read_text(encoding="utf-8")
 
-    assert "sudo sysctl iogpu.wired_limit_mb=120000" in shared
-    assert "115000-120000 MB" in shared
-    assert "Do not set it equal to physical RAM" in shared
+    assert "sudo sysctl iogpu.wired_limit_mb=120000" not in shared
+    assert "measuredWiredLimitCommand" in shared
+    assert "does not establish that the wired limit is the cause" in shared
+    assert "do not set it equal to physical RAM" in shared
     assert "SIGKILL" in shared
     assert "kIOGPUCommandBufferCallbackErrorOutOfMemory" in shared
     assert "Command buffer execution failed" in shared
     assert "Insufficient Memory" in shared
     assert "appendMetalWiredLimitGuidance(reason)" in sessions
     assert "Process exited before becoming ready" in sessions
-    # The form shows this guidance through t() so it localizes (the shared module
-    # above still owns the command and the detection strings, because the MAIN
-    # process appends them to error messages that are not localized). Assert the
-    # form is wired to the key AND that en.json carries the guidance, so the note
-    # cannot silently lose either half.
-    assert "metalWiredLimitCommand" in form
+    # Static settings explain the measured policy. Only an actual memory notice
+    # offers a hardware-specific command; no universal command belongs here.
+    assert "metalWiredLimitCommand" not in form
     assert "t('sessions.config.metalWiredLimitHelp'" in form
+    notice = (ROOT / "panel/src/renderer/src/components/MetalMemoryNotice.tsx").read_text()
+    store = (ROOT / "panel/src/main/memory-warning-store.ts").read_text()
+    assert "command: measuredWiredLimitCommand(measurement)" in store
+    assert "{notice.command ?" in notice
+    assert "copyMemoryWarningCommand(notice.id)" in notice
     catalog = (
         ROOT / "panel" / "src" / "renderer" / "src" / "i18n" / "locales" / "en.json"
     ).read_text(encoding="utf-8")
-    assert "Metal wired-memory limit" in catalog
-    assert "115000-120000 MB" in catalog
+    assert "A measured Metal memory warning" in catalog
+    assert "never raises your system limit automatically" in catalog
+    assert "115000-120000 MB" not in catalog
 
 
 def test_large_model_low_memory_preflight_never_blocks_engine_spawn() -> None:

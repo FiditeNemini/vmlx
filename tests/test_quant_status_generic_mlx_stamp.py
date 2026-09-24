@@ -46,3 +46,17 @@ def test_mlx_stamp_with_no_codec_stays_mlx(tmp_path):
     )
     status = _model_quantization_status(path)
     assert status["weight_format"] == "mlx"
+
+
+def test_mixed_jang_does_not_report_fallback_config_as_global_target(tmp_path):
+    path = _write_bundle(tmp_path, {"quantization": {"bits": 8, "group_size": 64}})
+    (tmp_path / "jang_config.json").write_text(json.dumps({
+        "weight_format": "mixed_affine_mxfp4", "profile": "JANG_2L",
+        "quantization": {"method": "mixed", "nonexpert": {"bits": 8},
+                         "routed_expert_units": {"affine2/g128": 109, "affine3/g128": 22, "mxfp4": 10}},
+    }))
+    status = _model_quantization_status(path)
+    assert status["mixed_precision"] is True
+    assert status["config_bits"] == 8
+    assert "target_bits" not in status
+    assert "actual_bits" not in status  # Never invent an average from a tier name.

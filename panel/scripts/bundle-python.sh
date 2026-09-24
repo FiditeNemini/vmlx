@@ -17,7 +17,7 @@ PREVIOUS_BUNDLE_DIR="$PANEL_DIR/.bundled-python.previous.$$"
 BUNDLE_PUBLISHED=0
 STANDALONE_TARBALL=""
 JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"
-JANG_MIN_VERSION="2.5.39"
+JANG_MIN_VERSION="2.5.48"
 JANG_SOURCE_COMMIT=""
 JANG_SOURCE_VERSION=""
 VMLX_SOURCE_COMMIT=""
@@ -262,7 +262,9 @@ mkdir -p "$BUNDLE_DIR"
 # Download python-build-standalone (Astral's relocatable Python builds)
 TARBALL="cpython-${PYTHON_VERSION}+${BUILD_DATE}-${ARCH}-install_only.tar.gz"
 URL="https://github.com/astral-sh/python-build-standalone/releases/download/${BUILD_DATE}/${TARBALL}"
-STANDALONE_TARBALL="$(mktemp "${TMPDIR:-/tmp}/vmlx-python-standalone.XXXXXX.tar.gz")"
+# BSD mktemp randomizes only trailing Xs; adding .tar.gz creates a literal
+# shared filename and makes concurrent flavor builds collide.
+STANDALONE_TARBALL="$(mktemp "${TMPDIR:-/tmp}/vmlx-python-standalone.XXXXXX")"
 
 restore_python_runtime_files() {
   local RESTORE_TMP
@@ -366,7 +368,7 @@ echo "==> Installing dependencies..."
   "numpy>=1.24.0" "pillow>=10.0.0" \
   "opencv-python==$OPENCV_VERSION" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \
-  "mcp==$MCP_VERSION" "jsonschema>=4.0.0" \
+  "mcp==$MCP_VERSION" "jsonschema>=4.0.0" "referencing>=0.37.0" \
   "psutil>=5.9.0" "tqdm>=4.66.0" "pyyaml>=6.0" \
   "requests>=2.28.0" "tabulate>=0.9.0" "mlx-embeddings>=0.0.5" \
   "tiktoken>=0.7.0" \
@@ -442,7 +444,7 @@ if [ -f "$JANG_LOCAL/pyproject.toml" ]; then
 else
   if [ "${VMLX_ALLOW_PYPI_JANG:-${VMLINUX_ALLOW_PYPI_JANG:-0}}" = "1" ]; then
     echo "    local jang-tools missing; VMLX_ALLOW_PYPI_JANG=1 so using PyPI fallback"
-    "$PYTHON" -m pip install --no-deps "jang>=2.5.47"
+    "$PYTHON" -m pip install --no-deps "jang>=2.5.48"
   else
     echo "ERROR: RELEASE BLOCKED — local jang-tools source missing: $JANG_LOCAL" >&2
     echo "       vMLX release builds must bundle the checked-out JANG runtime," >&2

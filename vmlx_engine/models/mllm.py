@@ -70,6 +70,12 @@ def _register_local_mlx_vlm_runtime_if_needed(model_path: str | Path) -> None:
     if model_type == "step3p7":
         _register_step3p7_mlx_vlm_runtime()
     if model_type == "mimo_v2":
+        from .mimo_v26_contract import read_mimo_v26_contract, mimo_v26_media_enabled
+        contract = read_mimo_v26_contract(model_path)
+        if contract is not None:
+            if not mimo_v26_media_enabled(contract):
+                raise ValueError("MiMo-V2.6 mixed-format bundles must not load through the legacy V2.5 media adapter")
+            return
         _register_mimo_v2_mlx_vlm_runtime()
     if model_type == "qwen4_exp" or str(
         (cfg.get("text_config") or {}).get("model_type") or ""
@@ -4524,6 +4530,13 @@ class MLXMultimodalLM:
                     )
             self._loaded = True
 
+        from .mimo_v26_contract import read_mimo_v26_contract
+        if read_mimo_v26_contract(resolved_name) is not None:
+            from .mimo_v26 import load_mimo_v26
+            self.model, self.processor, self.config = load_mimo_v26(resolved_name)
+            _finalize_loaded_model()
+            return
+
         # Install mlx_vlm registry patches (gemma4 + kimi_k25) on THIS thread
         # so any module-level `mx.new_stream(...)` in mlx_vlm.generate ends
         # up bound to the loader-executor worker rather than uvicorn
@@ -5222,7 +5235,7 @@ class MLXMultimodalLM:
             collapsed["content"] = "".join(text_parts)
             normalized.append(collapsed)
 
-        if model_type == "mimo_v2":
+        if model_type == "mimo_v2" and not getattr(getattr(self, "model", None), "_mimo_v26_runtime", False):
             leading_system_parts: list[str] = []
             folded: list[dict] = []
             folded_into_user = False
@@ -5468,6 +5481,11 @@ class MLXMultimodalLM:
             template_kwargs.setdefault("clear_thinking", True)
         if model_type == "mimo_v2":
             chat_messages = self._normalize_mimo_audio_messages_for_template(chat_messages)
+        if getattr(self.processor, "_mimo_v26_runtime", False):
+            from .mimo_v26_contract import canonicalize_mimo_v26_tool_results
+            # Validate before the generic template fallback: losing tool-result
+            # associations must never fall back to only the last user message.
+            chat_messages = canonicalize_mimo_v26_tool_results(chat_messages)
 
         formatted_prompt = None
         try:
@@ -6070,6 +6088,8 @@ class MLXMultimodalLM:
 
         # Extract text, images, videos, and audio from messages
         chat_messages, all_image_urls, videos, audio_inputs = self._extract_multimodal_messages(messages)
+        if getattr(self.model, "_mimo_v26_runtime", False):
+            chat_messages = messages
         chat_messages = self._normalize_text_only_messages_for_processor(
             chat_messages,
             has_media=bool(all_image_urls or videos or audio_inputs),
@@ -6416,6 +6436,8 @@ class MLXMultimodalLM:
 
         # Extract text, images, videos, and audio from messages
         chat_messages, all_image_urls, videos, audio_inputs = self._extract_multimodal_messages(messages)
+        if getattr(self.model, "_mimo_v26_runtime", False):
+            chat_messages = messages
         chat_messages = self._normalize_text_only_messages_for_processor(
             chat_messages,
             has_media=bool(all_image_urls or videos or audio_inputs),

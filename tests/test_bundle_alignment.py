@@ -259,6 +259,133 @@ def test_unknown_hash_manifest_refused(tmp_path):
     assert path.read_bytes() == before
 
 
+def hf_metadata(root, shard):
+    tree = root / ".cache/huggingface/trees" / ("a" * 40 + ".json")
+    receipt = root / ".cache/huggingface/download" / (shard.relative_to(root).as_posix() + ".metadata")
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(shard.read_bytes()).hexdigest()
+    tree.write_text(json.dumps({"format_version": 1, "files": {
+        shard.relative_to(root).as_posix(): {"size": shard.stat().st_size,
+            "blob_id": "b" * 40, "lfs_sha256": digest,
+            "lfs_size": shard.stat().st_size, "xet_hash": "c" * 64}}}))
+    receipt.write_text("a" * 40 + "\n" + digest + "\n123456.0\n")
+    return tree, receipt
+
+
+def test_hf_remote_hashes_preserved_local_receipt_invalidated_no_duplicate(tmp_path):
+    root = tmp_path / "model"
+    shard = fixture(root, "vision/nested.safetensors")
+    tree, receipt = hf_metadata(root, shard)
+    original_tree = tree.read_bytes()
+    original_tensors = tensor_bytes(shard)
+    sibling = receipt.parent / "unrelated.metadata"
+    sibling.write_bytes(b"unrelated receipt")
+    report = check_model_bundle(root, cache_dir=tmp_path / "cache")
+    assert report["repairs"] == ["vision/nested.safetensors"]
+    assert tensor_bytes(shard) == original_tensors
+    assert tree.read_bytes() == original_tree
+    assert not receipt.exists()
+    assert sibling.read_bytes() == b"unrelated receipt"
+    assert list(root.rglob("*.safetensors")) == [shard]
+    assert not list(root.rglob("*.tmp"))
+    assert not (root / repair.JOURNAL).exists()
+    assert check_model_bundle(root, cache_dir=tmp_path / "cache")["cache_hit"]
+
+
+@pytest.mark.parametrize("mutation", ["digest", "size", "signature", "version", "extra_entry_field", "wrong_location", "symlink"])
+def test_hf_hash_repair_refuses_unknown_or_changed_metadata(tmp_path, mutation):
+    root = tmp_path / "model"
+    shard = fixture(root)
+    original = shard.read_bytes()
+    tree, receipt = hf_metadata(root, shard)
+    value = json.loads(tree.read_text())
+    entry = value["files"][shard.name]
+    if mutation == "digest": entry["lfs_sha256"] = "0" * 64
+    if mutation == "size": entry["size"] += 8; entry["lfs_size"] += 8
+    if mutation == "signature": value["signature"] = "signed"
+    if mutation == "version": value["format_version"] = 2
+    if mutation == "extra_entry_field": entry["signature"] = "signed"
+    tree.write_text(json.dumps(value))
+    if mutation == "wrong_location": tree.rename(root / tree.name)
+    if mutation == "symlink":
+        external = tmp_path / "external-tree.json"
+        tree.rename(external)
+        tree.symlink_to(external)
+    with pytest.raises(BundleIntegrityError):
+        check_model_bundle(root, cache_dir=tmp_path / "cache")
+    assert shard.read_bytes() == original
+    assert receipt.exists()
+    assert not (root / repair.JOURNAL).exists()
+
+
+@pytest.mark.parametrize("stage", ["copy", "replace", "metadata"])
+def test_hf_repair_crash_recovery(tmp_path, stage):
+    root = tmp_path / "model"
+    shard = fixture(root)
+    tree, receipt = hf_metadata(root, shard)
+    before = tensor_bytes(shard)
+    remote_tree = tree.read_bytes()
+    script = '''
+import os, sys
+from pathlib import Path
+from vmlx_engine.model_bundle_integrity import check_model_bundle
+from vmlx_engine import bundle_alignment
+original = os.replace
+def interrupted(src, dst):
+    original(src, dst)
+    if sys.argv[3] == 'replace' and Path(dst).name == 'model.safetensors': os._exit(91)
+os.replace = interrupted
+original_event = bundle_alignment._event
+def event(stage, *args, **kwargs):
+    original_event(stage, *args, **kwargs)
+    if ((sys.argv[3] == 'copy' and stage == 'COPYING') or
+        (sys.argv[3] == 'metadata' and stage == 'DOWNLOAD_METADATA_INVALIDATED')): os._exit(91)
+bundle_alignment._event = event
+check_model_bundle(sys.argv[1], cache_dir=sys.argv[2])
+'''
+    result = subprocess.run([sys.executable, "-c", script, str(root), str(tmp_path / "cache"), stage], capture_output=True)
+    assert result.returncode == 91, result.stderr
+    assert (root / repair.JOURNAL).exists()
+    assert tensor_bytes(shard) == before
+    assert tree.read_bytes() == remote_tree
+    assert receipt.exists() == (stage != "metadata")
+    check_model_bundle(root, cache_dir=tmp_path / "cache")
+    assert tensor_bytes(shard) == before
+    assert tree.read_bytes() == remote_tree
+    assert not receipt.exists()
+    assert not (root / repair.JOURNAL).exists()
+    assert not list(root.rglob("*.tmp"))
+
+
+def test_repair_does_not_remove_concurrently_changed_download_receipt(tmp_path, monkeypatch):
+    root = tmp_path / "model"
+    shard = fixture(root)
+    tree, receipt = hf_metadata(root, shard)
+    before = shard.read_bytes()
+    original = repair._tensor_digests
+    def changed(handle, header):
+        value = original(handle, header)
+        receipt.write_text("updated by downloader")
+        return value
+    monkeypatch.setattr(repair, "_tensor_digests", changed)
+    with pytest.raises(BundleIntegrityError, match="download metadata changed"):
+        check_model_bundle(root, cache_dir=tmp_path / "cache")
+    assert shard.read_bytes() == before
+    assert receipt.read_text() == "updated by downloader"
+
+
+def test_recovery_refuses_arbitrary_metadata_deletion(tmp_path):
+    root = tmp_path / "model"
+    shard = fixture(root)
+    innocent = root / "config.json"
+    innocent.write_text('{"keep":true}')
+    with pytest.raises(BundleIntegrityError, match="unsafe alignment download"):
+        repair._check_download_invalidations(root, shard, [{"path": "config.json",
+            "sha256": hashlib.sha256(innocent.read_bytes()).hexdigest()}])
+    assert innocent.exists()
+
+
 @pytest.mark.parametrize("stage", ["copy", "replace"])
 def test_crash_during_copy_or_after_replace_before_stamp_recovers(tmp_path, stage):
     root = tmp_path / "model"

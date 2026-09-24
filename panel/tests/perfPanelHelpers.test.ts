@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatMtpScope, reportedCount } from '../src/renderer/src/components/sessions/PerformancePanel'
+import { formatMtpScope, reportedCount, formatWeightQuant } from '../src/renderer/src/components/sessions/PerformancePanel'
 
 // Cache/Perf display audit (2026-09-07): an absent MTP measurement must read as
 // unknown, never as zero, and the MTP cards must say which request they describe.
@@ -21,5 +21,20 @@ describe('Performance panel MTP helpers', () => {
     expect(formatMtpScope({ request_id: 'chatcmpl-d59f0421', finish_reason: 'stop', final_depth: 1, configured_depth: 3, policy: 'fixed' })).toBe('mpl-d59f0421 · stop · D3→D1 fixed')
     expect(formatMtpScope({ request_id: 'resp_2333ab852daa', finish_reason: 'stop', final_depth: 3, configured_depth: 3 })).toBe('2333ab852daa · stop · D3')
     expect(formatMtpScope({})).toBe('— · last completed · —')
+  })
+})
+
+
+describe('Performance panel mixed weight labels', () => {
+  const t = (key: string) => key
+  it('never labels a declared mixed bundle by its fallback module bits', () => {
+    const health = {quantization:{profile:'JANG_2L',mixed_precision:true,config_bits:8,group_size:64}} as Parameters<typeof formatWeightQuant>[0]
+    expect(formatWeightQuant(health,t)).toBe('JANG_2L mixed')
+    health.quantization!.actual_bits = 2.73
+    expect(formatWeightQuant(health,t)).toBe('JANG_2L mixed (2.73 bpw)')
+  })
+  it('retains ordinary uniform labels', () => {
+    const health = {quantization:{weight_format:'mxfp8',config_bits:8,group_size:32}} as Parameters<typeof formatWeightQuant>[0]
+    expect(formatWeightQuant(health,t)).toBe('MXFP8 8-bit g32')
   })
 })

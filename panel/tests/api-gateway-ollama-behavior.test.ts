@@ -895,6 +895,33 @@ describe("Ollama gateway request translation behavior", () => {
     expect(backend.bodies[2].max_prompt_tokens).toBe(4096);
   });
 
+  it.each(["chat", "generate"])("does not force enable_thinking when Ollama thinking controls are omitted on %s", async (lane) => {
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    // Reuse the gateway across explicit and omitted controls: a prior request
+    // must not change the next request's native template default.
+    for (const think of [undefined, true, undefined, false, undefined]) {
+      await postJson(`http://127.0.0.1:${started.port}/api/${lane}`, {
+        model: "hy3-model", stream: false, prompt: "hello",
+        messages: [{ role: "user", content: "hello" }],
+        ...(think === undefined ? {} : { think }),
+      });
+      const forwarded = backend.bodies.at(-1);
+      expect(backend.paths.at(-1)).toBe("/v1/chat/completions");
+      expect(forwarded.messages).toEqual([{ role: "user", content: "hello" }]);
+      if (think === undefined) {
+        expect(forwarded).not.toHaveProperty("enable_thinking");
+      } else {
+        expect(forwarded.enable_thinking).toBe(think);
+      }
+      expect(forwarded).not.toHaveProperty("reasoning_effort");
+      expect(forwarded).not.toHaveProperty("chat_template_kwargs");
+    }
+    expect(backend.bodies).toHaveLength(5);
+  });
+
   it.each(["chat", "generate"])("forwards Ollama native effort levels and explicit overrides on %s", async (lane) => {
     backend = await startCaptureBackend();
     const started = await startGateway(backend.port);

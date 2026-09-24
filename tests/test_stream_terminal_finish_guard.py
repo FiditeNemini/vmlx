@@ -220,3 +220,29 @@ class TestTerminalFinishGuard:
         payload = json.loads(out[-2].strip()[6:])
         assert payload["error"]["code"] == "tool_calls_required"
         assert out[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize("arguments", ['{"path":"x"}', '{"path":', '[]', ''])
+@pytest.mark.parametrize("late_error", [False, True])
+def test_required_length_waits_for_final_call_and_errors(arguments, late_error):
+    frames = [
+        _sse(_chunk(delta={"tool_calls": [{"index": 0, "id": "call_x",
+            "function": {"name": "read_file", "arguments": arguments[:4]}}]})),
+        _sse(_chunk(delta={"tool_calls": [{"index": 0,
+            "function": {"arguments": arguments[4:]}}]})),
+        _sse(_chunk(finish_reason="length")),
+    ]
+    if late_error:
+        frames.append(_sse({"error": {"code": "tool_calls_required"}}))
+    usage = {"id": "chatcmpl-test1234", "choices": [],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 128}}
+    frames.extend([_sse(usage), "data: [DONE]\n\n"])
+    out = _collect(frames, required_tool_call=True)
+    success = arguments == '{"path":"x"}' and not late_error
+    assert _finish_reasons(out) == (["length"] if success else [])
+    errors = [json.loads(f[6:])["error"] for f in out
+              if f.startswith("data: ") and f.strip() != "data: [DONE]"
+              and "error" in json.loads(f[6:])]
+    assert len(errors) == (0 if success else 1)
+    assert json.loads(out[-2][6:]) == usage
+    assert out[-1] == "data: [DONE]\n\n"

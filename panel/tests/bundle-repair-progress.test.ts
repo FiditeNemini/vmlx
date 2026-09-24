@@ -10,9 +10,21 @@ describe('bundle repair startup progress', () => {
     expect(events).toHaveLength(6)
     expect(events.filter(e => e.notice)).toHaveLength(1)
     expect(events[0].label).toContain('current files')
+    expect(events[0].label).toContain('no second model copy')
     expect(events[1].label).toContain('model-00002-of-00026.safetensors')
     expect(events[5].label).toContain('continuing bundle check')
     expect(events.every(e => !('progress' in e))).toBe(true)
+  })
+  it('reports verified remote hashes, in-place repair and metadata invalidation', () => {
+    const events: any[] = []
+    const report = createBundleRepairProgressReporter(m => events.push(m))
+    report(line('REMOTE_HASH_VERIFIED'))
+    expect(events.at(-1).label).toContain('Verified downloaded bytes')
+    report(line('COPYING'))
+    expect(events.at(-1).label).toContain('in place')
+    expect(events.at(-1).label).toContain('Please wait')
+    report(line('DOWNLOAD_METADATA_INVALIDATED'))
+    expect(events.at(-1).labelKey).toBe('main.loadProgress.bundleRepairMetadataUpdated')
   })
   it('uses measured per-shard copied bytes only', () => {
     const events: any[] = []

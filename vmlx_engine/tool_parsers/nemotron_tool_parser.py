@@ -19,6 +19,7 @@ from .abstract_tool_parser import (
     ToolParserManager,
     generate_tool_id,
 )
+from .xml_function_tool_parser import XMLFunctionToolParser
 
 
 @ToolParserManager.register_module(["nemotron", "nemotron3"])
@@ -49,7 +50,7 @@ class NemotronToolParser(ToolParser):
         # own leading indentation, so a code argument came back with its first
         # line unindented and later lines intact — a SyntaxError once written
         # to disk. Same defect as the qwen dialect (9df8c1660).
-        r"<parameter=([^>]+)>[ \t]*\n?(.*?)\n?[ \t]*</parameter>",
+        r"<parameter=([^>]+)>(.*?)</parameter>",
         re.DOTALL,
     )
 
@@ -91,14 +92,26 @@ class NemotronToolParser(ToolParser):
             params = self.PARAM_PATTERN.findall(content)
             if params:
                 arguments = {}
+                properties = self._argument_properties(request, func_name)
                 for param_name, param_value in params:
-                    # Try to parse value as JSON (for nested objects)
-                    # Strip only to TEST for JSON; the string result keeps the
-                    # payload's whitespace so code arguments stay valid.
+                    param_name = param_name.strip()
+                    raw = XMLFunctionToolParser._unframe(param_value)
+                    hint = properties.get(param_name)
+                    if self._schema_is_string_or_null(hint):
+                        arguments[param_name] = (
+                            None if self._schema_allows_null(hint) and raw.strip().lower() in self._NULL_SPELLINGS
+                            else raw
+                        )
+                        continue
+                    # The native template stringifies scalar booleans as
+                    # True/False, while mappings and sequences use JSON.
+                    if raw.strip() in ("True", "False") and XMLFunctionToolParser._schema_is_boolean_or_null(hint):
+                        arguments[param_name] = raw.strip() == "True"
+                        continue
                     try:
-                        arguments[param_name.strip()] = json.loads(param_value.strip())
+                        arguments[param_name] = json.loads(raw.strip())
                     except json.JSONDecodeError:
-                        arguments[param_name.strip()] = param_value
+                        arguments[param_name] = raw
 
                 tool_calls.append(
                     {
@@ -149,7 +162,7 @@ class NemotronToolParser(ToolParser):
             return {"content": delta_text}
 
         if "</tool_call>" in delta_text or "</function>" in delta_text:
-            result = self.extract_tool_calls(current_text)
+            result = self.extract_tool_calls(current_text, request)
             if result.tools_called:
                 return {
                     "tool_calls": [

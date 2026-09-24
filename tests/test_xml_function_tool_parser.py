@@ -412,3 +412,51 @@ class TestDeclaredStringParameters:
         block = self.block('{"n":1}') + self.block('{"n":1}').replace("function=write_file", "function=record_data")
         result = parser.extract_tool_calls(block, request)
         assert [json.loads(c["arguments"])["content"] for c in result.tool_calls] == ['{"n":1}', {"n": 1}]
+
+
+class TestDeclaredBooleanParameters:
+    @pytest.mark.parametrize("flat", [False, True], ids=["chat", "responses"])
+    @pytest.mark.parametrize("prop", [
+        {"type": "boolean"}, {"type": ["boolean", "null"]},
+        {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+        {"oneOf": [{"type": "null"}, {"type": "boolean"}]},
+    ])
+    @pytest.mark.parametrize("payload,expected", [("False", False), ("True", True), ("false", False), ("true", True)])
+    def test_unquoted_boolean_has_declared_type(self, parser, flat, prop, payload, expected):
+        request = TestDeclaredStringParameters.request(prop, flat)
+        block = TestDeclaredStringParameters.block(payload)
+        result = parser.extract_tool_calls(block, request)
+        assert json.loads(result.tool_calls[0]["arguments"])["content"] is expected
+        streamed = parser.extract_tool_calls_streaming("", block, "</tool_call>", request=request)
+        assert json.loads(streamed["tool_calls"][0]["function"]["arguments"])["content"] is expected
+
+    @pytest.mark.parametrize("prop", [
+        {}, {"type": "string"}, {"type": "integer"},
+        {"type": ["string", "boolean"]},
+        {"anyOf": [{"type": "string"}, {"type": "boolean"}]},
+        {"anyOf": [{}, {"type": "boolean"}]},
+    ])
+    @pytest.mark.parametrize("payload", ["False", "True"])
+    def test_other_schemas_do_not_reinterpret_python_spelling(self, parser, prop, payload):
+        result = parser.extract_tool_calls(TestDeclaredStringParameters.block(payload),
+                                          TestDeclaredStringParameters.request(prop))
+        assert json.loads(result.tool_calls[0]["arguments"])["content"] == payload
+
+    @pytest.mark.parametrize("payload,expected", [
+        ('"False"', "False"), ('"True"', "True"), ("FALSE", "FALSE"),
+        ("yes", "yes"), ("0", 0), ("1", 1), ("False or True", "False or True"),
+    ])
+    def test_no_broad_boolean_truthiness_conversion(self, parser, payload, expected):
+        result = parser.extract_tool_calls(TestDeclaredStringParameters.block(payload),
+                                          TestDeclaredStringParameters.request({"type": "boolean"}))
+        value = json.loads(result.tool_calls[0]["arguments"])["content"]
+        assert value == expected and type(value) is type(expected)
+
+    def test_observed_false_does_not_unlock_simulated_doors(self, parser):
+        request = {"tools": [{"type": "function", "function": {
+            "name": "lockDoors", "parameters": {"type": "object", "properties": {
+                "unlock": {"type": "boolean"}, "door": {"type": "array", "items": {"type": "string"}}}}}}]}
+        block = '<tool_call><function=lockDoors><parameter=unlock>False</parameter><parameter=door>["driver"]</parameter></function></tool_call>'
+        result = parser.extract_tool_calls(block, request)
+        arguments = json.loads(result.tool_calls[0]["arguments"])
+        assert ("unlocked" if arguments["unlock"] else "locked") == "locked"

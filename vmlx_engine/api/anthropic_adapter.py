@@ -970,10 +970,11 @@ class AnthropicStreamAdapter:
 
         # Determine stop reason from Chat Completions finish_reason. Tool calls
         # must map to tool_use even if the tool block was already closed.
-        if self._finish_reason == "tool_calls" or self._tool_block_open:
-            stop_reason = "tool_use"
-        elif self._finish_reason == "length":
+        # Budget exhaustion takes precedence over an unfinished tool block.
+        if self._finish_reason == "length":
             stop_reason = "max_tokens"
+        elif self._finish_reason == "tool_calls" or self._tool_block_open:
+            stop_reason = "tool_use"
         else:
             stop_reason = "end_turn"
 

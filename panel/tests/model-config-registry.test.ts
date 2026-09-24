@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { loadLocalModelPaths } from './helpers/local-model-paths'
 import { detectModelConfigFromDir } from '../src/main/model-config-registry'
 import { resolveEffectiveToolParser } from '../src/shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
@@ -2505,8 +2506,27 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
 })
 
 describe('detectModelConfigFromDir local high-risk artifact parity', () => {
-  it('matches current local high-risk model paths to panel parser cache and modality policy', () => {
-    const rows: Array<{
+  it.each([false, true])('honors fresh MiMo V2.6 media flags and native thinking defaults: %s', media => {
+    const dir = makeModelDir({ model_type: 'mimo_v2', vision_config: { depth: 28 } }, {
+      weight_format: 'mixed_affine_mxfp4', has_vision: media,
+      chat: { thinking: { supported: true, default: true } },
+      capabilities: { family: 'mimo_v2', cache_type: 'kv', supports_tools: true,
+        modality: media ? 'omni' : 'text',
+        modalities: { text: true, vision: media, video: media, audio: media } },
+    })
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: { 'visual.patch_embed.proj.weight': 'model-00001-of-00001.safetensors' },
+    }))
+    const detected = detectModelConfigFromDir(dir)
+    expect(detected.defaultEnableThinking).toBe(true)
+    expect(detected.reasoningParser).toBe('think_xml')
+    expect(detected.toolParser).toBe('xml_function')
+    expect(detected.cacheSubtype).toBe('mimo_v2_asymmetric_swa')
+    expect(detected.isMultimodal).toBe(media)
+    expect(detected.runtimeModalities).toEqual(media ? ['text', 'vision', 'video', 'audio'] : ['text'])
+    expect(!!detected.forceTextOnly).toBe(!media)
+  })
+  const rows: Array<{
       name: string
       path: string
       family: string
@@ -2531,7 +2551,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'qwen',
         reasoningParser: 'qwen3',
-        isMultimodal: false,
+        // Actual bundle declares vision/video and indexes 333 vision tensors.
+        isMultimodal: true,
       },
       {
         name: 'qwen27_jang4m_mtp',
@@ -2603,7 +2624,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'nemotron',
         reasoningParser: 'deepseek_r1',
-        isMultimodal: false,
+        // Verified Omni sidecar plus vision/audio encoder and projector payloads.
+        isMultimodal: true,
       },
       {
         name: 'nemotron_omni_nano_jangtq4',
@@ -2612,7 +2634,8 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'nemotron',
         reasoningParser: 'deepseek_r1',
-        isMultimodal: false,
+        // Verified config_omni.json plus vision/audio encoder and projector tensors.
+        isMultimodal: true,
       },
       {
         name: 'nemotron_mxfp4',
@@ -2621,24 +2644,23 @@ describe('detectModelConfigFromDir local high-risk artifact parity', () => {
         cacheType: 'hybrid',
         toolParser: 'nemotron',
         reasoningParser: 'deepseek_r1',
-        isMultimodal: false,
+        // Verified Omni sidecar plus vision/audio encoder and projector payloads.
+        isMultimodal: true,
       },
     ]
 
-    const missing = rows.filter(row => !existsSync(row.path)).map(row => row.path)
-    if (missing.length > 0) {
-      return
-    }
-
-    for (const row of rows) {
-      const detected = detectModelConfigFromDir(row.path)
+  const paths = loadLocalModelPaths(process.env.VMLX_TEST_LOCAL_MODEL_PATHS, rows.map(row => row.name))
+  for (const row of rows) {
+    const modelPath = paths[row.name] ?? row.path
+    it.skipIf(!existsSync(modelPath))(`matches local high-risk artifact ${row.name} to panel parser cache and modality policy`, () => {
+      const detected = detectModelConfigFromDir(modelPath)
       expect(detected.family, row.name).toBe(row.family)
       expect(detected.cacheType, row.name).toBe(row.cacheType)
       expect(detected.toolParser, row.name).toBe(row.toolParser)
       expect(detected.reasoningParser, row.name).toBe(row.reasoningParser)
       expect(detected.isMultimodal, row.name).toBe(row.isMultimodal)
-    }
-  })
+    })
+  }
 })
 
 describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {

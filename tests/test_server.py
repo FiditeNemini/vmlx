@@ -4264,10 +4264,10 @@ class TestOpenAILogprobsFormatting:
         assert tool_deltas == []
 
     @pytest.mark.asyncio
-    async def test_streaming_chat_post_tool_false_marker_does_not_emit_phantom_tool_delta(
+    async def test_streaming_chat_post_tool_malformed_marker_stays_fail_closed(
         self, monkeypatch
     ):
-        """Optional post-tool continuations must not advertise rejected empty calls."""
+        """Prior tool success does not make a malformed new control block an answer."""
         import json
         from types import SimpleNamespace
 
@@ -4393,9 +4393,14 @@ class TestOpenAILogprobsFormatting:
             if choice.get("finish_reason") is not None
         ]
 
-        assert visible == "LAG-S21-POST-TOOL-FINAL-DONE"
+        # The suffix is inside an unclosed control block. Publishing it as a
+        # successful final answer would conceal the rejected model output.
+        assert visible == ""
         assert tool_deltas == []
-        assert finish_reasons == ["stop"]
+        assert finish_reasons == []
+        assert [chunk["error"]["code"] for chunk in chunks if chunk.get("error")] == [
+            "tool_calls_rejected"
+        ], chunks
 
     @pytest.mark.asyncio
     async def test_streaming_responses_qwen_exact_once_stops_after_first_valid_call(
@@ -5667,7 +5672,7 @@ class TestOpenAILogprobsFormatting:
         assert visible == ""
         assert incomplete["output_text"] == ""
         assert incomplete["incomplete_details"] == {
-            "reason": "reasoning_only_no_content"
+            "reason": "tool_calls_rejected"
         }
         assert function_items == []
         assert "<tool_call>" not in json.dumps(incomplete)
@@ -5936,7 +5941,7 @@ class TestOpenAILogprobsFormatting:
         assert visible == ""
         assert finish_reasons == []
         assert len(errors) == 1
-        assert errors[0]["code"] == "reasoning_only_no_content"
+        assert errors[0]["code"] == "tool_calls_rejected"
         assert "<tool_call>" not in json.dumps(chunks)
         assert len(engine.calls) == 1
 
@@ -6204,7 +6209,7 @@ class TestOpenAILogprobsFormatting:
         assert function_items == []
         assert "<tool_call" not in json.dumps(completed)
         assert any(
-            "schema-valid function call" in warning
+            "usable function call" in warning
             for warning in completed.get("warnings", [])
         )
 

@@ -223,6 +223,7 @@ interface HealthData {
     target_bits?: number
     actual_bits?: number
     config_bits?: number
+    mixed_precision?: boolean
     passthrough_bit_widths_used?: number[]
     passthrough_tensor_count?: number
     compat_warnings?: string[]
@@ -861,12 +862,16 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
   )
 }
 
-function formatWeightQuant(
+export function formatWeightQuant(
   health: HealthData,
   t: (key: string, params?: Record<string, string | number>) => string,
 ): string {
   const q = health.quantization
   const qf = health.quantization_format
+  if (q?.mixed_precision) {
+    const label = q.profile || q.weight_format?.toUpperCase() || 'Mixed precision'
+    return `${label} mixed${q.actual_bits != null ? ` (${q.actual_bits} bpw)` : ''}`
+  }
   const bits =
     q?.actual_bits ??
     q?.target_bits ??

@@ -26,6 +26,47 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import vm from 'node:vm'
 
+// The packaged renderer blocks fetch(data:) under its production policy.
+// Decode test fixture bytes locally; do not relax CSP or bypass InputBox.
+export function decodeProofAttachment(item) {
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(item?.dataUrl || '')
+  if (!match || match[1] !== item.type) throw new Error('Invalid media fixture data URL or MIME type')
+  const bytes = Uint8Array.from(atob(match[2]), char => char.charCodeAt(0))
+  return bytes
+}
+
+// Match only the answer to the submitted attachment, never another chat turn.
+// Kept closure-free because the proof runner injects it into the renderer.
+export function validateMediaTurnAnswer({ messages, binding, kind, pattern }) {
+  const result = { verified: false, userMessageId: binding?.userMessageId || null,
+    assistantMessageId: null, attachmentPresent: false, text: '' }
+  if (!result.userMessageId || !pattern || !Array.isArray(messages)) return result
+  const indices = messages.flatMap((m, i) => m?.id === result.userMessageId ? [i] : [])
+  if (indices.length !== 1 || messages[indices[0]]?.role !== 'user') return result
+  const userIndex = indices[0]
+  let parts = messages[userIndex].content
+  if (typeof parts === 'string') {
+    try { parts = JSON.parse(parts) } catch { parts = [] }
+  }
+  if (!Array.isArray(parts)) return result
+  result.attachmentPresent = parts.some((part) => {
+    if (kind === 'audio') return !!(
+      (part?.type === 'input_audio' && (part?.input_audio?.data || part?.audio?.data))
+      || (part?.type === 'audio' && part?.audio?.data)
+      || (part?.type === 'audio_url' && part?.audio_url?.url))
+    return part?.type === kind + '_url' && !!part?.[kind + '_url']?.url
+  })
+  if (!result.attachmentPresent) return result
+  const nextUser = messages.findIndex((m, i) => i > userIndex && m?.role === 'user')
+  const answers = messages.slice(userIndex + 1, nextUser < 0 ? undefined : nextUser)
+    .filter(m => m?.role === 'assistant')
+  if (answers.length !== 1 || typeof answers[0].content !== 'string') return result
+  result.assistantMessageId = answers[0].id || null
+  result.text = answers[0].content
+  result.verified = new RegExp(pattern, 'i').test(result.text)
+  return result
+}
+
 const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
 const proofFormat = 'vmlx-electron-ui-proof-v2'
@@ -216,6 +257,70 @@ export function ownedUiProducerPid({
     throw new Error('Owned UI producer PID is invalid')
   }
   return pid
+}
+
+// ReasoningBox auto-collapses one second after completion. A single read/click
+// followed by 250ms can race that timer and falsely report missing reasoning.
+// Exercise the real toggle, then require stable expanded content before capture.
+export async function expandCompletedReasoningRails({
+  readRows,
+  timeoutMs = 6000,
+  stableMs = 1250,
+  pollMs = 50,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const started = now()
+  let stableSince = null
+  let clicks = 0
+  while (now() - started <= timeoutMs) {
+    const rows = readRows()
+    let ready = true
+    for (const row of rows) {
+      if (row.expectsReasoning && row.rails.length === 0) ready = false
+      for (const rail of row.rails) {
+        if (!rail.complete || !rail.visible) {
+          ready = false
+        } else if (!rail.expanded) {
+          rail.expand()
+          clicks++
+          ready = false
+        }
+      }
+    }
+    if (ready) {
+      stableSince ??= now()
+      if (now() - stableSince >= stableMs) return { clicks, stableMs, elapsedMs: now() - started }
+    } else {
+      stableSince = null
+    }
+    await sleep(pollMs)
+  }
+  throw new Error('Completed reasoning rails did not remain visibly expanded before capture')
+}
+
+export async function createChatThroughVisibleControl({
+  chats, modelPath, click, timeoutMs = 30_000, pollMs = 100,
+} = {}) {
+  if (!chats || typeof chats.getByModel !== 'function'
+    || typeof click !== 'function' || !String(modelPath || '').trim()) {
+    throw new Error('Visible New Chat has an invalid contract')
+  }
+  const before = new Set((await chats.getByModel(modelPath)).map((chat) => chat.id))
+  await click()
+  const deadline = Date.now() + timeoutMs
+  do {
+    const created = (await chats.getByModel(modelPath)).filter((chat) => !before.has(chat.id))
+    if (created.length > 1) throw new Error('Visible New Chat created ambiguous chat rows')
+    if (created.length === 1) {
+      if (!created[0].id || created[0].modelPath !== modelPath) {
+        throw new Error('Visible New Chat created a row for the wrong model')
+      }
+      return created[0]
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  } while (Date.now() < deadline)
+  throw new Error('Visible New Chat did not create a new model-bound chat row')
 }
 
 export function waitForCurrentSessionStart({
@@ -614,6 +719,12 @@ const imageExpectRegex = process.env.VMLINUX_REAL_UI_IMAGE_EXPECT_REGEX
 const videoDataUrl = process.env.VMLINUX_REAL_UI_VIDEO_DATA_URL
   || process.env.VMLX_REAL_UI_VIDEO_DATA_URL
   || ''
+// A fixture-specific semantic check needs a matching question. Preserve the
+// exact prompt in the proof rather than scoring a generic description against
+// unstated requirements (for example, each labeled object's direction).
+const videoPrompt = process.env.VMLINUX_REAL_UI_VIDEO_PROMPT
+  || process.env.VMLX_REAL_UI_VIDEO_PROMPT
+  || 'Describe the attached video briefly in English.'
 // Audio attachments are a real product capability — the renderer carries
 // kind: 'audio' through InputBox/ChatInterface/chat-utils/MessageBubble — but
 // this harness had NO audio path at all, so audio through the Electron UI had
@@ -2477,6 +2588,23 @@ export function viteRendererSourceSeen(resources) {
   )
 }
 
+export function resolveDevElectronExecutable(panelRoot, env = process.env) {
+  return env.ELECTRON_EXEC_PATH
+    ? path.resolve(panelRoot, env.ELECTRON_EXEC_PATH)
+    : path.join(panelRoot, 'node_modules', 'electron', 'dist',
+      'Electron.app', 'Contents', 'MacOS', 'Electron')
+}
+
+// The SSD-only UI deliberately omits the RAM checkbox. Absence by itself is
+// not proof of Off: require its visible locked-Off policy or a real checkbox.
+export function visiblePagedCachePolicy({ present, checked, disabled, policyVisible }) {
+  return {
+    established: present || policyVisible,
+    usePagedCache: present ? checked : false,
+    lockedOff: present ? disabled && !checked : policyVisible,
+  }
+}
+
 function captureUiRuntimeProvenance(
   app,
   rendererResources,
@@ -2490,16 +2618,7 @@ function captureUiRuntimeProvenance(
   const mode = app?.uiLaunchMode || ''
   const executable = mode === 'installed-app'
     ? path.join(app.appPath, 'Contents', 'MacOS', 'vMLX')
-    : path.join(
-      panelDir,
-      'node_modules',
-      'electron',
-      'dist',
-      'Electron.app',
-      'Contents',
-      'MacOS',
-      'Electron',
-    )
+    : (app.electronExecutable || resolveDevElectronExecutable(panelDir))
   const asarPath = mode === 'installed-app'
     ? path.join(app.appPath, 'Contents', 'Resources', 'app.asar')
     : ''
@@ -3299,6 +3418,7 @@ function startUiApp(userDataDir, debugPort, gatewayPort) {
     proc,
     logs,
     uiLaunchMode: 'electron-dev',
+    electronExecutable: resolveDevElectronExecutable(panelDir, proofEnv),
     command: ['npm', ...args],
     appPath: '',
     gatewayPort,
@@ -3737,6 +3857,19 @@ export const releasePrimarySharedPrefix = [
   'Keep the response coherent and finite.',
 ].join(' ')
 
+// React ignores a range input event whose native value never changed. Exercise
+// an actual slider transition before selecting an explicit value equal to its
+// displayed model default, so the request is a real user override.
+export function explicitRangeInputSequence(current, requested, minimum, maximum) {
+  const values = [current, requested, minimum, maximum].map(Number)
+  if (values.some(value => !Number.isFinite(value))) throw new Error('Non-finite range input')
+  const [now, target, min, max] = values
+  if (min > max || target < min || target > max) throw new Error('Range input outside visible bounds')
+  if (now !== target) return [target]
+  if (min === max) throw new Error('Cannot change a fixed range input')
+  return [target === min ? max : min, target]
+}
+
 export function validateRenderedDomEvidence(result) {
   const failures = []
   const expectedTurns = expectedUiTurnCount(result)
@@ -3836,6 +3969,16 @@ export function validateRenderedDomEvidence(result) {
     result?.requestContract?.promptTwo,
     result?.requestContract?.promptThree,
   ].slice(0, expectedTurns).map(String)
+  for (let index = 0; index < configuredPrompts.length; index++) {
+    const prompt = configuredPrompts[index]
+    const start = prompt.lastIndexOf('\nThird UI turn:')
+    if (prompt.includes('Return this exact three-line rendering receipt') && start >= 0) {
+      const expected = prompt.slice(start + 1).trim()
+      if (persistedById.get(String(assistantIds[index] || ''))?.trim() !== expected) {
+        failures.push('final assistant answer did not preserve the requested verbatim receipt')
+      }
+    }
+  }
   const renderingPromptIndex = configuredPrompts.findIndex(
     (prompt) => prompt.includes('$43') || prompt.includes('\\times'),
   )
@@ -4795,7 +4938,14 @@ export function validateGenerationDefaultsEvidence(result) {
     ?? result?.serverCacheControls?.persistedConfig?.nativeMtpMode
     ?? 'auto'
   const nativeMtpGreedy = result?.server?.health?.mtp?.runtime_active === true
-    && persistedNativeMtpMode === 'deterministic'
+    && ['auto', 'deterministic'].includes(persistedNativeMtpMode)
+  if (nativeMtpGreedy) {
+    const expectedPolicy = persistedNativeMtpMode === 'deterministic'
+      ? 'greedy-only' : 'deterministic-defaults'
+    if (result.server.health.mtp.request_policy !== expectedPolicy) {
+      failures.push('Native MTP sampling policy does not match the persisted session mode')
+    }
+  }
   const explicitFields = Object.entries(explicit).filter(([, value]) => value != null)
   const turnEvidence = Array.isArray(result?.uiTurnEvidence)
     ? result.uiTurnEvidence.slice(0, expectedTurns)
@@ -5018,8 +5168,8 @@ export function validateGenerationDefaultsEvidence(result) {
       )
     }
     const healthValue = numericField(effective, engineKey)
-    if (!approximatelyEqual(Number(healthValue), Number(expected))) {
-      failures.push(`health effective ${engineKey}=${healthValue} does not match bundle ${expected}`)
+    if (!approximatelyEqual(Number(healthValue), Number(effectiveExpected))) {
+      failures.push(`health effective ${engineKey}=${healthValue} does not match effective startup default ${effectiveExpected}`)
     }
     if (requestCorrelationVerified) {
       // Greedy neutralization applies only to values the request did NOT set.
@@ -5335,8 +5485,8 @@ export function validateServerCacheEvidence(result) {
   return failures
 }
 
-// The Native MTP control must render exactly when the ENGINE says the bundle
-// carries MTP weights — not when the bundle NAME happens to say so. A control
+// The Native MTP control follows engine capability, not the bundle name or
+// weight presence alone. A control
 // on a model that cannot use it is the dead-toggle class of bug; a missing
 // control on a model that can is an unreachable feature. Both arms were
 // observed live before this was pinned:
@@ -5344,11 +5494,13 @@ export function validateServerCacheEvidence(result) {
 //     -> label visible, selector present, options [auto, deterministic, off]
 //   Nemotron-Omni-Nano-JANGTQ-CRACK  index_has_mtp_tensors=false, 0 tensors
 //     -> no label, no selector, no mention anywhere in the drawer
-// Deliberately NOT asserted: the blocked-fallback direction. A bundle whose
-// weights are present but whose compatibility gate fails has never been
-// observed here, and pinning an unobserved expectation is what made two
-// earlier rows unpassable. It is recorded instead, so the first real
-// occurrence shows up in the artifact rather than as a mystery failure.
+// MiMo-V2.6 also carries 72 MTP tensors but explicitly reports the runtime
+// unwired. Its absent control is correct. Require the complete engine verdict;
+// a missing capability field or contradictory active runtime is not an excuse
+// to hide a supported control. Scott's Nemotron bundle has indexed MTP tensors
+// but inconsistent layer metadata: no usable artifact and no supported runtime.
+// Require that complete verdict too; compatibility-blocked supported families
+// retain the existing control and fallback checks.
 export function validateNativeMtpSurfaceParity(result) {
   const failures = []
   if (result?.requestedServerCacheControls !== true) return failures
@@ -5369,7 +5521,22 @@ export function validateNativeMtpSurfaceParity(result) {
     failures.push('/health mtp.index_has_mtp_tensors is not a boolean, so UI/engine MTP parity is unverifiable')
     return failures
   }
-  if (mtp.index_has_mtp_tensors === true) {
+  const runtimeUnwired = mtp.status === 'weights_present_runtime_unwired'
+    && mtp.runtime_supported === false
+    && mtp.runtime_available === false
+    && mtp.runtime_active === false
+  const inconsistentArtifact = mtp.status === 'metadata_inconsistent'
+    && mtp.runtime_reason === 'metadata_inconsistent'
+    && mtp.artifact_available === false
+    && mtp.runtime_supported === false
+    && mtp.runtime_available === false
+    && mtp.runtime_active === false
+    && Array.isArray(mtp.issues) && mtp.issues.some(issue => typeof issue === 'string' && issue.trim())
+  if ((runtimeUnwired || inconsistentArtifact) && mtp.index_has_mtp_tensors === true) {
+    if (surface.labelVisible === true || surface.modeSelectPresent === true) {
+      failures.push(`engine reports native MTP ${inconsistentArtifact ? 'artifact inconsistent' : 'runtime unwired'} but the UI rendered a Native MTP control`)
+    }
+  } else if (mtp.index_has_mtp_tensors === true) {
     if (surface.labelVisible !== true) {
       failures.push('engine reports MTP weights in the bundle but the UI rendered no Native MTP control')
     }
@@ -5705,6 +5872,7 @@ export function validateUiRuntimeProvenance(result) {
     )
     if (
       python.sha256 !== backend.executable_sha256
+      || realpathSync(backend.invoked_executable_path || '') !== python.path
       || sha256Text(python.path) !== backend.executable_path_fingerprint_sha256
     ) {
       failures.push('Python backend executable path/bytes are not independently bound to its listener')
@@ -5864,8 +6032,10 @@ export function validateUiRuntimeProvenance(result) {
       }
     }
     if (
-      manifest.bundled_python_executable_fingerprint_sha256
-        !== runtimeSource.python_executable_fingerprint_sha256
+      ![
+        backend.invoked_executable_path_fingerprint_sha256,
+        backend.executable_path_fingerprint_sha256,
+      ].includes(runtimeSource.python_executable_fingerprint_sha256)
       || manifest.bundled_python_executable_fingerprint_sha256
         !== backend.executable_path_fingerprint_sha256
     ) {
@@ -7036,6 +7206,12 @@ function validateMatrixIdentity(value, result) {
     try {
       expectedPythonPrefix = realpathSync(expectedPythonPrefix)
     } catch {}
+    // Match the producer's exact invocation + resolved target set. A normal
+    // bundled python3 -> python3.12 symlink contributes two path hashes, but
+    // both paths must resolve to the independently reopened bundled bytes.
+    const expectedInstalledFingerprints = [...new Set([
+      sha256Text(expectedPythonInvocationPath), sha256Text(expectedPythonPath),
+    ])].sort()
     const sourceBinding = installed.source_binding || {}
     const expectedSourceBinding = {
       head: uiSourceAfter.commit,
@@ -7052,9 +7228,9 @@ function validateMatrixIdentity(value, result) {
       || runnerBefore.repo_python !== false
       || !validFingerprintList(checkoutFingerprints, true)
       || !validFingerprintList(installedFingerprints)
-      || installedFingerprints.length !== 1
+      || canonicalJson(installedFingerprints) !== canonicalJson(expectedInstalledFingerprints)
       || canonicalJson(acceptedFingerprints) !== canonicalJson(installedFingerprints)
-      || installedFingerprints[0]
+      || sha256Text(expectedPythonPath)
         !== runnerBefore.python_executable_fingerprint_sha256
       || installed.schema !== 'vmlx-agentic-installed-runtime-v1'
     ) {
@@ -9152,6 +9328,8 @@ async function main() {
         const samplingOverrides = ${JSON.stringify(samplingOverrides)};
         const independentBundleDefaults = ${JSON.stringify(bundleGenerationContract.defaults)};
         const endpoint = { host: '127.0.0.1', port: ${JSON.stringify(serverPort)} };
+        const validateMediaTurnAnswer = ${validateMediaTurnAnswer.toString()};
+        const decodeProofAttachment = ${decodeProofAttachment.toString()};
         const l2DiskStorageSeen = ${l2DiskStorageSeen.toString()};
         const correlateTerminalResponseToCacheExecution =
           ${correlateTerminalResponseToCacheExecution.toString()};
@@ -9868,10 +10046,12 @@ async function main() {
             const preDrawer = document.querySelector(
               '[data-vmlx-surface="server-settings"]'
             );
-            const nativeSectionButton = [...(preDrawer?.querySelectorAll('button') || [])]
-              .find((button) => (
-                (button.innerText || '').replace(/\\s+/g, ' ').trim() === 'Native MTP'
-              ));
+            const nativeSectionButton = await waitFor(
+              () => preDrawer?.querySelector(
+                'button[data-vmlx-control="section-specDecode"]'
+              ) || null,
+              'visible Speculative Decoding section before Start',
+            );
             const labelFor = (text) => [...(preDrawer?.querySelectorAll('label') || [])]
               .find((label) => (
                 (label.innerText || '').replace(/\\s+/g, ' ').trim().startsWith(text)
@@ -10262,24 +10442,32 @@ async function main() {
             .catch((error) => ({ error: String(error?.message || error) }));
           const cacheBefore = await window.api.cache.stats(endpoint, created.session.id)
             .catch((error) => ({ error: String(error?.message || error) }));
-          const chat = await window.api.chat.create(
-            'Real UI live model proof',
-            servedModel,
-            undefined,
-            created.session.modelPath,
-          );
           const requestedMaxTokens = ${JSON.stringify(requestMaxTokens ?? null)};
           const rendererGenerationDefaults = await window.api.models.getGenerationDefaults(modelPath)
             .catch((error) => ({ error: String(error?.message || error) }));
 
           window.dispatchEvent(new CustomEvent('vmlx:navigate', { detail: { mode: 'chat' } }));
+          const newChatButton = await waitFor(() => {
+            const button = document.querySelector('[data-vmlx-control="chat-new"]');
+            return button instanceof HTMLButtonElement && isVisible(button) && !button.disabled
+              ? button : null;
+          }, 'visible New Chat control');
+          const createChatThroughVisibleControl = ${createChatThroughVisibleControl.toString()};
+          const chat = await createChatThroughVisibleControl({
+            chats: window.api.chat,
+            modelPath: created.session.modelPath,
+            click: () => {
+              newChatButton.scrollIntoView({ block: 'center' });
+              newChatButton.click();
+            },
+          });
           const chatRow = await waitFor(() => {
             const title = [...document.querySelectorAll('span')]
-              .find((element) => (element.textContent || '').trim() === 'Real UI live model proof');
+              .find((element) => (element.textContent || '').trim() === chat.title
+                && element.closest('.cursor-pointer')?.classList.contains('bg-accent'));
             return title?.closest('.cursor-pointer') || null;
-          }, 'new chat row in the visible sidebar');
+          }, 'new active chat row in the visible sidebar');
           chatRow.scrollIntoView({ block: 'center' });
-          chatRow.click();
           await waitFor(
             () => document.querySelector('textarea:not([disabled])'),
             'active chat composer',
@@ -10302,6 +10490,7 @@ async function main() {
             HTMLSelectElement.prototype,
             'value',
           )?.set;
+          const explicitRangeInputSequence = ${explicitRangeInputSequence.toString()};
           const setInput = async (input, value, controlLabel) => {
             if (!(input instanceof HTMLInputElement) || !valueSetter) {
               const visibleLabels = [...(chatSettingsDrawer?.querySelectorAll('label, div span') || [])]
@@ -10314,10 +10503,15 @@ async function main() {
                 + ' | visible labels: ' + JSON.stringify(visibleLabels),
               );
             }
-            valueSetter.call(input, String(value));
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            await new Promise((resolve) => setTimeout(resolve, 50));
+            const sequence = input.type === 'range'
+              ? explicitRangeInputSequence(input.value, value, input.min || 0, input.max || 100)
+              : [value];
+            for (const selected of sequence) {
+              valueSetter.call(input, String(selected));
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
           };
           const rangeValueFor = (label) => {
             const input = [...(chatSettingsDrawer?.querySelectorAll('input[type="range"]') || [])].find((candidate) => {
@@ -10547,9 +10741,9 @@ async function main() {
               && current.disabled
               && current.getAttribute('data-vmlx-state') === 'saved';
           }, 'Chat Settings save completion');
-          // Auto can run native MTP with the bundle/request distribution via
-          // stochastic verification. Only the explicit Deterministic mode
-          // pins the visible Chat Settings tuple to greedy values.
+          // Auto and Deterministic both start with greedy defaults. Auto
+          // still honors explicit per-chat sampling through stochastic MTP;
+          // Deterministic enforces greedy values and disables those sliders.
           const persistedNativeMtpMode = nativeMtpSelection?.persistedMode
             ?? (() => {
               try {
@@ -10560,20 +10754,18 @@ async function main() {
             })();
           const nativeMtpGreedyUi =
             preloadHealthBefore?.mtp?.runtime_active === true
-            && persistedNativeMtpMode === 'deterministic';
+            && ['auto', 'deterministic'].includes(persistedNativeMtpMode ?? 'auto');
+          const explicitUiSampling = persistedNativeMtpMode === 'deterministic'
+            ? {} : samplingOverrides;
           const expectedUiValues = {
-            Temperature: nativeMtpGreedyUi
-              ? 0
-              : samplingOverrides.temperature ?? independentBundleDefaults?.temperature,
-            'Top P': nativeMtpGreedyUi
-              ? 1
-              : samplingOverrides.topP ?? independentBundleDefaults?.topP,
-            'Top K': nativeMtpGreedyUi
-              ? 0
-              : samplingOverrides.topK ?? independentBundleDefaults?.topK,
-            'Min P': nativeMtpGreedyUi
-              ? 0
-              : samplingOverrides.minP ?? independentBundleDefaults?.minP,
+            Temperature: explicitUiSampling.temperature
+              ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.temperature),
+            'Top P': explicitUiSampling.topP
+              ?? (nativeMtpGreedyUi ? 1 : independentBundleDefaults?.topP),
+            'Top K': explicitUiSampling.topK
+              ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.topK),
+            'Min P': explicitUiSampling.minP
+              ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.minP),
             'Repetition Penalty':
               samplingOverrides.repeatPenalty ?? independentBundleDefaults?.repeatPenalty,
           };
@@ -10980,9 +11172,49 @@ async function main() {
               return false;
             }
           };
+          const mediaTurnBindings = {};
           const sendMessageWithCapture = async (turn, stage, prompt, attachments) => {
             try {
-              await window.api.chat.sendMessage(chat.id, prompt, undefined, attachments);
+              const beforeIds = new Set((await window.api.chat.getMessages(chat.id)).map(m => m.id));
+              const textarea = await waitFor(() => document.querySelector('textarea:not([disabled])'),
+                'enabled media composer for turn ' + turn);
+              const attach = document.querySelector('[data-vmlx-control="chat-attach"]');
+              if (!(attach instanceof HTMLButtonElement) || attach.disabled || !isVisible(attach))
+                throw new Error('Media attachment control unavailable');
+              const input = attach.parentElement?.parentElement?.querySelector('input[type="file"]');
+              if (!(input instanceof HTMLInputElement)) throw new Error('Media file input unavailable');
+              const transfer = new DataTransfer();
+              for (const item of attachments) {
+                transfer.items.add(new File([decodeProofAttachment(item)], item.name, { type: item.type }));
+              }
+              input.files = transfer.files;
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              await waitFor(() => attachments.every(item =>
+                input.parentElement?.parentElement?.innerText.includes(item.name)),
+                'visible media attachment previews for turn ' + turn);
+              const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+              setter.call(textarea, prompt);
+              textarea.dispatchEvent(new Event('input', { bubbles: true }));
+              textarea.dispatchEvent(new Event('change', { bubbles: true }));
+              const completedBefore = events.complete.length;
+              const send = await waitFor(() => {
+                const button = textarea.nextElementSibling;
+                return button instanceof HTMLButtonElement && !button.disabled && isVisible(button) ? button : null;
+              }, 'visible media Send control for turn ' + turn);
+              send.scrollIntoView({ block: 'center' });
+              send.click();
+              await waitFor(() => events.complete.length > completedBefore,
+                'media terminal event for turn ' + turn, 600000);
+              await waitFor(() => document.querySelector('textarea:not([disabled])'),
+                'media composer recovery for turn ' + turn);
+              const added = (await window.api.chat.getMessages(chat.id)).filter(m => !beforeIds.has(m.id));
+              const newUsers = added.filter(m => m.role === 'user');
+              if (newUsers.length !== 1) throw new Error('Media turn has no unique submitted user message');
+              mediaTurnBindings[turn] = {
+                userMessageId: newUsers[0].id, inputControlUsed: true, visiblePreviewVerified: true,
+                attachmentNames: attachments.map(item => item.name),
+                terminalMessageIds: events.complete.slice(completedBefore).map(event => event.messageId),
+              };
               return true;
             } catch (error) {
               rendererFailureStage = stage;
@@ -11176,7 +11408,7 @@ async function main() {
                 message: 'VMLINUX_REAL_UI_CHECK_VIDEO requires VMLINUX_REAL_UI_VIDEO_DATA_URL',
               });
             } else {
-              await sendMessageWithCapture(5, 'video_send_message', 'Describe the attached video briefly in English.', [
+              await sendMessageWithCapture(5, 'video_send_message', ${JSON.stringify(videoPrompt)}, [
                 {
                   name: 'real-ui-proof-video.mp4',
                   type: 'video/mp4',
@@ -11242,17 +11474,26 @@ async function main() {
               uiTurnCount + ' assistant typewriter buffers to drain',
             );
           }
-          for (const messageId of assistantMessageIds) {
-            const root = document.querySelector(
-              '[data-vmlx-proof-message-id="' + CSS.escape(String(messageId)) + '"]'
-            );
-            for (const rail of root?.querySelectorAll('[data-vmlx-proof-reasoning-rail="true"]') || []) {
-              if (!rail.querySelector('[data-vmlx-proof-reasoning-content="true"]')) {
-                rail.querySelector('button')?.click();
-              }
-            }
-          }
-          await new Promise((resolve) => setTimeout(resolve, 250));
+          const expandCompletedReasoningRails = ${expandCompletedReasoningRails.toString()};
+          const reasoningRailExpansion = await expandCompletedReasoningRails({
+            readRows: () => assistantMessageIds.map((messageId) => {
+              const root = document.querySelector(
+                '[data-vmlx-proof-message-id="' + CSS.escape(String(messageId)) + '"]'
+              );
+              const stored = assistants.find((message) => message.id === messageId);
+              let segments = [];
+              try { segments = JSON.parse(stored?.reasoningSegmentsJson || '[]'); } catch (_) {}
+              return {
+                expectsReasoning: Array.isArray(segments) && segments.some((text) => typeof text === 'string' && text.trim()),
+                rails: [...(root?.querySelectorAll('[data-vmlx-proof-reasoning-rail="true"]') || [])].map((rail) => ({
+                  complete: rail.getAttribute('data-vmlx-proof-reasoning-state') === 'complete',
+                  visible: isVisible(rail),
+                  expanded: Boolean(rail.querySelector('[data-vmlx-proof-reasoning-content="true"]')),
+                  expand: () => rail.querySelector('button')?.click(),
+                })),
+              };
+            }),
+          });
           const renderedMessages = assistantMessageIds
             .map((messageId) => snapshotMessage(messageId, 'final'))
             .filter(Boolean);
@@ -11408,12 +11649,22 @@ async function main() {
               || (part?.type === 'audio_url' && part?.audio_url?.url)
             ))
           );
-          const imageSemanticVerified = checkMedia && new RegExp(imageExpectRegex, 'i').test(allAssistantText);
-          const videoSemanticVerified = checkVideo && !!videoExpectRegex && new RegExp(videoExpectRegex, 'i').test(allAssistantText);
-          // Same non-empty-regex rule as video: without an expectation there is
-          // nothing to verify, and silently "passing" would be worse.
-          const audioSemanticVerified = checkAudio && !!audioExpectRegex && new RegExp(audioExpectRegex, 'i').test(allAssistantText);
+          const imageSemanticVerified = checkMedia && validateMediaTurnAnswer({
+            messages, binding: mediaTurnBindings[4], kind: 'image', pattern: imageExpectRegex,
+          }).verified;
+          const videoSemanticVerified = checkVideo && validateMediaTurnAnswer({
+            messages, binding: mediaTurnBindings[5], kind: 'video', pattern: videoExpectRegex,
+          }).verified;
+          const audioSemanticVerified = checkAudio && validateMediaTurnAnswer({
+            messages, binding: mediaTurnBindings[6], kind: 'audio', pattern: audioExpectRegex,
+          }).verified;
           const mediaEvidence = {
+            turnBindings: mediaTurnBindings,
+            answersByKind: Object.fromEntries([
+              ['image', 4, imageExpectRegex], ['video', 5, videoExpectRegex], ['audio', 6, audioExpectRegex],
+            ].map(([kind, turn, pattern]) => [kind, validateMediaTurnAnswer({
+              messages, binding: mediaTurnBindings[turn], kind, pattern,
+            })])),
             requestedImage: checkMedia,
             requestedVideo: checkVideo,
             requestedAudio: checkAudio,
@@ -11482,6 +11733,7 @@ async function main() {
             firstAssistantContent: first,
             secondAssistantContent: second,
             thirdAssistantContent: third,
+            reasoningRailExpansion,
             persistedReasoningByMessage,
             persistedToolsByMessage,
             persistedOaiCallsByMessage,
@@ -11628,6 +11880,7 @@ async function main() {
           checkVideo,
           expectPagedCacheLocked,
           imageExpectRegex,
+          videoPrompt,
           videoExpectRegex,
           cacheExpectRegex,
           pairedApiHoldSeconds,
@@ -11787,6 +12040,27 @@ async function main() {
           // no button (sectionClickResults recorded found: false, which is why
           // that guess was visible rather than silent).
           await clickSection('Tool Integration (MCP)');
+          // MTP lives under Speculative Decoding, which starts collapsed.
+          // Expand the real section before measuring the controls; absence
+          // inside an unopened accordion is not evidence of missing support.
+          const mtpSectionButton = drawer?.querySelector(
+            'button[data-vmlx-control="section-specDecode"]'
+          );
+          if (mtpSectionButton instanceof HTMLButtonElement) {
+            mtpSectionButton.scrollIntoView({ block: 'center' });
+            if (mtpSectionButton.getAttribute('data-vmlx-state') !== 'open') {
+              mtpSectionButton.click();
+            }
+            await wait(
+              () => mtpSectionButton.getAttribute('data-vmlx-state') === 'open',
+              'expanded Speculative Decoding controls for capture',
+            );
+          }
+          sectionClickResults.push({
+            title: 'Speculative Decoding',
+            found: !!mtpSectionButton,
+            text: (mtpSectionButton?.innerText || '').trim(),
+          });
           // Optionally load a REAL MCP config and import it, so the proof shows
           // servers and tools actually discovered in the app rather than an
           // empty section. Typing the path is not enough — Import is what reads
@@ -11830,9 +12104,24 @@ async function main() {
           const pagedInput = inputFor('In-Memory Paged Cache (RAM)');
           const prefixInput = inputFor('Enable Prefix Cache')
             || inputFor('DSV4 Native Composite Prefix Cache');
+          const pagedPolicy = (${visiblePagedCachePolicy.toString()})({
+            present: !!pagedInput,
+            checked: !!pagedInput?.checked,
+            disabled: !!pagedInput?.disabled,
+            policyVisible: [...drawer.querySelectorAll('*')].some((element) =>
+              isVisible(element)
+              && element.children.length === 0
+              && (element.textContent || '').includes(
+                'SSD-only cache policy: In-Memory Paged Cache and Media Preprocess RAM Cache are locked OFF for every model.'
+              )
+            ),
+          });
           const initialCacheControls = {
+            pagedControlPresent: !!pagedInput,
+            pagedPolicyEstablished: pagedPolicy.established,
+            pagedPolicyLockedOff: pagedPolicy.lockedOff,
             enablePrefixCache: !!prefixInput?.checked,
-            usePagedCache: !!pagedInput?.checked,
+            usePagedCache: pagedPolicy.usePagedCache,
             enableDiskCache: !!promptDiskInput?.checked,
             enableBlockDiskCache: !!blockDiskInput?.checked,
             usePagedCacheDisabled: !!pagedInput?.disabled,
@@ -11870,8 +12159,8 @@ async function main() {
                 && initialCacheControls.diskCachePresent === true)
             )
             && !!prefixInput
-            && !!pagedInput
-            && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
+            && pagedPolicy.established
+            && (!expectPagedCacheLocked || pagedPolicy.lockedOff)
             && cacheExpectationMatches;
           const close = [...(drawer?.querySelectorAll('button') || [])]
             .find((button) => button.getAttribute('aria-label') === 'Close');
@@ -12628,6 +12917,7 @@ async function main() {
         expectPagedCacheLocked,
         expectDsv4PoolQuant,
         imageExpectRegex,
+        videoPrompt,
         videoExpectRegex,
         cacheExpectRegex,
         pairedApiHoldSeconds,

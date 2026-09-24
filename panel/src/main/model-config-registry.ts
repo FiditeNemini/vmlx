@@ -1680,6 +1680,9 @@ function applyJangCapabilities(
 
   const runtimeModalities = Array.isArray(caps.modalities)
     ? caps.modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
+    : next.family === 'mimo_v2' && jangCfg.weight_format === 'mixed_affine_mxfp4'
+      && caps.modalities && typeof caps.modalities === 'object'
+      ? Object.keys(caps.modalities).filter(key => caps.modalities[key] === true)
     : []
   const unwiredModalities = Array.isArray(caps.unwired_modalities)
     ? caps.unwired_modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
@@ -1762,6 +1765,11 @@ function applyJangCapabilities(
     next.reasoningParser = 'think_xml'
     next.supportsThinking = true
     next.thinkInTemplate = false
+    if (jangCfg.weight_format === 'mixed_affine_mxfp4') {
+      // Fresh V2.6 uses the vendor template's native default-on control.
+      next.defaultEnableThinking = jangCfg.chat?.thinking?.default !== false
+      next.cacheSubtype = 'mimo_v2_asymmetric_swa'
+    }
   } else if (next.family === 'ling') {
     next.reasoningParser = undefined
     next.supportsThinking = false
@@ -1841,6 +1849,17 @@ function applyJangCapabilities(
 
 function resolveJangMultimodal(jangCfg: any, parsedConfig: any, modelPath: string): boolean {
   const hasMediaConfig = configDeclaresMedia(parsedConfig)
+  if (parsedConfig?.model_type === 'mimo_v2' && jangCfg?.weight_format === 'mixed_affine_mxfp4') {
+    // MiMo's native omni contract is separate from Nemotron's config_omni.json.
+    const keys = bundleArtifactWeightKeys(modelPath) ?? []
+    const visual = (jangCfg.has_vision === true || jangCfg.has_video === true)
+      && !!parsedConfig.vision_config && keys.some(key => key.startsWith('visual.'))
+    const audio = jangCfg.has_audio === true && !!parsedConfig.audio_config
+      && keys.some(key => key.startsWith('audio_encoder.'))
+      && keys.some(key => key.startsWith('speech_embeddings.'))
+      && existsSync(join(modelPath, 'audio_tokenizer', 'model.safetensors'))
+    return visual || audio
+  }
   const capsModalities = Array.isArray(jangCfg?.capabilities?.modalities)
     ? jangCfg.capabilities.modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
     : []

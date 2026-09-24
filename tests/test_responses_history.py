@@ -498,12 +498,12 @@ def test_responses_and_chat_call_sites_normalize_before_template_rendering():
     cache_contract_src = inspect.getsource(server._cache_contract_render_and_tokenize)
 
     assert "messages = _normalize_leading_system_messages(" in responses_src
-    assert "preserve_native_order=_is_dsv4_resp_msgs" in responses_src
+    assert responses_src.count("preserve_native_order=_preserves_native_system_order(request.model)") == 2
     assert "messages = _normalize_leading_system_messages(" in chat_src
     assert (
-        "preserve_native_order=_is_loaded_dsv4_model(request.model)" in chat_src
+        "preserve_native_order=_preserves_native_system_order(request.model)" in chat_src
     )
-    assert "preserve_native_order=_is_loaded_dsv4_model(model)" in cache_contract_src
+    assert "preserve_native_order=_preserves_native_system_order(model)" in cache_contract_src
     assert responses_src.index(
         "messages = _normalize_leading_system_messages("
     ) > responses_src.index("_inject_json_instruction(messages, json_instruction)")

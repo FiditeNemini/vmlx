@@ -177,12 +177,15 @@ def _check_weights(model_path: str, info) -> tuple[list[str], list[str]]:
             print(f"  Found {len(all_keys)} tensors across {len(info.weight_files)} files")
 
             # Check for expected patterns
-            has_embed = any("embed_tokens" in k or "wte" in k or "embedding.weight" in k for k in all_keys)
+            has_embed = any(
+                k.endswith(("embed_tokens.weight", "wte.weight", "embedding.weight", "embeddings.weight"))
+                for k in all_keys
+            )
             has_lm_head = any("lm_head" in k for k in all_keys)
             has_layers = any("layers.0." in k or "blocks.0." in k or "h.0." in k for k in all_keys)
 
             if not has_embed:
-                warnings.append("No embedding layer found (embed_tokens/wte)")
+                warnings.append("No embedding layer found (embed_tokens/wte/embedding/embeddings)")
             if not has_lm_head:
                 tie = info.config.get("tie_word_embeddings", False)
                 if not tie:

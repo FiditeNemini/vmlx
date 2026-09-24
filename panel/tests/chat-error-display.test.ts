@@ -18,7 +18,9 @@ describe('chat error display policy', () => {
     expect(content).toContain('requested=8192')
     expect(content).toContain('safe_cap=1')
     expect(content).toContain('Metal OOM / kernel-panic risk')
-    expect(content).toContain('sudo sysctl iogpu.wired_limit_mb=120000')
+    expect(content).toContain('Check the measured Metal memory status')
+    expect(content).toContain('do not set it equal to physical RAM')
+    expect(content).not.toMatch(/sudo sysctl iogpu\.wired_limit_mb=\d+/)
   })
 
   it('does not convert ordinary connection errors into assistant content', () => {

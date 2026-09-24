@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vmlx"
-version = "1.6.64"
+version = "1.6.65"
 description = "MLX inference server for Apple Silicon — Text, Image, Video & Audio generation"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -85,6 +85,7 @@ dependencies = [
     "mcp>=1.0.0",
     # JSON Schema validation for structured output
     "jsonschema>=4.0.0",
+    "referencing>=0.37.0",
     # Note: mlx-audio remains optional for non-Electron installs.
     "mlx-embeddings>=0.0.5",
     # JANG / MXTQ / JANGTQ runtime — REQUIRED, not optional. Every modern JANG
@@ -96,7 +97,7 @@ dependencies = [
     # promotion from optional [mxtq] to a hard dependency. The PyPI package
     # is named `jang` (not `jang-tools` — that's the local repo dir name);
     # `import jang_tools` works because that's the package import name.
-    "jang>=2.5.47",
+    "jang>=2.5.48",
     # PyTorch — REQUIRED for Nemotron-3-Nano-Omni multimodal dispatch.
     # `jang_tools.nemotron_omni_chat._import_torch()` lazy-imports torch on
     # the FIRST image / audio / video request to an Omni bundle; without
@@ -145,7 +146,7 @@ ui = [
 # pinning `vmlx[mxtq]` in their requirements; the real install is now a
 # hard dependency above so plain `pip install vmlx` works for all bundles.
 mxtq = [
-    "jang>=2.5.47",
+    "jang>=2.5.48",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -198,7 +199,7 @@ audio = [
 # (intentionally same pin) so `pip install vmlx[jang]` is a
 # friendly alias. Pin tracks the hard dep above — bump in lockstep.
 jang = [
-    "jang>=2.5.47",
+    "jang>=2.5.48",
 ]
 # Image generation dependencies (Flux, Z-Image-Turbo via mflux)
 image = [
@@ -264,3 +265,7 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+
+# MiMo runtime source pin until JANG 2.5.48 is published to the package index.
+[tool.uv.sources]
+jang = { git = "https://github.com/jjang-ai/jangq.git", rev = "54779dadfc43ec703a5345e25030880f15b7b2dd", subdirectory = "jang-tools" }

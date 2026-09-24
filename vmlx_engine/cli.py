@@ -1023,7 +1023,9 @@ def resolve_block_disk_cache_max_gb(args) -> float:
         return 10.0
     if total_gb <= 0:
         return 10.0
-    return round(total_gb * percent / 100.0, 2)
+    # Keep positive budgets positive: rounding GiB to two decimals can turn a
+    # small volume/percentage into zero, whose runtime meaning is unlimited.
+    return max(1.0 / (1024 ** 3), total_gb * percent / 100.0)
 
 
 def _low_ram_cache_advice_lines(args) -> list[str]:

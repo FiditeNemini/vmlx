@@ -61,3 +61,29 @@ def test_json_native_object_is_not_fabricated_into_a_string():
     raw = '<tool_call>{"name":"write_file","arguments":{"path":"x","content":{"n":17}}}</tool_call>'
     result = QwenToolParser().extract_tool_calls(raw, request=request_for({"type": "string"}))
     assert json.loads(result.tool_calls[0]["arguments"])["content"] == {"n": 17}
+
+
+@pytest.mark.parametrize("value,expected", [("False", False), ("TRUE", True), (" false ", False)])
+@pytest.mark.parametrize("flat", [False, True])
+def test_referenced_xml_boolean_spelling_is_typed_on_both_parser_paths(value, expected, flat):
+    request = request_for({"$ref": "#/$defs/flag"}, flat=flat)
+    fn = request["tools"][0] if flat else request["tools"][0]["function"]
+    fn["parameters"]["$defs"] = {"flag": {"type": "boolean"}}
+    text = xml_call(value)
+    parser = QwenToolParser()
+    result = parser.extract_tool_calls(text, request=request)
+    assert json.loads(result.tool_calls[0]["arguments"])["content"] is expected
+    streamed = parser.extract_tool_calls_streaming("", text, text, request=request)
+    assert json.loads(streamed["tool_calls"][0]["function"]["arguments"])["content"] is expected
+
+
+@pytest.mark.parametrize("prop", [{"type": "string"}, {"type": ["boolean", "string"]}, {}])
+def test_xml_boolean_spelling_does_not_override_string_or_ambiguous_schema(prop):
+    result = QwenToolParser().extract_tool_calls(xml_call("False"), request=request_for(prop))
+    assert json.loads(result.tool_calls[0]["arguments"])["content"] == "False"
+
+
+def test_json_native_quoted_boolean_is_not_retyped():
+    raw = '<tool_call>{"name":"write_file","arguments":{"path":"x","content":"False"}}</tool_call>'
+    result = QwenToolParser().extract_tool_calls(raw, request=request_for({"type": "boolean"}))
+    assert json.loads(result.tool_calls[0]["arguments"])["content"] == "False"

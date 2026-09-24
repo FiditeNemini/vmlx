@@ -1092,8 +1092,8 @@ class MLLMScheduler:
                         f"VLM {'block disk-only' if block_disk_only else 'paged'} cache enabled: "
                         f"block_size={self.config.paged_cache_block_size}, "
                         f"max_blocks={_mllm_index_blocks}, "
-                        f"capacity="
-                        f"{_mllm_index_blocks * self.config.paged_cache_block_size} tokens"
+                        f"indexed_capacity="
+                        f"{max(0, _mllm_index_blocks - 1) * self.config.paged_cache_block_size} tokens"
                     )
                 except Exception as e:
                     self._cleanup_failed_block_cache_initialization(
@@ -1508,7 +1508,10 @@ class MLLMScheduler:
             or getattr(self, "_model_type", "")
             or ""
         ).lower()
-        if not _mllm_media_prefix_cache_family_enabled(model_type):
+        runtime = getattr(getattr(self, "batch_generator", None), "model", None)
+        if not _mllm_media_prefix_cache_family_enabled(
+            model_type, mimo_v26_runtime=getattr(runtime, "_mimo_v26_runtime", False),
+        ):
             return False
         extra = getattr(request, "_cache_extra_keys", None)
         if not extra:
@@ -2250,6 +2253,14 @@ class MLLMScheduler:
         the config has at least two distinct attention modes. For everything
         else we return False and the normal prefix-cache pipeline runs.
         """
+        if getattr(getattr(self, "model", None), "_mimo_v26_runtime", False):
+            # The fresh language wrapper exposes source args, whose schema has
+            # hybrid_layer_pattern rather than the legacy cache_subtype field.
+            # Observe the native slots before constructing the generator so it
+            # captures rotating boundaries on the FIRST request.
+            kinds = {type(slot).__name__ for slot in lang_model.make_cache()}
+            return kinds == {"KVCache", "RotatingKVCache"}
+
         def _cfg_value(cfg, key):
             if isinstance(cfg, dict):
                 return cfg.get(key)

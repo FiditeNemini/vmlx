@@ -1337,8 +1337,9 @@ class TestHybridSSMResumeRemaining:
         import re
         with open("panel/src/main/ipc/performance.ts") as f:
             source = f.read()
-        match = re.search(r"AbortSignal\.timeout\((\d+)\)", source)
-        assert match, "performance.ts must use AbortSignal.timeout"
+        health_handler = source[source.index("ipcMain.handle('performance:health'"):]
+        match = re.search(r"AbortSignal\.timeout\((\d+)\)", health_handler)
+        assert match, "performance:health must use AbortSignal.timeout"
         timeout_ms = int(match.group(1))
         assert timeout_ms >= 30000, (
             f"Performance health timeout is {timeout_ms}ms, must be >= 30000ms. "

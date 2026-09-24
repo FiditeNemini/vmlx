@@ -764,9 +764,16 @@ def check_and_inject_fallback_tools(
     # (matrix over all bundle templates, 2026-09-05).
     _xml_function_has_native_tool_schema = (
         is_xml_function_native_tool_prompt
-        and "<tool_call>" in instruction_prompt
-        and "<function=example_function_name>" in instruction_prompt
+        and (
+            ("<tool_call>" in instruction_prompt
+             and "<function=example_function_name>" in instruction_prompt)
+            # MiMo-V2.6 renders the complete JSON schemas but no example call.
+            # A parsed match of every requested parameter contract is enough;
+            # requiring an example injects a second, altered system prompt.
+            or _native_tools_schema_verdict is True
+        )
         and "<tools>" in instruction_prompt
+        and "</tools>" in instruction_prompt
         and all(
             f"<name>{name}</name>" in instruction_prompt
             or f'"name": "{name}"' in instruction_prompt
@@ -1358,6 +1365,33 @@ def check_and_inject_fallback_tools(
                     return command
             if not request_text:
                 return ""
+            # Explicit assignments must win over the bare ``name word``
+            # fallback. Otherwise "flag to boolean false" teaches ``to`` as
+            # the value, and even "path is panel/package.json" loses the path.
+            # Keep literal JSON source intact: schema-aware native parsers own
+            # its eventual string-versus-JSON interpretation.
+            assignment = re.search(
+                rf"\b{re.escape(param)}(?!\w)\s*(?:(?:argument|parameter(?:\s+content)?)\s+)?"
+                r"(?:must\s+be\b|to\b|is\b|=|:)\s*"
+                r"(?:(?:the\s+)?(?:literal\s+)?(?:string|boolean|integer|number)\s+)?",
+                request_text,
+                flags=re.IGNORECASE,
+            )
+            if assignment:
+                remainder = request_text[assignment.end():]
+                if remainder.startswith(('"', '{', '[')):
+                    try:
+                        decoded, end = json.JSONDecoder().raw_decode(remainder)
+                        return decoded if isinstance(decoded, str) else remainder[:end]
+                    except json.JSONDecodeError:
+                        # Do not fall back to an assignment word or a truncated
+                        # JSON example when the explicit value is incomplete.
+                        return ""
+                if remainder.startswith(("`", "'")):
+                    end = remainder.find(remainder[0], 1)
+                    return remainder[1:end] if end >= 0 else ""
+                scalar = re.match(r"[A-Za-z0-9_~@%+=:./+-]{1,240}", remainder)
+                return scalar.group(0).rstrip(".,;:!?") if scalar else ""
             if normalized_param in {"path", "file", "filename"}:
                 if normalized_tool == "read_file":
                     read_file = re.search(
@@ -1909,13 +1943,21 @@ def check_and_inject_fallback_tools(
             params = func.get("parameters", {}) or {}
             props = params.get("properties", {}) if isinstance(params, dict) else {}
             required = set(params.get("required", []) if isinstance(params, dict) else [])
+            # This fallback removes the template's tools kwarg. Retain the full
+            # validation schema, including refs/nested constraints, and derive
+            # readable type labels without pretending an absent type is string.
+            from ..tool_parsers.schema_types import xml_parameter_type_hints
+
+            type_hints = xml_parameter_type_hints(params) if isinstance(params, dict) else {}
+            qwen_lines.append("  Parameter JSON Schema: " + json.dumps(params, ensure_ascii=False))
             if props:
                 qwen_lines.append("  parameters:")
                 for p_name, p_schema in props.items():
+                    allowed_types = type_hints.get(p_name, {}).get("type", [])
                     p_type = (
-                        p_schema.get("type", "string")
-                        if isinstance(p_schema, dict)
-                        else "string"
+                        " or ".join(allowed_types)
+                        if allowed_types and len(allowed_types) < 7
+                        else "any JSON value"
                     )
                     req = "required" if p_name in required else "optional"
                     p_desc = (

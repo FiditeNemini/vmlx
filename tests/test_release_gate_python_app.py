@@ -1009,6 +1009,10 @@ def test_verify_bundled_python_hash_gate_covers_release_runtime_files():
         "speculative.py",
         "models/llm.py",
         "models/mllm.py",
+        "models/mimo_v26.py",
+        "models/mimo_v26_cache.py",
+        "models/mimo_v26_contract.py",
+        "tool_parsers/xml_function_tool_parser.py",
         "models/step3p7_mlx_vlm.py",
         "omni_multimodal.py",
         "paged_cache.py",
@@ -1025,6 +1029,11 @@ def test_verify_bundled_python_hash_gate_covers_release_runtime_files():
     }
     expected_jang_tools_files = {
         "capabilities.py",
+        "mimo_v2/mlx_register.py",
+        "mimo_v2/v26_model.py",
+        "mimo_v2/v26_vision.py",
+        "mimo_v2/v26_audio.py",
+        "mimo_v2/v26_omni.py",
         "convert.py",
         "convert_hy3_jangtq.py",
         "loader.py",
@@ -1497,3 +1506,50 @@ def test_bundled_python_ships_the_pinned_mcp_sdk():
     if shipped.returncode != 0:
         return
     assert shipped.stdout.strip() == match.group(1)
+
+
+def test_pinned_jang_hash_gate_uses_commit_bytes_and_rejects_missing_or_changed_files(tmp_path):
+    """Exercise the real shell gate against divergent upstream, pin and worktree."""
+    import shutil
+    source = tmp_path / 'source'
+    bundled = tmp_path / 'bundled'
+    package = source / 'jang-tools' / 'jang_tools'
+    package.mkdir(parents=True)
+    bundled.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
+    git('init', '-q')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'Test')
+    module = package / 'runtime.py'
+    module.write_text('upstream\n')
+    git('add', '.')
+    git('commit', '-qm', 'upstream')
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+    module.write_text('selected runtime\n')
+    git('commit', '-qam', 'selected')
+    selected = git('rev-parse', 'HEAD')
+    (bundled / 'runtime.py').write_text('selected runtime\n')
+    module.write_text('uncommitted worktree content\n')
+    verifier = Path('panel/scripts/verify-bundled-python.sh').read_text()
+    start = verifier.index('  for rel in "${HASH_GATED_JANG_TOOLS_FILES[@]}"; do')
+    end = verifier.index('\n  done', start) + len('\n  done')
+    script = 'set -euo pipefail\nHASH_GATED_JANG_TOOLS_FILES=(runtime.py)\n' + verifier[start:end]
+    env = dict(os.environ, JANG_TOOLS_SOURCE_ROOT=str(source / 'jang-tools'),
+               JANG_TOOLS_SOURCE_DIR=str(package), BUNDLED_JANG_TOOLS_DIR=str(bundled),
+               JANG_GIT_PREFIX='jang-tools/', EXPECTED_JANG_COMMIT=selected,
+               GIT_BIN=shutil.which('git'), SHASUM_BIN=shutil.which('shasum'),
+               AWK_BIN=shutil.which('awk'))
+    def run():
+        return subprocess.run(['bash', '-c', script], env=env, text=True, capture_output=True)
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    (bundled / 'runtime.py').write_text('upstream\n')
+    result = run()
+    assert result.returncode != 0 and 'content drift' in result.stdout
+    # Matching uncommitted files may never bless a module absent at the pin.
+    (bundled / 'missing.py').write_text('same\n')
+    (package / 'missing.py').write_text('same\n')
+    script = script.replace('FILES=(runtime.py)', 'FILES=(missing.py)')
+    result = run()
+    assert result.returncode != 0 and 'missing at' in result.stdout + result.stderr

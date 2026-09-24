@@ -224,6 +224,8 @@ class SimpleEngine(BaseEngine):
         language_model = getattr(getattr(self._model, "model", None), "language_model", None)
         if language_model is None:
             raise RuntimeError("MiMo text-only route requires language_model")
+        if getattr(getattr(self._model, "model", None), "_mimo_v26_runtime", False):
+            language_model = language_model.inner
 
         from mlx_lm import generate
         from mlx_lm.sample_utils import make_logits_processors
@@ -325,6 +327,8 @@ class SimpleEngine(BaseEngine):
         not output injection.
         """
 
+        if getattr(getattr(self._model, "model", None), "_mimo_v26_runtime", False):
+            return []
         if enable_thinking is not False:
             return []
 

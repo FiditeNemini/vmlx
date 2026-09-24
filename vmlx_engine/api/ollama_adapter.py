@@ -237,6 +237,13 @@ def _apply_ollama_video_controls(body: dict, req: dict) -> None:
             req[field] = value
 
 
+def _apply_ollama_cache_controls(body: dict, req: dict[str, Any]) -> None:
+    """Forward explicit vMLX cache controls to canonical request validation."""
+    for field in ("cache_salt", "skip_prefix_cache"):
+        if field in body:
+            req[field] = body[field]
+
+
 def ollama_chat_to_openai(body: dict) -> dict:
     """Convert Ollama /api/chat request to OpenAI /v1/chat/completions."""
     opts = body.get("options", {})
@@ -311,6 +318,7 @@ def ollama_chat_to_openai(body: dict) -> dict:
     if opts.get("repeat_penalty") is not None:
         req["repetition_penalty"] = opts["repeat_penalty"]
     _apply_ollama_prompt_context_limit(body, req)
+    _apply_ollama_cache_controls(body, req)
     # Forward tools if present (Ollama tool calling)
     if body.get("tools"):
         req["tools"] = body["tools"]
@@ -375,6 +383,7 @@ def ollama_generate_to_openai(body: dict) -> dict:
     if opts.get("stop"):
         req["stop"] = opts["stop"]
     _apply_ollama_prompt_context_limit(body, req)
+    _apply_ollama_cache_controls(body, req)
     # /api/generate also forwards format=json → response_format
     _fmt = body.get("format")
     if _fmt == "json":
@@ -432,6 +441,7 @@ def ollama_generate_to_openai_chat(body: dict) -> dict:
     if opts.get("repeat_penalty") is not None:
         req["repetition_penalty"] = opts["repeat_penalty"]
     _apply_ollama_prompt_context_limit(body, req)
+    _apply_ollama_cache_controls(body, req)
     _apply_ollama_thinking(body, req)
     _apply_ollama_video_controls(body, req)
     if _should_forward_reasoning_effort(body, req):
@@ -798,9 +808,8 @@ def merge_ollama_stream_terminal(
         and any(key in current for key in ("eval_count", "prompt_eval_count", "total_duration"))
     )
 
-    if message.get("tool_calls"):
-        merged["done_reason"] = "tool_calls"
-    elif (
+    # Complete call payloads do not erase the model's token-limit terminal.
+    if current_reason == "length" or (
         previous_reason == "length"
         and current_is_usage_only
         and current_reason in (None, "stop")
@@ -809,6 +818,8 @@ def merge_ollama_stream_terminal(
         # adapter fabricates a done row for that usage with done_reason="stop";
         # do not let that accounting-only row hide a prior max-token terminal.
         merged["done_reason"] = "length"
+    elif message.get("tool_calls"):
+        merged["done_reason"] = "tool_calls"
     else:
         merged["done_reason"] = current_reason or previous_reason
     return merged

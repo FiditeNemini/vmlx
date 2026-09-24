@@ -48,8 +48,13 @@ def test_responses_rejection_does_not_erase_actual_stop_cause(finish, reason):
     ('chat', True, 'required'),
     ('chat', True, {'type': 'function', 'function': {'name': 'read_file'}}),
 ])
-async def test_native_rejected_call_stream_has_typed_terminal(monkeypatch, surface, stream, choice):
-    text = '<tool_call>unavailable_reader<arg_key>path</arg_key><arg_value>rates.json</arg_value></tool_call>'
+@pytest.mark.parametrize('parser,text', [
+    ('spark25', '<tool_call>unavailable_reader<arg_key>path</arg_key><arg_value>rates.json</arg_value></tool_call>'),
+    ('xml_function', '<tool_call><function=read_file><parameter=counter>NaN</parameter></function></tool_call>'),
+    ('xml_function', '<tool_call><function=read_file><parameter=counter>1e999</parameter></function></tool_call>'),
+    ('xml_function', '<tool_call><function=read_file><parameter=counter>{"nested": [Infinity]}</parameter></function></tool_call>'),
+])
+async def test_native_rejected_call_stream_has_typed_terminal(monkeypatch, surface, stream, choice, parser, text):
     class Engine:
         tokenizer = SimpleNamespace(has_thinking=False)
         is_mllm = False
@@ -58,15 +63,21 @@ async def test_native_rejected_call_stream_has_typed_terminal(monkeypatch, surfa
             return GenerationOutput(text=text, raw_text=text, tokens=[], prompt_tokens=10,
                                     completion_tokens=20, finished=True, finish_reason='stop')
         async def stream_chat(self, **kwargs):
-            yield GenerationOutput(text=text, new_text=text, tokens=[], prompt_tokens=10,
-                                   completion_tokens=20, finished=True, finish_reason='stop')
+            # Split native markup and numeric literals across generation ticks.
+            # This exercises buffering/finalization, not just a parser call.
+            for start in range(0, len(text), 7):
+                end = min(start + 7, len(text))
+                final = end == len(text)
+                yield GenerationOutput(text=text[:end], new_text=text[start:end], tokens=[], prompt_tokens=10,
+                                       completion_tokens=20 if final else 1, finished=final,
+                                       finish_reason='stop' if final else None)
     engine = Engine()
     monkeypatch.setattr(server, '_engine', engine)
     monkeypatch.setattr(server, '_model_name', 'spark-rejection-test')
     monkeypatch.setattr(server, '_served_model_name', 'spark-rejection-test')
     monkeypatch.setattr(server, '_model_path', None)
     monkeypatch.setattr(server, '_reasoning_parser', None)
-    monkeypatch.setattr(server, '_tool_call_parser', 'spark25')
+    monkeypatch.setattr(server, '_tool_call_parser', parser)
     monkeypatch.setattr(server, '_tool_call_parser_disabled_explicitly', False)
     function = {'name': 'read_file', 'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}}}
     messages = [{'role': 'user', 'content': 'Read rates.json'}]

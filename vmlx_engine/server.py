@@ -71,6 +71,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -1544,6 +1545,21 @@ def _strip_residual_think_markup_for_display(
     return stripped.strip()
 
 
+def _canonicalize_mimo_v26_tool_history(messages: list[dict]) -> list[dict]:
+    """Validate positional native tool history before any streaming response."""
+    if not any(message.get("role") == "tool" for message in messages):
+        return messages
+    from .models.mimo_v26_contract import (
+        canonicalize_mimo_v26_tool_results, read_mimo_v26_contract,
+    )
+    if read_mimo_v26_contract(_model_path or _model_name) is None:
+        return messages
+    try:
+        return canonicalize_mimo_v26_tool_results(messages)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 def _drop_contentless_assistant_turns(messages: list) -> list:
     """Drop replayed assistant turns that carry neither text nor a tool call.
 
@@ -1559,6 +1575,11 @@ def _drop_contentless_assistant_turns(messages: list) -> list:
     theirs separately again -- fixing fewer than all four leaves the surface
     those clients hit still broken (the fix-one-of-N-schedulers class).
     """
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+    if read_mimo_v26_contract(_model_path or _model_name) is not None:
+        # MiMo's native template accepts reasoning-only and empty assistant
+        # turns. The Mistral compatibility workaround must not erase them.
+        return messages
     return [
         _msg
         for _msg in messages
@@ -1580,6 +1601,11 @@ def _strip_prior_reasoning_for_thinking_off(
     tool-call anchors even when visible content is empty so following tool
     results never become orphaned; drop only empty non-tool assistant turns.
     """
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+    if read_mimo_v26_contract(_model_path or _model_name) is not None:
+        # MiMo's native template retains past reasoning even when the next
+        # turn is thinking-off. The flag changes only the generation suffix.
+        return messages
     cleaned: list[dict] = []
     for original in messages:
         if not isinstance(original, dict) or original.get("role") != "assistant":
@@ -1648,11 +1674,35 @@ def _private_reasoning_has_tool_syntax(text: str | None) -> bool:
     )
 
 
+def _private_reasoning_tools_allowed(
+    request: "ChatCompletionRequest | ResponsesRequest | None",
+) -> bool:
+    """Qwen calls belong after reasoning closes, including examples at the cap.
+
+    Resolve the configured native tool dialect, not the bundle's display name.
+    Other families retain their existing private-rail recovery contracts (for
+    example canonical DeepSeek DSML and Harmony commentary).
+    """
+    active_parser = _tool_call_parser
+    if not active_parser and request is not None:
+        try:
+            from .model_config_registry import get_model_config_registry
+
+            active_parser = get_model_config_registry().get_tool_parser(
+                _model_path or _model_name or getattr(request, "model", "")
+            )
+        except Exception:
+            pass
+    return active_parser not in {"qwen", "qwen3"}
+
+
 def _parse_private_reasoning_tool_calls(
     reasoning_text: str | None,
     request: "ChatCompletionRequest | ResponsesRequest",
 ) -> list["ToolCall"] | None:
     """Extract structured private-rail tool calls without exposing private prose."""
+    if not _private_reasoning_tools_allowed(request):
+        return None
     if not _private_reasoning_has_tool_syntax(reasoning_text):
         return None
     text = str(reasoning_text).strip()
@@ -2880,6 +2930,22 @@ def _is_loaded_dsv4_model(model: str = "") -> bool:
         return getattr(cfg, "family_name", "") == "deepseek_v4"
     except Exception:
         return False
+
+
+def _preserves_native_system_order(model: str = "") -> bool:
+    """Use loaded bundle metadata to select templates that preserve role order."""
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+
+    return _is_loaded_dsv4_model(model) or read_mimo_v26_contract(
+        _model_path or _model_name or model
+    ) is not None
+
+
+def _preserves_native_developer_role(model: str = "") -> bool:
+    """MiMo's vendor template renders developer as a distinct literal role."""
+    from .models.mimo_v26_contract import read_mimo_v26_contract
+
+    return read_mimo_v26_contract(_model_path or _model_name or model) is not None
 
 
 def _is_loaded_qwen4_exp_model(model: str = "") -> bool:
@@ -4336,6 +4402,13 @@ def _mimo_v2_runtime_modalities(bundle_path: str | None) -> list[str] | None:
     if str((cfg or {}).get("model_type") or "").lower() != "mimo_v2":
         return None
 
+    from .models.mimo_v26_contract import read_mimo_v26_contract, mimo_v26_modalities
+    contract = read_mimo_v26_contract(bundle_path)
+    if contract is not None:
+        # Do not import/register the V2.5 adapter as a side effect of capability
+        # discovery. Its global SwitchGLU patch contaminates the fresh runtime.
+        return mimo_v26_modalities(bundle_path, contract)
+
     modalities = ["text"]
     module = _mimo_v2_runtime_module()
     if not _mimo_v2_media_runtime_enabled(cfg) and not _mimo_v2_media_runtime_auto_enabled(
@@ -5119,8 +5192,11 @@ def validate_tool_args_against_schema(
     except Exception:  # pragma: no cover - dependency is declared
         return "unconstrained", ["jsonschema is not importable"]
     try:
-        Draft202012Validator.check_schema(params)
-        validator = Draft202012Validator(params)
+        from jsonschema.validators import validator_for
+
+        validator_type = validator_for(params, default=Draft202012Validator)
+        validator_type.check_schema(params)
+        validator = validator_type(params)
     except SchemaError as exc:
         return "unconstrained", [f"malformed input schema: {getattr(exc, 'message', exc)}"]
     except Exception as exc:  # noqa: BLE001
@@ -6263,6 +6339,10 @@ app = FastAPI(
     version=__import__("vmlx_engine").__version__,
     lifespan=lifespan,
 )
+
+from .api.validation_errors import request_validation_error_response
+
+app.add_exception_handler(RequestValidationError, request_validation_error_response)
 
 
 @app.exception_handler(OllamaRequestValidationError)
@@ -7434,16 +7514,17 @@ def _parse_tool_calls_with_parser(
                 return None, "{}", ""
 
         def _coerce_json_args(raw_args: Any) -> dict[str, Any] | None:
-            if isinstance(raw_args, dict):
-                return dict(raw_args)
-            if isinstance(raw_args, str) and raw_args.strip():
-                try:
-                    parsed = json.loads(raw_args)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except (ValueError, TypeError):
+            try:
+                parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                if not isinstance(parsed, dict):
                     return None
-            return None
+                # Python accepts NaN/Infinity and overflows 1e999 to inf.
+                # Reject them (including nested values) before any delivery,
+                # even when optional JSON Schema validation is disabled.
+                json.dumps(parsed, allow_nan=False)
+                return dict(parsed)
+            except (ValueError, TypeError):
+                return None
 
         def _missing_required_args(name: str | None, raw_args: Any) -> list[str]:
             if not name:
@@ -7757,6 +7838,10 @@ def _parse_tool_calls_with_parser(
                 return cleaned, calls
             if _dropped_only_validated_calls():
                 return cleaned, None
+            if _has_tool_marker_or_partial_suffix(text):
+                # An unavailable function name is still rejected tool control,
+                # not a reason to revive its envelope as nonstream prose.
+                return _visible_prefix_before_unparsed_tool_markup(text), None
             return text, None
         repaired_cleaned, repaired_calls = _repair_instruction_echo_tool_call(text)
         if repaired_calls:
@@ -7764,6 +7849,18 @@ def _parse_tool_calls_with_parser(
         bare_cleaned, bare_calls = _repair_required_single_tool_bare_json_args(text)
         if bare_calls:
             return bare_cleaned, bare_calls
+        if _effective_tools_for_tool_parsing(request):
+            safe_prefix = _visible_prefix_before_unparsed_tool_markup(text)
+            if safe_prefix != text:
+                # Generic/native-auto parsing must obey the same fail-closed
+                # contract as streaming. Otherwise nonstream endpoints expose
+                # raw rejected control blocks as successful assistant prose.
+                _record_tool_call_drop(
+                    "Buffered native tool markup did not produce a usable function "
+                    "call. Its control suffix was hidden. Inspect the parser and "
+                    "validation diagnostics; this alone does not establish output-token truncation."
+                )
+                return safe_prefix, None
         return text, None
 
     # Determine which parser to use.
@@ -7884,14 +7981,15 @@ def _parse_tool_calls_with_parser(
                 # arguments: the markup is not an answer, the diagnostics
                 # carry the reason.
                 return result.content or "", None
-            # Parser consumed only unavailable tool names. Treat as plain text
-            # so clients do not receive hallucinated function calls like
-            # README.md()/src()/tests() when the request only exposed
-            # list_directory().
+            # Never execute unavailable names such as README.md()/src()/tests().
+            # A native envelope is rejected control, not assistant prose; keep
+            # only its safe visible prefix. Ordinary text remains ordinary text.
             if bool(
                 getattr(parser_cls, "SUPPRESS_INVALID_NATIVE_MARKUP", False)
             ):
                 return result.content or "", None
+            if _has_tool_marker_or_partial_suffix(output_text):
+                return _visible_prefix_before_unparsed_tool_markup(output_text), None
             return output_text, None
         else:
             if strict_native_format:
@@ -10530,6 +10628,11 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
         or profile_bits
         or q_cfg.get("bits")
     )
+    mixed_precision = q_jang.get("method") == "mixed"
+    if mixed_precision:
+        # The config default describes fallback modules, not the whole bundle.
+        # Mixed affine/MXFP4 bundles may have no single target bit width.
+        target_bits = q_jang.get("target_bits")
     actual_bits = (
         q_jang.get("actual_bits")
         or q_jang.get("actual_bits_per_weight")
@@ -10658,6 +10761,7 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
         "routed_expert_bits_by_projection": routed_expert_bits_by_projection,
         "routed_expert_bits_label": routed_expert_bits_label,
         "target_bits": target_bits,
+        "mixed_precision": mixed_precision,
         "actual_bits": actual_bits,
         "config_bits": q_cfg.get("bits"),
         "group_size": q_cfg.get("group_size") or q_jang.get("group_size") or q_jang.get("block_size"),
@@ -12519,6 +12623,9 @@ def _native_cache_status(
             stored_kv_bits > 0
             or native_tq_storage
         )
+        fresh_mimo_storage = bool(getattr(
+            getattr(scheduler, "model", None), "_mimo_v26_runtime", False
+        ))
         storage_quantization = {
             "enabled": storage_quantized,
             "mode": "storage_boundary",
@@ -12526,7 +12633,7 @@ def _native_cache_status(
             "group_size": stored_kv_group if storage_quantized else None,
             "applies_to": (
                 "full_attention_kv_only"
-                if native_tq_storage
+                if native_tq_storage or fresh_mimo_storage
                 else "full_and_sliding_attention_kv"
             ),
             "metadata_policy": "preserve_rotating_window_metadata",
@@ -12538,6 +12645,9 @@ def _native_cache_status(
             storage_quantization["restore_policy"] = (
                 "decode_full_attention_tq_and_restore_rotating_state"
             )
+        elif fresh_mimo_storage:
+            storage_quantization["sliding_window_policy"] = "native_rotating_kv_state"
+            storage_quantization["restore_policy"] = "restore_native_dtype_and_rotating_state"
         return _with_runtime_layout({
             "family": family_name or scheduler_family or "mixed_attention",
             "schema": "mixed_swa_kv_v1",
@@ -14844,10 +14954,11 @@ def _cache_contract_render_and_tokenize(
         dry_request.input,
         dry_request.instructions,
         preserve_multimodal=False,
+        preserve_native_roles=_preserves_native_developer_role(model),
     )
     messages = _normalize_leading_system_messages(
         messages,
-        preserve_native_order=_is_loaded_dsv4_model(model),
+        preserve_native_order=_preserves_native_system_order(model),
     )
     ct_kwargs = _merge_ct_kwargs(
         dry_request.chat_template_kwargs,
@@ -16867,6 +16978,7 @@ async def create_anthropic_message(
     # thinking-only assistant turn 500s on strict templates while the same
     # conversation succeeds through chat/responses.
     messages_dump = _drop_contentless_assistant_turns(messages_dump)
+    messages_dump = _canonicalize_mimo_v26_tool_history(messages_dump)
 
     # Force usage accounting so message_delta reports real input/output tokens
     # (Anthropic clients otherwise log zero tokens).
@@ -17846,6 +17958,7 @@ async def ollama_chat(fastapi_request: Request):
     # downstream and 500s on strict templates while stream:false (which
     # delegates to create_chat_completion) succeeds.
     messages = _drop_contentless_assistant_turns(messages)
+    messages = _canonicalize_mimo_v26_tool_history(messages)
 
     # Ollama's `format` (JSON mode). The adapter already mapped it onto
     # response_format, but THIS streaming branch builds its own chat_kwargs
@@ -17985,7 +18098,8 @@ async def ollama_chat(fastapi_request: Request):
                             "message", {"role": "assistant", "content": ""}
                         )
                         _msg["tool_calls"] = buffered_tcs
-                        _ndjson_obj["done_reason"] = "tool_calls"
+                        if _ndjson_obj.get("done_reason") != "length":
+                            _ndjson_obj["done_reason"] = "tool_calls"
                         ndjson = json.dumps(_ndjson_obj) + "\n"
                         buffered_tcs = []
                 except (json.JSONDecodeError, TypeError):
@@ -19873,7 +19987,7 @@ async def create_chat_completion(
             else:
                 msg_dict = dict(msg)
             # Map "developer" role to "system" (OpenAI API compatibility)
-            if msg_dict.get("role") == "developer":
+            if msg_dict.get("role") == "developer" and not _preserves_native_developer_role(request.model):
                 msg_dict["role"] = "system"
             messages.append(msg_dict)
         images, videos = [], []  # MLLM extracts these from messages
@@ -19929,8 +20043,9 @@ async def create_chat_completion(
         messages = _coerce_zaya_vl_tool_history_for_template(messages)
     messages = _normalize_leading_system_messages(
         messages,
-        preserve_native_order=_is_loaded_dsv4_model(request.model),
+        preserve_native_order=_preserves_native_system_order(request.model),
     )
+    messages = _canonicalize_mimo_v26_tool_history(messages)
 
     # When thinking is explicitly disabled, strip <think> blocks from prior assistant
     # messages in the conversation history. Without this, the model sees prior thinking
@@ -20452,6 +20567,16 @@ async def create_chat_completion(
                 _think_in_prompt_ns = True
             else:
                 _think_in_prompt_ns = False
+            # Match the streaming seed when a wrapper hides its renderer but
+            # the loaded model contract explicitly opens the thinking rail.
+            if _stamped_think_template_requires_reasoning_seed(
+                _mc_nonstream,
+                _eff_thinking_ns,
+                template_completed_thinking=_template_completes_thinking(
+                    engine.tokenizer, _model_name or request.model
+                ),
+            ):
+                _think_in_prompt_ns = True
             if _hy3_prompt_starts_in_reasoning(
                 model_key=_model_path or _model_name or request.model,
                 enable_thinking=_eff_thinking_ns,
@@ -20868,12 +20993,12 @@ async def create_chat_completion(
             },
         )
 
-    # Determine finish reason
-    finish_reason = (
-        "tool_calls"
-        if tool_calls
-        else (_ns_visible_answer_finish_reason or output.finish_reason)
-    )
+    # A complete parsed call does not erase an exhausted output budget. Match
+    # the streaming rail so nonstream clients can distinguish truncation from
+    # a normal tool handoff while still receiving the usable call.
+    finish_reason = _ns_visible_answer_finish_reason or output.finish_reason
+    if tool_calls and _normalize_responses_finish_reason(finish_reason) != "length":
+        finish_reason = "tool_calls"
     response_content = clean_output_text(cleaned_text) if cleaned_text else None
     if response_content:
         response_content = _finalize_visible_text_for_request(response_content, request, minimum_partial=4)
@@ -21810,12 +21935,12 @@ def _normalize_leading_system_messages(
     prepended before a new request with instructions. Treat system/developer
     content as global instructions and keep non-system turns in order.
 
-    DeepSeek V4 is the explicit exception: its official Python encoder owns
-    message order and has a distinct ``latest_reminder`` role for tail
-    reminders.  Hoisting a later system message changes the beginning of the
-    token sequence and destroys an otherwise reusable prompt prefix.  Callers
-    must opt into native ordering only after resolving the loaded family; this
-    helper never rewrites ``system`` into ``latest_reminder``.
+    DeepSeek V4's official encoder and MiMo-V2.6's native template preserve
+    message order. MiMo also preserves distinct system/developer roles and
+    repeated instructions. Hoisting later messages changes their native prompt
+    and destroys an otherwise reusable prefix. Callers opt into native ordering
+    only after resolving the loaded bundle; this helper never invents roles
+    such as DeepSeek's ``latest_reminder``.
     """
     if not messages:
         return messages
@@ -21857,6 +21982,7 @@ def _responses_input_to_messages(
     input_data: str | list,
     instructions: str | None = None,
     preserve_multimodal: bool = False,
+    preserve_native_roles: bool = False,
 ) -> list[dict]:
     """Convert Responses API input to chat messages format.
 
@@ -21986,8 +22112,8 @@ def _responses_input_to_messages(
     # function_call_output becomes a tool message
 
     def _normalize_role(role: str) -> str:
-        """Map 'developer' role to 'system' (OpenAI API compatibility)."""
-        return "system" if role == "developer" else role
+        """Preserve native roles only for explicitly selected bundle contracts."""
+        return "system" if role == "developer" and not preserve_native_roles else role
 
     pending_reasoning_parts: list[str] = []
     pending_visible_assistant: dict | None = None
@@ -23124,11 +23250,13 @@ async def create_response(
         request.input,
         None,
         preserve_multimodal=_preserve_mm,
+        preserve_native_roles=_preserves_native_developer_role(request.model),
     )
     messages = _responses_input_to_messages(
         request.input,
         request.instructions,
         preserve_multimodal=_preserve_mm,
+        preserve_native_roles=_preserves_native_developer_role(request.model),
     )
     if request.previous_response_id:
         previous_messages = _responses_get_history(request.previous_response_id)
@@ -23153,6 +23281,7 @@ async def create_response(
                 "continuing with request input only",
                 request.previous_response_id,
             )
+    messages = _canonicalize_mimo_v26_tool_history(messages)
     if _preserve_mm:
         messages = _coerce_orphan_tool_messages_for_template(messages)
     if engine.is_mllm and _should_coerce_zaya_vl_tool_history(request.model):
@@ -23190,13 +23319,13 @@ async def create_response(
             messages = _inject_json_instruction(messages, json_instruction)
     messages = _normalize_leading_system_messages(
         messages,
-        preserve_native_order=_is_dsv4_resp_msgs,
+        preserve_native_order=_preserves_native_system_order(request.model),
     )
     # Persist only explicit input system/developer messages. Template-only
     # coercions and request-scoped instructions remain generation-local.
     history_messages = _normalize_leading_system_messages(
         history_messages,
-        preserve_native_order=_is_dsv4_resp_msgs,
+        preserve_native_order=_preserves_native_system_order(request.model),
     )
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
@@ -23826,6 +23955,16 @@ async def create_response(
                 _think_in_prompt_ns = True
             else:
                 _think_in_prompt_ns = False
+            # Match the streaming seed when a wrapper hides its renderer but
+            # the loaded model contract explicitly opens the thinking rail.
+            if _stamped_think_template_requires_reasoning_seed(
+                _mc_nonstream,
+                _eff_thinking_ns,
+                template_completed_thinking=_template_completes_thinking(
+                    engine.tokenizer, _model_name or request.model
+                ),
+            ):
+                _think_in_prompt_ns = True
             if _hy3_prompt_starts_in_reasoning(
                 model_key=_model_path or _model_name or request.model,
                 enable_thinking=_eff_thinking_ns,
@@ -24880,6 +25019,22 @@ async def _terminal_finish_guard(
     error_seen = False
     first_chunk_meta = None
     usage_field_seen = False
+    required_call_parts = {}
+    pending_required_terminal = None
+    pending_required_usage = []
+
+    def _has_complete_required_call() -> bool:
+        # These are already parser-filtered outgoing deltas. An ID-only start
+        # or partial JSON is not a delivered call. Keep fragments across ticks.
+        for call in required_call_parts.values():
+            if not call["name"]:
+                continue
+            try:
+                if isinstance(json.loads(call["arguments"]), dict):
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
 
     def _synthetic_terminal() -> dict | None:
         if first_chunk_meta is None:
@@ -24929,6 +25084,18 @@ async def _terminal_finish_guard(
                     pass
             _finish_reasons = []
             if isinstance(_p, dict):
+                if required_tool_call:
+                    for choice in _p.get("choices") or []:
+                        for call in (choice.get("delta") or {}).get("tool_calls") or []:
+                            key = (choice.get("index", 0), call.get("index", 0))
+                            parts = required_call_parts.setdefault(
+                                key, {"name": "", "arguments": ""}
+                            )
+                            function = call.get("function") or {}
+                            for field in parts:
+                                value = function.get(field)
+                                if isinstance(value, str):
+                                    parts[field] += value
                 _finish_reasons = [
                     choice.get("finish_reason")
                     for choice in (_p.get("choices") or [])
@@ -24945,9 +25112,23 @@ async def _terminal_finish_guard(
                     # provisional and must not precede that decision: strict
                     # clients stop at the first non-null finish_reason and would
                     # otherwise miss the later tool_calls_required error.
+                    # A complete call followed by genuine budget exhaustion is
+                    # also valid. Defer that terminal until final diagnostics;
+                    # do not relabel it tool_calls or let it hide a later error.
+                    pending_required_terminal = sse
                     suppress_frame = True
                 else:
                     finish_seen = True
+            if (
+                required_tool_call
+                and pending_required_terminal is not None
+                and not finish_seen
+                and isinstance(_p, dict)
+                and _p.get("choices") == []
+                and _p.get("usage") is not None
+            ):
+                pending_required_usage.append(sse)
+                suppress_frame = True
             # include_usage's choices-empty total must remain the last JSON
             # chunk before [DONE]. If the generator omitted finish_reason,
             # insert the guard chunk *before* that usage tail, not at [DONE]
@@ -24964,36 +25145,45 @@ async def _terminal_finish_guard(
                 if terminal is not None:
                     yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
                     finish_seen = True
-        elif (
-            sse.startswith("data: [DONE]")
-            and not finish_seen
-            and not error_seen
-        ):
-            if required_tool_call and not required_tool_finish_seen:
-                # Defensive fail-closed fallback. stream_chat_completion normally
-                # emits this error itself after final parsing, but the route guard
-                # must never synthesize a successful stop if a future branch exits
-                # before that enforcement point.
-                meta = first_chunk_meta or {}
-                error = {
-                    "id": meta.get("id"),
-                    "object": "chat.completion.chunk",
-                    "error": {
-                        "message": (
-                            "tool_choice='required' was set but the model did not "
-                            "produce any tool calls."
-                        ),
-                        "type": "invalid_request_error",
-                        "code": "tool_calls_required",
-                    },
-                }
-                yield f"data: {json.dumps(error, ensure_ascii=True)}\n\n"
-                error_seen = True
-            else:
-                terminal = _synthetic_terminal()
-                if terminal is not None:
-                    yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
-                    finish_seen = True
+        elif sse.startswith("data: [DONE]"):
+            if (
+                required_tool_call
+                and pending_required_terminal is not None
+                and not finish_seen
+                and not error_seen
+                and _has_complete_required_call()
+            ):
+                yield pending_required_terminal
+                finish_seen = True
+                required_tool_finish_seen = True
+            if not finish_seen and not error_seen:
+                if required_tool_call and not required_tool_finish_seen:
+                    # Defensive fail-closed fallback. The generator normally
+                    # emits this error after parsing. Never synthesize success
+                    # if a future branch exits before that enforcement point.
+                    meta = first_chunk_meta or {}
+                    error = {
+                        "id": meta.get("id"),
+                        "object": "chat.completion.chunk",
+                        "error": {
+                            "message": (
+                                "tool_choice='required' was set but the model did not "
+                                "produce any tool calls."
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "tool_calls_required",
+                        },
+                    }
+                    yield f"data: {json.dumps(error, ensure_ascii=True)}\n\n"
+                    error_seen = True
+                else:
+                    terminal = _synthetic_terminal()
+                    if terminal is not None:
+                        yield f"data: {json.dumps(terminal, ensure_ascii=True)}\n\n"
+                        finish_seen = True
+            for usage_frame in pending_required_usage:
+                yield usage_frame
+            pending_required_usage.clear()
         if not suppress_frame:
             yield sse
 
@@ -25295,6 +25485,7 @@ async def stream_chat_completion(
     accumulated_reasoning = ""  # Track reasoning text for fallback
     accumulated_content = ""  # Track content-only text for tool call marker detection
     _early_stopped_tool_text: str | None = None
+    _allow_reasoning_tools = _private_reasoning_tools_allowed(request)
     _draining_tool_parser_stop = False
     streamed_content = (
         ""  # Track content actually yielded to client (for post-stream dedup)
@@ -25615,7 +25806,12 @@ async def stream_chat_completion(
                 and delta_text
                 and not output.finished
             ):
-                if _tc_stop_parser.stream_tool_calls_complete(accumulated_text):
+                _stop_candidate = accumulated_text
+                if request_parser and not _allow_reasoning_tools:
+                    _stop_candidate = (
+                        request_parser.extract_reasoning(accumulated_text)[1] or ""
+                    )
+                if _tc_stop_parser.stream_tool_calls_complete(_stop_candidate):
                     _tc_stop_complete_chunks += 1
                     _tc_stop_grace = int(
                         getattr(
@@ -25637,7 +25833,7 @@ async def stream_chat_completion(
                         # the client as content nor steers the post-stream
                         # parse to the wrong channel.
                         accumulated_text = _tc_stop_parser.stream_tool_call_stop_truncate(
-                            accumulated_text
+                            _stop_candidate
                         )
                         _early_stopped_tool_text = accumulated_text
                         if _tc_stop_parser.stream_tool_calls_complete(
@@ -25734,7 +25930,11 @@ async def stream_chat_completion(
                         tool_call_buffering = _has_tool_marker_or_partial_suffix(
                             accumulated_content
                         ) or _content_forms_raw_json_tool_call(accumulated_content)
-                    if not tool_call_buffering and delta_msg.reasoning:
+                    if (
+                        not tool_call_buffering
+                        and delta_msg.reasoning
+                        and _allow_reasoning_tools
+                    ):
                         _reasoning_tail = (
                             accumulated_reasoning[-30:]
                             if len(accumulated_reasoning) > 30
@@ -25779,8 +25979,10 @@ async def stream_chat_completion(
                         # the reasoning rail. Stop the reasoning prefix at the
                         # first native tool marker so the structured call itself
                         # never leaks as reasoning text.
-                        _safe_reasoning = _visible_prefix_before_unparsed_tool_markup(
-                            accumulated_reasoning
+                        _safe_reasoning = (
+                            _visible_prefix_before_unparsed_tool_markup(accumulated_reasoning)
+                            if _allow_reasoning_tools
+                            else accumulated_reasoning
                         )
                         if _safe_reasoning.startswith(streamed_reasoning_content):
                             _reasoning_delta = _safe_reasoning[
@@ -25886,7 +26088,7 @@ async def stream_chat_completion(
                     emit_reasoning = delta_msg.reasoning
                     emit_content = delta_msg.content
 
-                if tool_call_active and emit_reasoning:
+                if tool_call_active and emit_reasoning and _allow_reasoning_tools:
                     safe_reasoning_prefix = _tool_safe_stream_prefix(
                         accumulated_reasoning,
                         finished=output.finished,
@@ -26337,12 +26539,16 @@ async def stream_chat_completion(
         elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
         elif request_parser and accumulated_reasoning.strip():
-            # Tool call markers were in reasoning — try parsing reasoning text
-            parse_text = accumulated_reasoning.strip()
+            # Only native private-rail tool dialects may promote reasoning.
+            # Qwen examples remain reasoning, even when their JSON is valid.
+            parse_text = accumulated_reasoning.strip() if _allow_reasoning_tools else ""
         else:
             parse_text = _strip_think_for_tool_parse(accumulated_text)
         cleaned_text, tool_calls = _parse_tool_calls_with_parser(
-            parse_text or accumulated_text, request
+            (
+                parse_text if request_parser and not _allow_reasoning_tools
+                else (parse_text or accumulated_text)
+            ), request
         )
         if tool_calls:
             # Emit any remaining content text before the tool calls,
@@ -26458,7 +26664,18 @@ async def stream_chat_completion(
                 ],
             }
             yield f"data: {_dump_chat_chunk(tc_data_chunk)}\n\n"
-            # Finish chunk: empty delta with finish_reason="tool_calls"
+            # Parsed calls can be complete even when generation kept narrating
+            # until its token cap. Preserve that terminal cause for clients,
+            # just as Responses reports max_output_tokens/incomplete. A parser
+            # that deliberately stopped at a complete call still finishes as
+            # tool_calls; it did not exhaust the model's output budget.
+            _parsed_tool_finish_reason = (
+                "length"
+                if last_output
+                and last_output.finish_reason == "length"
+                and not _early_stopped_tool_text
+                else "tool_calls"
+            )
             tc_finish_chunk = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
@@ -26468,7 +26685,7 @@ async def stream_chat_completion(
                     {
                         "index": 0,
                         "delta": {},
-                        "finish_reason": "tool_calls",
+                        "finish_reason": _parsed_tool_finish_reason,
                     }
                 ],
             }
@@ -26521,6 +26738,19 @@ async def stream_chat_completion(
                 if request_parser
                 else accumulated_text.strip()
             )
+            if (
+                not _TOOL_CALL_REJECTED.get()
+                and _visible_prefix_before_unparsed_tool_markup(full) != full
+            ):
+                # Generic parsers can return malformed markup unchanged without
+                # recording a rejection. Hiding it below must still produce a
+                # diagnostic and, when nothing usable remains, an error terminal.
+                # Match Responses instead of silently ending an empty Chat stream.
+                _record_tool_call_drop(
+                    "Buffered native tool markup did not produce a usable function "
+                    "call. Its control suffix was hidden. Inspect the parser and "
+                    "validation diagnostics; this alone does not establish output-token truncation."
+                )
             if already_sent and full.startswith(already_sent):
                 # Leading whitespace of the remainder is INTERNAL to the full
                 # text (paragraph separator before the flushed portion) — keep it.
@@ -27709,6 +27939,7 @@ async def stream_responses_api(
     accumulated_content = ""  # Content-only text for tool call marker detection
     accumulated_reasoning = ""  # Reasoning text for fallback
     _early_stopped_tool_text: str | None = None
+    _allow_reasoning_tools = _private_reasoning_tools_allowed(request)
     _draining_tool_parser_stop = False
     streamed_reasoning_text = ""  # Tool-safe reasoning already sent to the client
     content_was_emitted = False
@@ -28056,7 +28287,12 @@ async def stream_responses_api(
                     and tool_call_buffering
                     and not output.finished
                 ):
-                    if _tc_stop_parser.stream_tool_calls_complete(full_text):
+                    _stop_candidate = full_text
+                    if request_parser and not _allow_reasoning_tools:
+                        _stop_candidate = (
+                            request_parser.extract_reasoning(full_text)[1] or ""
+                        )
+                    if _tc_stop_parser.stream_tool_calls_complete(_stop_candidate):
                         _tc_stop_complete_chunks += 1
                         _tc_stop_grace = int(
                             getattr(
@@ -28082,7 +28318,7 @@ async def stream_responses_api(
                             # to the wrong channel.
                             full_text = (
                                 _tc_stop_parser.stream_tool_call_stop_truncate(
-                                    full_text
+                                    _stop_candidate
                                 )
                             )
                             _early_stopped_tool_text = full_text
@@ -28175,7 +28411,11 @@ async def stream_responses_api(
                                 ):
                                     tool_call_buffering = True
                                     _buffer_trigger = "raw-json"
-                            if not tool_call_buffering and delta_msg.reasoning:
+                            if (
+                                not tool_call_buffering
+                                and delta_msg.reasoning
+                                and _allow_reasoning_tools
+                            ):
                                 _reasoning_tail = (
                                     accumulated_reasoning[-30:]
                                     if len(accumulated_reasoning) > 30
@@ -28237,6 +28477,8 @@ async def stream_responses_api(
                                     _visible_prefix_before_unparsed_tool_markup(
                                         accumulated_reasoning
                                     )
+                                    if _allow_reasoning_tools
+                                    else accumulated_reasoning
                                 )
                                 if _safe_reasoning.startswith(streamed_reasoning_text):
                                     _reasoning_delta = _safe_reasoning[
@@ -28291,7 +28533,7 @@ async def stream_responses_api(
                                 emit_reasoning = delta_msg.reasoning
                                 emit_content = delta_msg.content
 
-                            if tool_call_active and emit_reasoning:
+                            if tool_call_active and emit_reasoning and _allow_reasoning_tools:
                                 safe_reasoning_prefix = _tool_safe_stream_prefix(
                                     accumulated_reasoning,
                                     finished=output.finished,
@@ -28611,7 +28853,7 @@ async def stream_responses_api(
     # Preserve the raw accumulator for final tool parsing, but expose only the
     # genuine reasoning prefix through summary events and completed output.
     visible_reasoning_text = accumulated_reasoning
-    if tool_call_active and visible_reasoning_text:
+    if tool_call_active and visible_reasoning_text and _allow_reasoning_tools:
         visible_reasoning_text = _visible_prefix_before_unparsed_tool_markup(
             visible_reasoning_text
         )
@@ -28647,12 +28889,15 @@ async def stream_responses_api(
         elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
         elif request_parser and accumulated_reasoning.strip():
-            parse_text = accumulated_reasoning.strip()
+            parse_text = accumulated_reasoning.strip() if _allow_reasoning_tools else ""
             _tool_parse_from_reasoning_only = True
         else:
             parse_text = _strip_think_for_tool_parse(full_text)
         cleaned_text, tool_calls = _parse_tool_calls_with_parser(
-            parse_text or full_text, request
+            (
+                parse_text if request_parser and not _allow_reasoning_tools
+                else (parse_text or full_text)
+            ), request
         )
         if _tool_parse_from_reasoning_only and not tool_calls:
             # Reasoning-only text is only a candidate tool-call source. If it is

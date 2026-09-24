@@ -1174,3 +1174,17 @@ def test_dsv4_live_cache_gates_use_canonical_parser_and_no_legacy_32k_startup_ca
         assert '"--tool-call-parser",\n        "deepseek",' not in source
         assert '"--tool-call-parser",\n        "dsml",' in source
         assert '"--max-tokens",\n        "32768",' not in source
+
+
+def test_panel_artifact_gate_requires_every_individually_passing_fixture():
+    from tests.cross_matrix import run_model_family_detection_contract as gate
+
+    key = "panel_local_high_risk_rows_match_detector_policy"
+    markers = gate.ROW_MARKERS[key]
+    assert len(markers) == len(LOCAL_HIGH_RISK_ROWS) == 12
+    missing = "\n".join(f"✓ {marker}" for marker in markers[:-1])
+    assert not gate._build_checks({"panel": {"returncode": 0, "stdout": missing}})[key]
+    skipped = missing + f"\n↓ {markers[-1]} [skipped]"
+    assert not gate._build_checks({"panel": {"returncode": 0, "stdout": skipped}})[key]
+    complete = missing + f"\n✓ {markers[-1]}"
+    assert gate._build_checks({"panel": {"returncode": 0, "stdout": complete}})[key]

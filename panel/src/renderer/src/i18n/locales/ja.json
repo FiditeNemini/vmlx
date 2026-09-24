@@ -2036,6 +2036,11 @@
   },
   "main": {
     "tray": {
+      "statusSummary": "vMLX — 実行中 {running}、読み込み中 {loading}、スリープ {standby}",
+      "gatewayStopped": "API ゲートウェイ: 停止中",
+      "copyOpenAiUrl": "OpenAI ベース URL をコピー",
+      "copyServerUrl": "サーバー URL をコピー",
+      "actionFailed": "サーバー操作を完了できませんでした。サーバーと API で詳細を確認してください。",
       "modelsLoaded": "vMLX — {n} モデル読み込み済み",
       "apiGateway": "API ゲートウェイ: localhost:{port}",
       "copyApiUrl": "API URL をコピー",

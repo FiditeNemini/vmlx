@@ -16,6 +16,7 @@ import { registerPerformanceHandlers } from './ipc/performance'
 import { registerDeveloperHandlers, killActiveOperation } from './ipc/developer'
 import { loadLocales, setLocale as setMainLocale, getLocale as getMainLocale, getCatalogContract as getMainCatalogContract, t as tMain } from './i18n'
 import { rebuildMenu as rebuildTrayMenu } from './tray'
+import { installApplicationMenu, acknowledgeMenuReadiness, resetMenuReadiness } from './application-menu'
 import { registerCodingToolHandlers } from './ipc/coding-tools'
 import { registerDistributedHandlers } from './ipc/distributed'
 import { sessionManager } from './sessions'
@@ -351,6 +352,7 @@ function createWindow(): void {
     })
   })
 
+  mainWindow.webContents.on('did-start-loading', resetMenuReadiness)
   // Close-to-tray: hide window instead of destroying when tray is active
   mainWindow.on('close', (e) => {
     if (isQuitting) return  // Let quit proceed
@@ -439,10 +441,17 @@ app.whenReady().then(async () => {
     // Rebuild the tray menu so its labels switch to the new locale in
     // real time. The renderer has already re-rendered via Context.
     try { rebuildTrayMenu(processManager, () => mainWindow) } catch {}
+    installApplicationMenu(() => mainWindow)
     return { ok: true, locale: getMainLocale() }
   })
   ipcMain.handle('i18n:get-locale', () => getMainLocale())
   ipcMain.handle('i18n:get-catalog-contract', () => getMainCatalogContract())
+  ipcMain.on('app:menu-ready', (event) => {
+    if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
+      acknowledgeMenuReadiness(mainWindow)
+    }
+  })
+  installApplicationMenu(() => mainWindow)
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

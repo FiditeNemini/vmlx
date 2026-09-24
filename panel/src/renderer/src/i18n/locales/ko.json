@@ -2036,6 +2036,11 @@
   },
   "main": {
     "tray": {
+      "statusSummary": "vMLX — 실행 {running}, 로딩 {loading}, 대기 {standby}",
+      "gatewayStopped": "API 게이트웨이: 중지됨",
+      "copyOpenAiUrl": "OpenAI 기본 URL 복사",
+      "copyServerUrl": "서버 URL 복사",
+      "actionFailed": "서버 작업을 완료하지 못했습니다. 서버 및 API에서 자세한 내용을 확인하세요.",
       "modelsLoaded": "vMLX — {n}개 모델 로드됨",
       "apiGateway": "API 게이트웨이: localhost:{port}",
       "copyApiUrl": "API URL 복사",

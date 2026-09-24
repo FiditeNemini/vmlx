@@ -196,6 +196,21 @@ function App() {
     }
   }, [sessions, state.activeSessionId, setMode, dispatch, openChat, t])
 
+  useEffect(() => window.api.navigation.onAction((action) => {
+    if (action === 'new-chat') {
+      setMode('chat')
+      void handleNewChat().catch(error => {
+        setChatCreationError(String(error))
+        setCreatingChatSession(true)
+      })
+    } else if (action === 'preferences' || action === 'servers') {
+      setMode('server')
+      dispatch({ type: 'SET_SERVER_PANEL', panel: action === 'preferences' ? 'about' : 'dashboard' })
+    } else {
+      setMode(action)
+    }
+  }), [handleNewChat, setMode, dispatch])
+
   const handleChatSessionCreated = async (sessionId: string) => {
     setCreatingChatSession(false)
     setChatCreationError(null)

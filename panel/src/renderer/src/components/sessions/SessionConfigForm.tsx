@@ -1119,7 +1119,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             />
           </>
         )}
-        {!nativeGlmSsdActive && !batchingOff && !effectiveUsePagedCache && <InfoNote text={t('sessions.config.blockDiskPureSsdNote')} />}
+        {!nativeGlmSsdActive && !batchingOff && !effectiveUsePagedCache && !exactTypedPromptDiskCache && <InfoNote text={t('sessions.config.blockDiskPureSsdNote')} />}
         <CheckField
           label={t('sessions.cache.blockDiskCache')}
           tooltip={t('sessions.config.blockDiskCacheTooltip')}

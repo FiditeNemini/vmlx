@@ -7,6 +7,7 @@ const REQUEST_SETTINGS = [
   'max_thinking_tokens', 'chat_template_kwargs', 'tool_choice', 'parallel_tool_calls',
   'response_format', 'text', 'image_token_budget', 'video_fps', 'video_max_frames',
   'video_max_pixels', 'video_token_budget', 'stream',
+  'skip_prefix_cache', 'cache_salt',
 ] as const
 const SERVER_SETTINGS = [
   'maxContextLength', 'maxTokens', 'defaultMaxNewTokens', 'defaultTemperature',
@@ -17,6 +18,9 @@ const SERVER_SETTINGS = [
   'usePagedCache', 'prefillBatchSize', 'prefillStepSize', 'maxNumSeqs', 'streamInterval',
   'enableThinking', 'reasoningEffort', 'imageTokenBudget', 'videoFps', 'videoMaxFrames',
   'videoMaxPixels', 'videoTokenBudget',
+  // These are requested execution controls, not a claim that an accelerator ran.
+  'nativeMtpMode', 'nativeMtpDepth', 'nativeMtpDepthOverride',
+  'speculativeModel', 'numDraftTokens', 'omniBackend', 'enableJit',
 ] as const
 
 function pick(value: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {

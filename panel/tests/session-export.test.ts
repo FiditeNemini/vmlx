@@ -25,6 +25,21 @@ describe('session request provenance', () => {
   })
 })
 
+describe('generation execution settings', () => {
+  it('freezes requested speculation, backend and cache controls without copying secrets', () => {
+    const server = {nativeMtpMode:'auto',nativeMtpDepth:3,nativeMtpDepthOverride:false,speculativeModel:'/models/draft',numDraftTokens:4,omniBackend:'stage1',enableJit:false,apiKey:'SECRET',additionalArgs:'--api-key SECRET'}
+    const body = {model:'alias',skip_prefix_cache:false,cache_salt:'experiment-a'}
+    const captured = captureGenerationPass({body,serverConfig:server,wireApi:'responses'})
+    server.nativeMtpMode='off';server.nativeMtpDepth=1;body.skip_prefix_cache=true;body.cache_salt='later'
+    expect(captured.serverSettings).toMatchObject({nativeMtpMode:'auto',nativeMtpDepth:3,nativeMtpDepthOverride:false,speculativeModel:'/models/draft',numDraftTokens:4,omniBackend:'stage1',enableJit:false})
+    expect(captured.requestSettings).toMatchObject({skip_prefix_cache:false,cache_salt:'experiment-a'})
+    expect(JSON.stringify(captured)).not.toContain('SECRET')
+    const legacy = captureGenerationPass({body:{model:'alias'},serverConfig:{},wireApi:'chat'})
+    expect(legacy.serverSettings).not.toHaveProperty('nativeMtpMode')
+    expect(legacy.requestSettings).not.toHaveProperty('skip_prefix_cache')
+  })
+})
+
 describe('full session Markdown', () => {
   it('round trips identity, timestamps and tool IDs without overwriting content', () => {
     const rows = [message({ content: 'Original answer', toolCallId: 'call-한글', toolCapabilityFingerprint: 'schema-v1' })]

@@ -26,6 +26,38 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import vm from 'node:vm'
 
+// Match only the answer to the submitted attachment, never another chat turn.
+// Kept closure-free because the proof runner injects it into the renderer.
+export function validateMediaTurnAnswer({ messages, binding, kind, pattern }) {
+  const result = { verified: false, userMessageId: binding?.userMessageId || null,
+    assistantMessageId: null, attachmentPresent: false, text: '' }
+  if (!result.userMessageId || !pattern || !Array.isArray(messages)) return result
+  const indices = messages.flatMap((m, i) => m?.id === result.userMessageId ? [i] : [])
+  if (indices.length !== 1 || messages[indices[0]]?.role !== 'user') return result
+  const userIndex = indices[0]
+  let parts = messages[userIndex].content
+  if (typeof parts === 'string') {
+    try { parts = JSON.parse(parts) } catch { parts = [] }
+  }
+  if (!Array.isArray(parts)) return result
+  result.attachmentPresent = parts.some((part) => {
+    if (kind === 'audio') return !!(
+      (part?.type === 'input_audio' && (part?.input_audio?.data || part?.audio?.data))
+      || (part?.type === 'audio' && part?.audio?.data)
+      || (part?.type === 'audio_url' && part?.audio_url?.url))
+    return part?.type === kind + '_url' && !!part?.[kind + '_url']?.url
+  })
+  if (!result.attachmentPresent) return result
+  const nextUser = messages.findIndex((m, i) => i > userIndex && m?.role === 'user')
+  const answers = messages.slice(userIndex + 1, nextUser < 0 ? undefined : nextUser)
+    .filter(m => m?.role === 'assistant')
+  if (answers.length !== 1 || typeof answers[0].content !== 'string') return result
+  result.assistantMessageId = answers[0].id || null
+  result.text = answers[0].content
+  result.verified = new RegExp(pattern, 'i').test(result.text)
+  return result
+}
+
 const panelDir = path.resolve(new URL('..', import.meta.url).pathname)
 const repoDir = path.resolve(panelDir, '..')
 const proofFormat = 'vmlx-electron-ui-proof-v2'
@@ -9278,6 +9310,7 @@ async function main() {
         const samplingOverrides = ${JSON.stringify(samplingOverrides)};
         const independentBundleDefaults = ${JSON.stringify(bundleGenerationContract.defaults)};
         const endpoint = { host: '127.0.0.1', port: ${JSON.stringify(serverPort)} };
+        const validateMediaTurnAnswer = ${validateMediaTurnAnswer.toString()};
         const l2DiskStorageSeen = ${l2DiskStorageSeen.toString()};
         const correlateTerminalResponseToCacheExecution =
           ${correlateTerminalResponseToCacheExecution.toString()};
@@ -11120,9 +11153,50 @@ async function main() {
               return false;
             }
           };
+          const mediaTurnBindings = {};
           const sendMessageWithCapture = async (turn, stage, prompt, attachments) => {
             try {
-              await window.api.chat.sendMessage(chat.id, prompt, undefined, attachments);
+              const beforeIds = new Set((await window.api.chat.getMessages(chat.id)).map(m => m.id));
+              const textarea = await waitFor(() => document.querySelector('textarea:not([disabled])'),
+                'enabled media composer for turn ' + turn);
+              const attach = document.querySelector('[data-vmlx-control="chat-attach"]');
+              if (!(attach instanceof HTMLButtonElement) || attach.disabled || !isVisible(attach))
+                throw new Error('Media attachment control unavailable');
+              const input = attach.parentElement?.parentElement?.querySelector('input[type="file"]');
+              if (!(input instanceof HTMLInputElement)) throw new Error('Media file input unavailable');
+              const transfer = new DataTransfer();
+              for (const item of attachments) {
+                const blob = await (await fetch(item.dataUrl)).blob();
+                transfer.items.add(new File([blob], item.name, { type: item.type }));
+              }
+              input.files = transfer.files;
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              await waitFor(() => attachments.every(item =>
+                input.parentElement?.parentElement?.innerText.includes(item.name)),
+                'visible media attachment previews for turn ' + turn);
+              const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+              setter.call(textarea, prompt);
+              textarea.dispatchEvent(new Event('input', { bubbles: true }));
+              textarea.dispatchEvent(new Event('change', { bubbles: true }));
+              const completedBefore = events.complete.length;
+              const send = await waitFor(() => {
+                const button = textarea.nextElementSibling;
+                return button instanceof HTMLButtonElement && !button.disabled && isVisible(button) ? button : null;
+              }, 'visible media Send control for turn ' + turn);
+              send.scrollIntoView({ block: 'center' });
+              send.click();
+              await waitFor(() => events.complete.length > completedBefore,
+                'media terminal event for turn ' + turn, 600000);
+              await waitFor(() => document.querySelector('textarea:not([disabled])'),
+                'media composer recovery for turn ' + turn);
+              const added = (await window.api.chat.getMessages(chat.id)).filter(m => !beforeIds.has(m.id));
+              const newUsers = added.filter(m => m.role === 'user');
+              if (newUsers.length !== 1) throw new Error('Media turn has no unique submitted user message');
+              mediaTurnBindings[turn] = {
+                userMessageId: newUsers[0].id, inputControlUsed: true, visiblePreviewVerified: true,
+                attachmentNames: attachments.map(item => item.name),
+                terminalMessageIds: events.complete.slice(completedBefore).map(event => event.messageId),
+              };
               return true;
             } catch (error) {
               rendererFailureStage = stage;
@@ -11557,12 +11631,22 @@ async function main() {
               || (part?.type === 'audio_url' && part?.audio_url?.url)
             ))
           );
-          const imageSemanticVerified = checkMedia && new RegExp(imageExpectRegex, 'i').test(allAssistantText);
-          const videoSemanticVerified = checkVideo && !!videoExpectRegex && new RegExp(videoExpectRegex, 'i').test(allAssistantText);
-          // Same non-empty-regex rule as video: without an expectation there is
-          // nothing to verify, and silently "passing" would be worse.
-          const audioSemanticVerified = checkAudio && !!audioExpectRegex && new RegExp(audioExpectRegex, 'i').test(allAssistantText);
+          const imageSemanticVerified = checkMedia && validateMediaTurnAnswer({
+            messages, binding: mediaTurnBindings[4], kind: 'image', pattern: imageExpectRegex,
+          }).verified;
+          const videoSemanticVerified = checkVideo && validateMediaTurnAnswer({
+            messages, binding: mediaTurnBindings[5], kind: 'video', pattern: videoExpectRegex,
+          }).verified;
+          const audioSemanticVerified = checkAudio && validateMediaTurnAnswer({
+            messages, binding: mediaTurnBindings[6], kind: 'audio', pattern: audioExpectRegex,
+          }).verified;
           const mediaEvidence = {
+            turnBindings: mediaTurnBindings,
+            answersByKind: Object.fromEntries([
+              ['image', 4, imageExpectRegex], ['video', 5, videoExpectRegex], ['audio', 6, audioExpectRegex],
+            ].map(([kind, turn, pattern]) => [kind, validateMediaTurnAnswer({
+              messages, binding: mediaTurnBindings[turn], kind, pattern,
+            })])),
             requestedImage: checkMedia,
             requestedVideo: checkVideo,
             requestedAudio: checkAudio,

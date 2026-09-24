@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import vm from "node:vm";
+// @ts-expect-error Plain Node proof harness exports.
+import * as proofHarness from "../scripts/live-real-ui-model-proof.mjs";
 import { createServer } from "node:http";
 import {
   chmodSync,
@@ -7002,5 +7005,41 @@ describe("explicit sampler controls and verbatim receipts", () => {
     expect(validateRenderedDomEvidence(result)).toContain("final assistant answer did not preserve the requested verbatim receipt");
     record.content = receipt;
     expect(validateRenderedDomEvidence(result)).not.toContain("final assistant answer did not preserve the requested verbatim receipt");
+  });
+});
+
+
+describe("media semantics are bound to the submitted attachment turn", () => {
+  function score(answer: string, earlier: string, kind = "video", includeAttachment = true) {
+    const source = readFileSync(path.resolve("scripts/live-real-ui-model-proof.mjs"), "utf8");
+    const start = source.indexOf("          const imageSemanticVerified =");
+    const end = source.indexOf("          const mediaEvidence =", start);
+    expect(start).toBeGreaterThan(0);
+    const content = includeAttachment
+      ? JSON.stringify([{ type: `${kind}_url`, [`${kind}_url`]: { url: "data:fixture" } }])
+      : "no attachment";
+    const messages = [
+      { id: "old-user", role: "user", content: "old" },
+      { id: "old-answer", role: "assistant", content: earlier },
+      { id: "media-user", role: "user", content },
+      { id: "media-answer", role: "assistant", content: answer },
+    ];
+    const binding = { userMessageId: "media-user" };
+    return vm.runInNewContext(source.slice(start, end) + "\n({imageSemanticVerified, videoSemanticVerified, audioSemanticVerified})", {
+      checkMedia: kind === "image", checkVideo: kind === "video", checkAudio: kind === "audio",
+      imageExpectRegex: "^red$", videoExpectRegex: "^right$", audioExpectRegex: "green bicycle",
+      allAssistantText: earlier + "\n" + answer, messages,
+      mediaTurnBindings: { 4: binding, 5: binding, 6: binding },
+      validateMediaTurnAnswer: (proofHarness as any).validateMediaTurnAnswer,
+    });
+  }
+  it("does not accept a word from another turn as the audio transcript", () => {
+    expect(score("I cannot hear it", "green bicycle", "audio").audioSemanticVerified).toBe(false);
+  });
+  it("anchors a direction against its own answer, not the whole conversation", () => {
+    expect(score("right", "Earlier unrelated answer").videoSemanticVerified).toBe(true);
+  });
+  it("requires the attachment on the bound user message", () => {
+    expect(score("green bicycle", "", "audio", false).audioSemanticVerified).toBe(false);
   });
 });

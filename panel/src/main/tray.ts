@@ -11,14 +11,17 @@
  */
 
 import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
-import { app, Tray, Menu, nativeImage, BrowserWindow, clipboard } from 'electron'
+import { app, Tray, Menu, nativeImage, BrowserWindow, clipboard, dialog } from 'electron'
 import type { ProcessManager } from './process-manager'
 import { db } from './database'
-import { sessionManager, connectHost } from './sessions'
+import { sessionManager } from './sessions'
 import { apiGateway } from './api-gateway'
 import { t } from './i18n'
+import { navigateFromMenu } from './application-menu'
+import { localApiUrl, sessionShownByProcess, summarizeTrayState } from '../shared/trayState'
 
 let tray: Tray | null = null
+const busySessions = new Set<string>()
 let boundProcessManager: ProcessManager | null = null
 const boundListeners: Array<{ event: string; fn: (...args: any[]) => void }> = []
 
@@ -79,6 +82,24 @@ function createTrayIcon(color: 'green' | 'yellow' | 'red' | 'gray'): Electron.Na
   return img.resize({ width: 18, height: 18 })
 }
 
+function reportActionError(error: unknown): void {
+  console.error('[TRAY] Action failed:', error)
+  void dialog.showMessageBox({ type: 'error', title: 'vMLX', message: t('main.tray.actionFailed'), detail: String(error) }).catch(failure => console.warn('[TRAY] Could not show error:', failure))
+}
+
+async function runSessionAction(id: string, action: () => Promise<unknown>, processManager: ProcessManager, getWindow: () => BrowserWindow | null): Promise<void> {
+  if (busySessions.has(id)) return
+  busySessions.add(id)
+  rebuildMenu(processManager, getWindow)
+  try {
+    const result = await action()
+    if (result && typeof result === 'object' && 'success' in result && result.success === false) {
+      throw new Error('error' in result ? String(result.error) : t('main.tray.actionFailed'))
+    }
+  } catch (error) { reportActionError(error) }
+  finally { busySessions.delete(id); rebuildMenu(processManager, getWindow) }
+}
+
 /**
  * Build the tray context menu.
  */
@@ -87,43 +108,30 @@ function buildMenu(
   getWindow: () => BrowserWindow | null,
 ): Electron.Menu {
   const processes = processManager.list()
-  const running = processes.filter((p) => p.status === 'running')
   const totalGB = Math.round(require('os').totalmem() / (1024 ** 3))
-
-  // Sum GPU memory from both ProcessManager and SessionManager health data
-  let totalMemMB = processManager.totalMemoryMB()
-  for (const mb of sessionMemoryMB.values()) {
-    totalMemMB += mb
-  }
-
-  // Count ALL running models: ProcessManager + SessionManager (deduplicated)
-  let runningSessions: any[] = []
-  try {
-    runningSessions = db.getSessions().filter((s: any) => s.status === 'running' || s.status === 'standby')
-  } catch {}
-  const sessionOnlyCount = runningSessions.filter((s: any) =>
-    !processes.some(p => p.port === s.port)
-  ).length
-  const totalRunning = running.length + sessionOnlyCount
-
-  const gwPort = db.getSetting('gateway_port') || '8080'
+  const sessions = db.getSessions()
+  const summary = summarizeTrayState(processes, sessions, sessionMemoryMB)
+  const totalMemMB = summary.memoryMB
+  const gatewayRoot = localApiUrl(apiGateway.activeHost, apiGateway.activePort)
   const singleModelMode = isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))
   const items: Electron.MenuItemConstructorOptions[] = [
     {
-      label: t('main.tray.modelsLoaded', { n: totalRunning }),
+      label: t('main.tray.statusSummary', summary),
       enabled: false,
     },
     {
-      label: t('main.tray.apiGateway', { port: gwPort }),
+      label: apiGateway.running ? gatewayRoot : t('main.tray.gatewayStopped'),
       enabled: false,
     },
     {
-      label: t('main.tray.copyApiUrl'),
-      click: () => {
-        void clipboard.writeText(`http://localhost:${gwPort}`).catch(error => {
-          console.warn('[TRAY] Failed to copy API URL:', error)
-        })
-      },
+      label: t('main.tray.copyOpenAiUrl'),
+      enabled: apiGateway.running,
+      click: () => { void clipboard.writeText(`${gatewayRoot}/v1`).catch(reportActionError) },
+    },
+    {
+      label: t('main.tray.copyServerUrl'),
+      enabled: apiGateway.running,
+      click: () => { void clipboard.writeText(gatewayRoot).catch(reportActionError) },
     },
     {
       label: t('main.tray.singleModelMode'),
@@ -175,9 +183,10 @@ function buildMenu(
         },
         { type: 'separator' },
         {
-          label: t('main.tray.copyApiUrl'),
+          label: t('main.tray.copyOpenAiUrl'),
+          enabled: proc.status === 'running',
           click: () => {
-            void clipboard.writeText(`http://127.0.0.1:${proc.port}/v1`).catch(error => {
+            void clipboard.writeText(localApiUrl('127.0.0.1', proc.port, true)).catch(error => {
               console.warn('[TRAY] Failed to copy API URL:', error)
             })
           },
@@ -192,14 +201,8 @@ function buildMenu(
         { type: 'separator' },
         {
           label: t('main.tray.stop'),
-          click: async () => {
-            try {
-              await processManager.kill(proc.id)
-              rebuildMenu(processManager, getWindow)
-            } catch (err) {
-              console.error(`[Tray] Failed to stop ${proc.id}:`, err)
-            }
-          },
+          enabled: !busySessions.has(`process:${proc.id}`),
+          click: () => runSessionAction(`process:${proc.id}`, () => processManager.kill(proc.id), processManager, getWindow),
         },
       ],
     })
@@ -207,16 +210,17 @@ function buildMenu(
 
   // Add SessionManager sessions (includes image servers not in ProcessManager)
   try {
-    const sessions = db.getSessions().filter(s => s.status === 'running' || s.status === 'standby')
+    const sessions = db.getSessions().filter(s => s.status === 'running' || s.status === 'standby' || s.status === 'loading')
     for (const s of sessions) {
       // Skip if already shown via ProcessManager
-      const alreadyShown = processes.some(p => p.port === s.port)
+      const alreadyShown = sessionShownByProcess(s, processes)
       if (alreadyShown) continue
 
       let isImage = false
       try { isImage = JSON.parse(s.config || '{}').modelType === 'image' } catch {}
       const isSleeping = s.status === 'standby'
-      const icon = isSleeping ? '💤' : isImage ? '🖼' : '●'
+      const isLoading = s.status === 'loading'
+      const icon = isSleeping ? '💤' : isLoading ? '◐' : isImage ? '🖼' : '●'
       const modelName = s.modelName || s.modelPath?.split('/').pop() || 'Unknown'
       const sessMem = sessionMemoryMB.get(s.id) || 0
       const sessMemLabel = sessMem > 0 ? ` — ${(sessMem / 1024).toFixed(1)} GB` : ''
@@ -225,53 +229,36 @@ function buildMenu(
         label: `${icon} ${modelName} (:${s.port})${sessMemLabel}`,
         submenu: [
           {
-            label: t('main.tray.copyApiUrl'),
+            label: t('main.tray.copyOpenAiUrl'),
+            enabled: !isLoading,
             click: () => {
-              void clipboard.writeText(`http://${connectHost(s.host)}:${s.port}/v1`).catch(error => {
+              void clipboard.writeText(localApiUrl(s.host, s.port, true)).catch(error => {
                 console.warn('[TRAY] Failed to copy API URL:', error)
               })
             },
           },
           { type: 'separator' },
-          ...(isSleeping ? [{
+          ...(!isLoading ? (isSleeping ? [{
             label: t('main.tray.wake'),
-            click: async () => {
-              try {
-                await sessionManager.wakeSession(s.id)
-                rebuildMenu(processManager, getWindow)
-              } catch (err) {
-                console.error(`[Tray] Failed to wake session ${s.id}:`, err)
-              }
-            },
+            enabled: !busySessions.has(s.id),
+            click: () => runSessionAction(s.id, () => sessionManager.wakeSession(s.id), processManager, getWindow),
           }] : [{
             label: t('main.tray.sleep'),
-            click: async () => {
-              try {
-                await sessionManager.softSleep(s.id)
-                rebuildMenu(processManager, getWindow)
-              } catch (err) {
-                console.error(`[Tray] Failed to sleep session ${s.id}:`, err)
-              }
-            },
-          }]),
+            enabled: !busySessions.has(s.id),
+            click: () => runSessionAction(s.id, () => sessionManager.softSleep(s.id), processManager, getWindow),
+          }]) : []),
           { type: 'separator' as const },
           {
             label: t('main.tray.stop'),
-            click: async () => {
-              try {
-                await sessionManager.stopSession(s.id)
-                rebuildMenu(processManager, getWindow)
-              } catch (err) {
-                console.error(`[Tray] Failed to stop session ${s.id}:`, err)
-              }
-            },
+            enabled: !busySessions.has(s.id),
+            click: () => runSessionAction(s.id, () => sessionManager.stopSession(s.id), processManager, getWindow),
           },
         ],
       })
     }
   } catch (_) {}
 
-  if (totalRunning === 0) {
+  if (summary.running + summary.loading + summary.standby === 0) {
     items.push({
       label: t('main.tray.noModels'),
       enabled: false,
@@ -279,6 +266,11 @@ function buildMenu(
   }
 
   items.push(
+    { type: 'separator' },
+    ...(['servers', 'models', 'api', 'preferences'] as const).map(action => ({
+      label: action === 'api' ? 'API' : t(action === 'servers' ? 'console.serversApi' : `console.${action}`),
+      click: () => navigateFromMenu(action, getWindow),
+    })),
     { type: 'separator' },
     {
       label: t('main.tray.memory', { used: (totalMemMB / 1024).toFixed(1), total: String(totalGB) }),
@@ -290,6 +282,7 @@ function buildMenu(
       click: () => {
         const win = getWindow()
         if (win && !win.isDestroyed()) {
+          if (win.isMinimized()) win.restore()
           win.show()
           win.focus()
         } else {
@@ -319,41 +312,11 @@ export function rebuildMenu(
   if (!tray) return
   const processes = processManager.list()
 
-  // Icon color: check BOTH ProcessManager and SessionManager for running/standby models
-  let hasRunning = processes.some(p => p.status === 'running')
-  let hasStarting = processes.some(p => p.status === 'starting')
-  let hasStandby = false
-  if (!hasRunning) {
-    try {
-      const sessions = db.getSessions()
-      hasRunning = sessions.some((s: any) => s.status === 'running')
-      hasStandby = sessions.some((s: any) => s.status === 'standby')
-      hasStarting = hasStarting || sessions.some((s: any) => s.status === 'loading')
-    } catch {}
-  }
-  // Green = running, Yellow = starting or standby (process alive, model sleeping), Gray = nothing
-  const iconColor = hasRunning ? 'green' : (hasStarting || hasStandby) ? 'yellow' : 'gray'
+  const summary = summarizeTrayState(processes, db.getSessions(), sessionMemoryMB)
+  const iconColor = summary.running ? 'green' : (summary.loading || summary.standby) ? 'yellow' : 'gray'
   tray.setImage(createTrayIcon(iconColor))
   tray.setContextMenu(buildMenu(processManager, getWindow))
-
-  // Tooltip: count all active models (running + standby)
-  let totalRunning = 0
-  let totalStandby = 0
-  try {
-    const sessions = db.getSessions()
-    const runningSessions = sessions.filter((s: any) => s.status === 'running')
-    const standbySessions = sessions.filter((s: any) => s.status === 'standby')
-    const pmRunning = processes.filter(p => p.status === 'running')
-    const sessionOnly = runningSessions.filter((s: any) => !pmRunning.some(p => p.port === s.port))
-    totalRunning = pmRunning.length + sessionOnly.length
-    totalStandby = standbySessions.length
-  } catch {}
-  const total = totalRunning + totalStandby
-  tray.setToolTip(
-    total > 0
-      ? t('main.tray.tooltipRunningSleeping', { running: totalRunning, standby: totalStandby })
-      : t('main.tray.tooltipNoModels')
-  )
+  tray.setToolTip(t('main.tray.statusSummary', summary))
 }
 
 /**
@@ -384,10 +347,19 @@ export function createTray(
   }
 
   // Also listen for SessionManager events (sessions started from Server/Image tabs)
-  const sessionRebuild = () => rebuildMenu(processManager, getWindow)
+  const sessionRebuild = () => {
+    const live = new Set(db.getSessions().filter(s => ['running', 'loading', 'standby'].includes(s.status)).map(s => s.id))
+    for (const id of sessionMemoryMB.keys()) if (!live.has(id)) sessionMemoryMB.delete(id)
+    rebuildMenu(processManager, getWindow)
+  }
   for (const event of ['session:created', 'session:starting', 'session:ready', 'session:stopped', 'session:error', 'session:deleted', 'session:standby']) {
     sessionManager.on(event, sessionRebuild)
     boundListeners.push({ event, fn: sessionRebuild })
+  }
+
+  for (const event of ['started', 'stopped']) {
+    apiGateway.on(event, sessionRebuild)
+    boundListeners.push({ event: `gateway:${event}`, fn: sessionRebuild })
   }
 
   // Track session memory from health events — only rebuild tray when memory changes
@@ -395,7 +367,7 @@ export function createTray(
     if (data.memory?.active_mb != null) {
       const prev = sessionMemoryMB.get(data.sessionId) || 0
       const curr = Math.round(data.memory.active_mb)
-      if (Math.abs(curr - prev) >= 10) {  // Only rebuild if change >= 10 MB
+      if ((curr === 0 && prev !== 0) || Math.abs(curr - prev) >= 10) {  // Only rebuild if change >= 10 MB
         sessionMemoryMB.set(data.sessionId, curr)
         rebuildMenu(processManager, getWindow)
       } else if (prev === 0 && curr > 0) {
@@ -404,6 +376,8 @@ export function createTray(
       }
     }
   }
+  sessionManager.on('session:memory', sessionHealthFn)
+  boundListeners.push({ event: 'session:memory', fn: sessionHealthFn })
   sessionManager.on('session:health', sessionHealthFn)
   boundListeners.push({ event: 'session:health', fn: sessionHealthFn })
 
@@ -427,7 +401,9 @@ export function destroyTray(): void {
   if (boundProcessManager) {
     for (const { event, fn } of boundListeners) {
       // Process events go to ProcessManager, session events go to SessionManager
-      if (event.startsWith('session:')) {
+      if (event.startsWith('gateway:')) {
+        apiGateway.off(event.slice('gateway:'.length), fn)
+      } else if (event.startsWith('session:')) {
         sessionManager.off(event, fn)
       } else {
         boundProcessManager.off(event, fn)

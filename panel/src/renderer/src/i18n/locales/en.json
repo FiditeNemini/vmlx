@@ -2036,6 +2036,11 @@
   },
   "main": {
     "tray": {
+      "statusSummary": "vMLX — {running} running, {loading} loading, {standby} sleeping",
+      "gatewayStopped": "API Gateway: stopped",
+      "copyOpenAiUrl": "Copy OpenAI Base URL",
+      "copyServerUrl": "Copy Server URL",
+      "actionFailed": "The server action could not be completed. Open Servers & API for details.",
       "modelsLoaded": "vMLX — {n} model(s) loaded",
       "apiGateway": "API Gateway: localhost:{port}",
       "copyApiUrl": "Copy API URL",

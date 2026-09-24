@@ -2036,6 +2036,11 @@
   },
   "main": {
     "tray": {
+      "statusSummary": "vMLX — 実行中 {running}、読み込み中 {loading}、スリープ {standby}",
+      "gatewayStopped": "API ゲートウェイ: 停止中",
+      "copyOpenAiUrl": "OpenAI ベース URL をコピー",
+      "copyServerUrl": "サーバー URL をコピー",
+      "actionFailed": "サーバー操作を完了できませんでした。サーバーと API で詳細を確認してください。",
       "modelsLoaded": "vMLX — {n} モデル読み込み済み",
       "apiGateway": "API ゲートウェイ: localhost:{port}",
       "copyApiUrl": "API URL をコピー",
@@ -2073,9 +2078,11 @@
     "loadProgress": {
       "initializing": "初期化中...",
       "scanningModelFiles": "モデルファイルをスキャン中...",
-      "bundleRepairNotice": "このバンドルは読み込み前にアラインメント修復が必要です。現在のファイルに対する一度限りの処理で、ファイルが変わらなければ再修復は不要です。各シャードのコピー、検証、アトミックな置換が終わるまでお待ちください。",
+      "bundleRepairNotice": "このモデルは読み込み前にアラインメント修復が必要です。現在のファイルに対して一度だけ実行され、変更がなければ再修復は不要です。各シャードを検証し、その場で置き換える間お待ちください。置換中は一時シャードが1つ必要ですが、モデル全体のコピーは作成しません。",
       "bundleRepairDetected": "未整列のテンソルを検出: {shard}",
-      "bundleRepairCopying": "{shard} を修復中: コピー中{detail}",
+      "bundleRepairCopying": "{shard} をその場で修復中{detail}。お待ちください。",
+      "bundleRepairHashVerified": "{shard} のダウンロード済みデータを検証しました。修復の準備中です。お待ちください。",
+      "bundleRepairMetadataUpdated": "修復した {shard} のローカルダウンロード情報を更新しました",
       "bundleRepairValidated": "{shard} を修復中: テンソルデータを検証済み",
       "bundleRepairCommitted": "{shard} を修復中: 検証済みの置換ファイルを反映",
       "bundleRepairFinished": "{shard} を修復済み; バンドル検査を続行",

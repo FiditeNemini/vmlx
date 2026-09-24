@@ -37,8 +37,8 @@ function App() {
   const [creatingChatSession, setCreatingChatSession] = useState(false)
   const [downloadModelType, setDownloadModelType] = useState<DownloadModelType>('text')
   const [chatCreationError, setChatCreationError] = useState<string | null>(null)
-  const { state, dispatch, setMode, openChat } = useAppState()
-  const { sessions: allSessions } = useSessionsContext()
+  const { state, restored, dispatch, setMode, openChat } = useAppState()
+  const { sessions: allSessions, ready: sessionsReady } = useSessionsContext()
 
   // For chat mode, exclude image sessions — they belong in the Image tab
   const sessions = useMemo(() => allSessions.filter(s => !isImageSession(s)), [allSessions])
@@ -195,6 +195,26 @@ function App() {
       openChat(result.id, target.id)
     }
   }, [sessions, state.activeSessionId, setMode, dispatch, openChat, t])
+
+  useEffect(() => {
+    // Restoring saved navigation must finish before acknowledging native menu
+    // actions; otherwise a recreated window can overwrite the requested page.
+    if (!restored || !sessionsReady || checkingSetup) return
+    return window.api.navigation.onAction((action) => {
+    if (action === 'new-chat') {
+      setMode('chat')
+      void handleNewChat().catch(error => {
+        setChatCreationError(String(error))
+        setCreatingChatSession(true)
+      })
+    } else if (action === 'preferences' || action === 'servers') {
+      setMode('server')
+      dispatch({ type: 'SET_SERVER_PANEL', panel: action === 'preferences' ? 'about' : 'dashboard' })
+    } else {
+      setMode(action)
+    }
+    })
+  }, [restored, sessionsReady, checkingSetup, handleNewChat, setMode, dispatch])
 
   const handleChatSessionCreated = async (sessionId: string) => {
     setCreatingChatSession(false)

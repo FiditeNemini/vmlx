@@ -2036,6 +2036,11 @@
   },
   "main": {
     "tray": {
+      "statusSummary": "vMLX — {running} en ejecución, {loading} cargando, {standby} en reposo",
+      "gatewayStopped": "Gateway API: detenido",
+      "copyOpenAiUrl": "Copiar URL base de OpenAI",
+      "copyServerUrl": "Copiar URL del servidor",
+      "actionFailed": "No se pudo completar la acción del servidor. Abre Servidores y API para ver los detalles.",
       "modelsLoaded": "vMLX — {n} modelo(s) cargado(s)",
       "apiGateway": "API Gateway: localhost:{port}",
       "copyApiUrl": "Copiar URL de API",
@@ -2073,9 +2078,11 @@
     "loadProgress": {
       "initializing": "Inicializando...",
       "scanningModelFiles": "Escaneando archivos del modelo...",
-      "bundleRepairNotice": "Este paquete necesita reparar la alineación antes de cargar. Es un paso único para los archivos actuales; si no cambian, no necesitarán otra reparación. Espere mientras se copia, valida y reemplaza atómicamente cada fragmento.",
+      "bundleRepairNotice": "Este paquete necesita reparar la alineación antes de cargar. Es un paso único para los archivos actuales; si no cambian, no necesitarán otra reparación. Espere mientras se valida y reemplaza cada fragmento en su ubicación. Solo se necesita un fragmento temporal durante el reemplazo; no se crea otra copia del modelo.",
       "bundleRepairDetected": "Tensores desalineados detectados: {shard}",
-      "bundleRepairCopying": "Reparando {shard}: copiando{detail}",
+      "bundleRepairCopying": "Reparando {shard} en su ubicación{detail}. Espere.",
+      "bundleRepairHashVerified": "Datos descargados de {shard} verificados; preparando la reparación. Espere.",
+      "bundleRepairMetadataUpdated": "Metadatos de descarga local actualizados para {shard} reparado",
       "bundleRepairValidated": "Reparando {shard}: datos de tensores validados",
       "bundleRepairCommitted": "Reparando {shard}: reemplazo validado confirmado",
       "bundleRepairFinished": "{shard} reparado; continúa la comprobación del paquete",

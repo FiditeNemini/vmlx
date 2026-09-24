@@ -2036,6 +2036,11 @@
   },
   "main": {
     "tray": {
+      "statusSummary": "vMLX — 运行 {running}，加载 {loading}，休眠 {standby}",
+      "gatewayStopped": "API 网关：已停止",
+      "copyOpenAiUrl": "复制 OpenAI 基础 URL",
+      "copyServerUrl": "复制服务器 URL",
+      "actionFailed": "无法完成服务器操作。请打开服务器与 API 查看详情。",
       "modelsLoaded": "vMLX — 已加载 {n} 个模型",
       "apiGateway": "API 网关: localhost:{port}",
       "copyApiUrl": "复制 API URL",
@@ -2073,9 +2078,11 @@
     "loadProgress": {
       "initializing": "正在初始化...",
       "scanningModelFiles": "扫描模型文件...",
-      "bundleRepairNotice": "此模型包需要先修复对齐。这是针对当前文件的一次性操作；文件未改变时无需再次修复。请等待各分片完成复制、验证和原子替换。",
+      "bundleRepairNotice": "此模型包需要先修复对齐才能加载。当前文件仅需修复一次；文件未更改则无需再次修复。请等待受影响的分片逐一验证并原位替换。替换期间只需一个临时分片，不会创建第二份完整模型。",
       "bundleRepairDetected": "检测到未对齐的张量：{shard}",
-      "bundleRepairCopying": "正在修复 {shard}：复制中{detail}",
+      "bundleRepairCopying": "正在原位修复 {shard}{detail}。请稍候。",
+      "bundleRepairHashVerified": "已验证 {shard} 的下载数据，正在准备修复。请稍候。",
+      "bundleRepairMetadataUpdated": "已更新修复后 {shard} 的本地下载元数据",
       "bundleRepairValidated": "正在修复 {shard}：张量数据已验证",
       "bundleRepairCommitted": "正在修复 {shard}：已提交验证后的替换文件",
       "bundleRepairFinished": "已修复 {shard}；继续检查模型包",

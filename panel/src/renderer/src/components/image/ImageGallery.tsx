@@ -372,9 +372,15 @@ function GeneratingSkeleton({ progress, startTime, cancelling }: { progress?: Im
     s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   const phase = cancelling ? 'cancelling' : progress?.phase ?? 'waiting';
   const checkpoint = phase === 'denoising' && progress?.stepIndex != null && progress.totalSteps;
+  const phaseLabels = {
+    waiting: t('image.jobProgress.waiting'), preparing: t('image.jobProgress.preparing'),
+    denoising: t('image.jobProgress.denoising'), rendering: t('image.jobProgress.rendering'),
+    encoding: t('image.jobProgress.encoding'), saving: t('image.jobProgress.saving'),
+    cancelling: t('image.jobProgress.cancelling'),
+  };
   const label = checkpoint
     ? t('image.jobProgress.checkpoint', { step: progress!.stepIndex! + 1, total: progress!.totalSteps! })
-    : t('image.jobProgress.' + phase);
+    : phaseLabels[phase];
 
   return (
     <div role="status" aria-live="polite" data-vmlx-control="image-job-progress" data-vmlx-phase={phase} data-vmlx-request-id={progress?.requestId} data-vmlx-job-id={progress?.jobId} className="border border-border rounded-lg overflow-hidden">

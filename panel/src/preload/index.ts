@@ -1,11 +1,22 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import { withImageServerStartProgress, type ImageServerStartProgress } from '../shared/imageServerStartProgress'
+import { isNativeNavigationAction, type NativeNavigationAction } from '../shared/nativeNavigation'
 
 let imageStartSequence = 0
 
 // Custom APIs for renderer
 const api = {
+  navigation: {
+    onAction: (callback: (action: NativeNavigationAction) => void) => {
+      const handler = (_: unknown, action: unknown) => {
+        if (isNativeNavigationAction(action)) callback(action)
+      }
+      ipcRenderer.on('app:navigate', handler)
+      ipcRenderer.send('app:menu-ready')
+      return () => { ipcRenderer.removeListener('app:navigate', handler) }
+    },
+  },
   // Model management
   models: {
     scan: (modelType?: string) => ipcRenderer.invoke('models:scan', modelType),

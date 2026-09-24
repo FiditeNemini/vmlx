@@ -4,6 +4,9 @@ declare global {
   interface Window {
     electron: ElectronAPI;
     api: {
+      navigation: {
+        onAction: (callback: (action: import('./shared/nativeNavigation').NativeNavigationAction) => void) => () => void;
+      };
       models: {
         scan: (modelType?: string) => Promise<any[]>;
         info: (modelPath: string) => Promise<any>;

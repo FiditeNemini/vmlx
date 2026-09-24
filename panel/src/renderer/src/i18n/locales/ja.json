@@ -1181,7 +1181,9 @@
       "saveAndRestart": "保存して再起動",
       "loading": "セッションを読み込み中...",
       "modelLabel": "モデル",
-      "cliCommandPreview": "CLI コマンドプレビュー"
+      "cliCommandPreview": "CLI コマンドプレビュー",
+      "cliMetadataLoading": "コマンドを生成する前にモデルのメタデータを読み込んでいます…",
+      "cliMetadataUnavailable": "モデルのメタデータを利用できません。保存済みの設定を使用しているため、自動パーサーやキャッシュのオプションが不完全な場合があります。"
     },
     "view": {
       "back": "セッション",

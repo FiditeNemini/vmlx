@@ -575,6 +575,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [restarting, setRestarting] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
+  const [previewMetadataState, setPreviewMetadataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
   const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null>(null)
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
@@ -584,9 +585,12 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
     let active = true
     resetRequestRef.current += 1
     setDetectedConfig(null)
+    setPreviewMetadataState('loading')
     const load = async () => {
       const s = await window.api.sessions.get(sessionId)
       if (s && active) {
+        // A corrupt saved config must still render its recovery message/form.
+        setSession(s)
         // Parse stored config JSON, merge with defaults
         try {
           const stored = JSON.parse(s.pendingConfig || s.config)
@@ -596,7 +600,6 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           // after the persisted config becomes visible.
           setConfig(base)
           setDirty(false)
-          setSession(s)
           const generationDefaults = await window.api.models.getGenerationDefaults(s.modelPath).catch(() => null)
           if (active) {
             setConfig(current => applyBundleGenerationDefaultsToSessionConfig(current, generationDefaults))
@@ -614,9 +617,13 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           if (active) {
             setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
             setDetectedConfig(det && det.family !== 'unknown' ? det : null)
+            setPreviewMetadataState(det && det.family !== 'unknown' ? 'ready' : 'unavailable')
           }
         } catch (_) {
-          if (active) setDetectedConfig(null)
+          if (active) {
+            setDetectedConfig(null)
+            setPreviewMetadataState('unavailable')
+          }
         }
       }
     }
@@ -860,9 +867,20 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             <ChevronRight className={`h-4 w-4 transition-transform ${showPreview ? 'rotate-90' : ''}`} /> {t('sessions.settings.cliCommandPreview')}
           </button>
           {showPreview && (
-            <pre className="mt-2 p-3 bg-background/80 text-primary text-xs font-mono rounded-lg overflow-x-auto whitespace-pre-wrap">
-              {buildCommandPreview(session.modelPath, config, detectedConfig)}
-            </pre>
+            <div className="mt-2" data-vmlx-control="cli-preview" aria-busy={previewMetadataState === 'loading'}>
+              {previewMetadataState === 'loading' ? (
+                <p role="status" className="text-xs text-muted-foreground">{t('sessions.settings.cliMetadataLoading')}</p>
+              ) : (
+                <>
+                  {previewMetadataState === 'unavailable' && (
+                    <p role="status" className="mb-2 text-xs text-muted-foreground">{t('sessions.settings.cliMetadataUnavailable')}</p>
+                  )}
+                  <pre className="p-3 bg-background/80 text-primary text-xs font-mono rounded-lg overflow-x-auto whitespace-pre-wrap">
+                    {buildCommandPreview(session.modelPath, config, detectedConfig)}
+                  </pre>
+                </>
+              )}
+            </div>
           )}
         </div>
 

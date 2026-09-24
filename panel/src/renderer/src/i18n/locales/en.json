@@ -1181,7 +1181,9 @@
       "saveAndRestart": "Save & Restart",
       "loading": "Loading session...",
       "modelLabel": "Model",
-      "cliCommandPreview": "CLI Command Preview"
+      "cliCommandPreview": "CLI Command Preview",
+      "cliMetadataLoading": "Loading model metadata before building the command…",
+      "cliMetadataUnavailable": "Model metadata is unavailable. This preview uses saved settings; automatic parser and cache options may be incomplete."
     },
     "view": {
       "back": "Sessions",

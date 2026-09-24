@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The prompt disk cache must not narrow bfloat16 to float16.
 
-numpy has no bf16, so the store has to cast — but bf16 and f16 are NOT
+NumPy has no BF16 dtype; storage must preserve raw bits or widen losslessly.
+BF16 and FP16 are NOT
 interchangeable despite both being 16 bits. bf16 spends 8 bits on the exponent
 (the same ~1e38 range as f32) and f16 spends 5 (max 65504). MEASURED with MLX:
 
@@ -15,14 +16,13 @@ restored prompt cache could differ from a fresh compute. That is the same
 divergence. The code carried "acceptable precision for prompt cache" as its
 justification, with nothing measured behind it.
 
-bf16 -> f32 is lossless in both directions — f32 has a wider mantissa AND the
-same exponent range — and is what block_disk_store already does for exactly
-this reason. It costs 2x the bytes for bf16 caches.
+BF16 can be stored as raw uint16 bits without widening. Older FP32 files
+remain readable. Production payload width and all BF16 bit patterns are
+covered in test_disk_cache_native_bf16.py.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -47,21 +47,6 @@ def test_float16_really_does_destroy_bf16_range():
     via_f32 = src.astype(mx.float32).tolist()
     assert via_f32 == exact, "bf16 -> f32 must be exact in both directions"
 
-
-def test_store_casts_bfloat16_to_float32_not_float16():
-    src = (ROOT / "vmlx_engine" / "disk_cache.py").read_text(encoding="utf-8")
-    start = src.index("    def store(")
-    body = src[start : src.index("\n    def ", start + 1)]
-
-    assert "v.astype(mx.float32) if v.dtype == mx.bfloat16" in body, (
-        "the prompt disk cache no longer widens bf16 losslessly"
-    )
-    assert not re.search(r"astype\(mx\.float16\)\s*if\s*v\.dtype\s*==\s*mx\.bfloat16", body), (
-        "the lossy bf16 -> f16 cast is back; values above 65504 become inf"
-    )
-    assert "acceptable precision for prompt cache" not in body, (
-        "the unmeasured justification is back"
-    )
 
 
 def test_block_disk_store_still_agrees():
@@ -191,14 +176,16 @@ def test_roundtrip_restores_bfloat16_and_keeps_large_values_finite(tmp_path):
         mgr.shutdown()
 
 
-def test_legacy_file_without_dtype_record_still_loads(tmp_path):
-    """Old-format files (no widening record) must load, not crash.
+@pytest.mark.parametrize("record_dtype", [False, True])
+def test_legacy_widened_file_still_loads(tmp_path, record_dtype):
+    """Legacy F32 payloads load with or without their original dtype record.
 
     Writers before the record stored bf16 state widened to f32 with nothing
     written down, so those files cannot come back as bf16 — they must load
     exactly as before: widened-but-exact f32.
     """
     import time as _time
+    import json
 
     from mlx_lm.models.cache import KVCache, save_prompt_cache
 
@@ -212,8 +199,8 @@ def test_legacy_file_without_dtype_record_still_loads(tmp_path):
     # no widened_dtypes record.
     c = KVCache()
     mx.random.seed(3)
-    k = mx.random.normal((1, 2, 8, 4))  # float32
-    v = mx.random.normal((1, 2, 8, 4))
+    k = mx.random.normal((1, 2, 8, 4)).astype(mx.bfloat16).astype(mx.float32)
+    v = mx.random.normal((1, 2, 8, 4)).astype(mx.bfloat16).astype(mx.float32)
     c.update_and_fetch(k, v)
     mx.eval(c.keys, c.values)
 
@@ -229,6 +216,8 @@ def test_legacy_file_without_dtype_record_still_loads(tmp_path):
                 "num_tokens": str(len(tokens)),
                 "created_at": str(_time.time()),
                 "runtime_cache_fingerprint": _runtime_cache_fingerprint(),
+                **({"widened_dtypes": json.dumps({"0.0": "bfloat16", "0.1": "bfloat16"})}
+                   if record_dtype else {}),
             },
         )
         conn = mgr._pool.get()
@@ -253,15 +242,14 @@ def test_legacy_file_without_dtype_record_still_loads(tmp_path):
 
         restored = mgr.fetch(tokens)
         assert restored is not None, "legacy-format file failed to load"
-        assert restored[0].keys.dtype == mx.float32, (
-            "legacy files carry no original-dtype record; they must keep "
-            "loading as the same widened f32 as before, not be guessed at"
-        )
+        expected_dtype = mx.bfloat16 if record_dtype else mx.float32
+        assert restored[0].keys.dtype == expected_dtype
+        assert restored[0].values.dtype == expected_dtype
         assert mx.array_equal(
-            restored[0].keys, c.keys[..., : c.offset, :]
+            restored[0].keys.astype(mx.float32), c.keys[..., : c.offset, :]
         ).item()
         assert mx.array_equal(
-            restored[0].values, c.values[..., : c.offset, :]
+            restored[0].values.astype(mx.float32), c.values[..., : c.offset, :]
         ).item()
     finally:
         mgr.shutdown()

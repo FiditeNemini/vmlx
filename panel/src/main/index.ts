@@ -571,7 +571,7 @@ app.whenReady().then(async () => {
   }
 
   app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (!mainWindow || mainWindow.isDestroyed()) {
       createWindow()
     } else if (mainWindow && !mainWindow.isDestroyed()) {
       // Restore minimized or hidden window when dock icon is clicked

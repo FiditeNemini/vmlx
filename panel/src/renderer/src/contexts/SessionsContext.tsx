@@ -53,6 +53,7 @@ export interface LoadProgress {
 
 interface SessionsContextValue {
   sessions: SessionSummary[]
+  ready: boolean
   loadingSessions: Set<string>
   loadProgress: Map<string, LoadProgress>
   ensureSessionRunning: (modelPath: string) => Promise<SessionSummary>
@@ -67,6 +68,7 @@ export function useSessionsContext() {
 
 export function SessionsProvider({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation()
+  const [ready, setReady] = useState(false)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [loadingSessions, setLoadingSessions] = useState<Set<string>>(new Set())
   const [loadProgress, setLoadProgress] = useState<Map<string, LoadProgress>>(new Map())
@@ -78,6 +80,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
       const list = await window.api.sessions.list()
       setSessions(list)
     } catch { /* ignore */ }
+    finally { setReady(true) }
   }, [])
 
   useEffect(() => {
@@ -326,7 +329,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
   }, [refreshSessions, t])
 
   return (
-    <SessionsContext.Provider value={{ sessions, loadingSessions, loadProgress, ensureSessionRunning, refreshSessions }}>
+    <SessionsContext.Provider value={{ sessions, ready, loadingSessions, loadProgress, ensureSessionRunning, refreshSessions }}>
       {children}
     </SessionsContext.Provider>
   )

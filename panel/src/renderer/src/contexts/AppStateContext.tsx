@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, useEffect, useRef } from 'react'
+import { createContext, useContext, useReducer, useEffect, useRef, useState } from 'react'
 import type { AppState, AppAction, AppMode } from '../types/app-state'
 import { restoreAppMode } from '../lib/consoleNavigation'
 
@@ -42,6 +42,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
 interface AppStateContextValue {
   state: AppState
+  restored: boolean
   dispatch: React.Dispatch<AppAction>
   setMode: (mode: AppMode) => void
   openChat: (chatId: string, sessionId: string) => void
@@ -56,6 +57,7 @@ export function useAppState() {
 export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState)
   const restoredRef = useRef(false)
+  const [restored, setRestored] = useState(false)
 
   // Restore persisted state on mount
   useEffect(() => {
@@ -76,6 +78,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         })
       } catch { /* first launch, use defaults */ }
       restoredRef.current = true
+      setRestored(true)
     }
     restore()
   }, [])
@@ -102,7 +105,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const openChat = (chatId: string, sessionId: string) => dispatch({ type: 'OPEN_CHAT', chatId, sessionId })
 
   return (
-    <AppStateContext.Provider value={{ state, dispatch, setMode, openChat }}>
+    <AppStateContext.Provider value={{ state, restored, dispatch, setMode, openChat }}>
       {children}
     </AppStateContext.Provider>
   )

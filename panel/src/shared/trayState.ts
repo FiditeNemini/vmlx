@@ -20,11 +20,11 @@ export function summarizeTrayState(processes: ProcessRow[], sessions: SessionRow
   const running = processes.filter(p => p.status === 'running').length + uniqueSessions.filter(s => s.status === 'running').length
   const loading = processes.filter(p => p.status === 'starting').length + uniqueSessions.filter(s => s.status === 'loading').length
   const standby = uniqueSessions.filter(s => s.status === 'standby').length
-  // Sleeping/stopped sessions have released the model. Ignore stale health
-  // samples, and never add the same server's ProcessManager and session data.
+  // Soft sleep keeps weights loaded. Retain the latest measured standby
+  // memory, but ignore stopped rows and never count one server twice.
   const memoryMB = processes.filter(p => ['running', 'starting'].includes(p.status))
     .reduce((n, p) => n + Math.max(0, p.gpuMemoryMB || 0), 0)
-    + uniqueSessions.filter(s => ['running', 'loading'].includes(s.status))
+    + uniqueSessions.filter(s => ['running', 'loading', 'standby'].includes(s.status))
       .reduce((n, s) => n + Math.max(0, memory.get(s.id) || 0), 0)
   return { running, loading, standby, memoryMB }
 }

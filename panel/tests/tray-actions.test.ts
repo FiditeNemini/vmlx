@@ -47,12 +47,14 @@ describe('native tray actions and live updates', () => {
     h.gateway.running = false; h.gateway.emit('stopped')
     expect(item('Copy Server URL').enabled).toBe(false)
   })
-  it('removes stale memory before rendering the sleeping state', () => {
+  it('retains soft sleep weights and refreshes measured standby memory', () => {
     createTray(h.manager as any, () => null)
     h.sessions.emit('session:health', { sessionId: 's', memory: { active_mb: 4096 } })
     expect(menu().some(x => x.label?.startsWith('Memory: 4.0 /'))).toBe(true)
     rows[0].status = 'standby'; h.sessions.emit('session:standby', { sessionId: 's' })
     expect(menu()[0].label).toContain('0 running, 0 loading, 1 sleeping')
+    expect(menu().some(x => x.label?.startsWith('Memory: 4.0 /'))).toBe(true)
+    h.sessions.emit('session:memory', { sessionId: 's', memory: { active_mb: 0 } })
     expect(menu().some(x => x.label?.startsWith('Memory: 0.0 /'))).toBe(true)
     expect(item('Wake')).toBeDefined()
     expect(item('Sleep')).toBeUndefined()
@@ -70,4 +72,12 @@ describe('native tray actions and live updates', () => {
     expect(h.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ detail: 'Error: Busy with an active request' }))
     expect(item('Sleep').enabled).toBe(true)
   })
+  it('surfaces structured server failures as well as rejected promises', async () => {
+    h.sessions.softSleep.mockResolvedValue({ success: false, error: 'Engine busy — generation in progress' })
+    createTray(h.manager as any, () => null)
+    await item('Sleep').click()
+    expect(h.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ detail: 'Error: Engine busy — generation in progress' }))
+    expect(item('Sleep').enabled).toBe(true)
+  })
+
 })

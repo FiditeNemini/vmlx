@@ -4287,6 +4287,9 @@ export class SessionManager extends EventEmitter {
               )
               if (res.ok) {
                 const data = await res.json()
+                // Reuse the existing standby poll: soft sleep retains weights,
+                // so the menu bar needs measured memory rather than assuming zero.
+                this.emit('session:memory', { sessionId: session.id, memory: data.memory })
                 if (data.status === 'healthy') {
                   // Model woke externally and finished serving-ready between
                   // monitor ticks — sync DB to running and let the settle

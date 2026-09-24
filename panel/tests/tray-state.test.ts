@@ -12,7 +12,7 @@ describe('tray reports actual server state', () => {
     ]
     expect(summarizeTrayState(processes, sessions, new Map([
       ['same', 2048], ['sleep', 50000], ['load', 1024], ['old', 40000],
-    ]))).toEqual({ running: 1, loading: 1, standby: 1, memoryMB: 3072 })
+    ]))).toEqual({ running: 1, loading: 1, standby: 1, memoryMB: 53072 })
   })
   it('does not let a dead process or another host hide a running session', () => {
     const session = { id: 'live', port: 9001, status: 'running', host: '127.0.0.1' }

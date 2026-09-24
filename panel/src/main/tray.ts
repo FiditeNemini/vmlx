@@ -91,7 +91,12 @@ async function runSessionAction(id: string, action: () => Promise<unknown>, proc
   if (busySessions.has(id)) return
   busySessions.add(id)
   rebuildMenu(processManager, getWindow)
-  try { await action() } catch (error) { reportActionError(error) }
+  try {
+    const result = await action()
+    if (result && typeof result === 'object' && 'success' in result && result.success === false) {
+      throw new Error('error' in result ? String(result.error) : t('main.tray.actionFailed'))
+    }
+  } catch (error) { reportActionError(error) }
   finally { busySessions.delete(id); rebuildMenu(processManager, getWindow) }
 }
 
@@ -217,7 +222,7 @@ function buildMenu(
       const isLoading = s.status === 'loading'
       const icon = isSleeping ? '💤' : isLoading ? '◐' : isImage ? '🖼' : '●'
       const modelName = s.modelName || s.modelPath?.split('/').pop() || 'Unknown'
-      const sessMem = isSleeping ? 0 : sessionMemoryMB.get(s.id) || 0
+      const sessMem = sessionMemoryMB.get(s.id) || 0
       const sessMemLabel = sessMem > 0 ? ` — ${(sessMem / 1024).toFixed(1)} GB` : ''
 
       items.push({
@@ -343,7 +348,7 @@ export function createTray(
 
   // Also listen for SessionManager events (sessions started from Server/Image tabs)
   const sessionRebuild = () => {
-    const live = new Set(db.getSessions().filter(s => ['running', 'loading'].includes(s.status)).map(s => s.id))
+    const live = new Set(db.getSessions().filter(s => ['running', 'loading', 'standby'].includes(s.status)).map(s => s.id))
     for (const id of sessionMemoryMB.keys()) if (!live.has(id)) sessionMemoryMB.delete(id)
     rebuildMenu(processManager, getWindow)
   }
@@ -362,7 +367,7 @@ export function createTray(
     if (data.memory?.active_mb != null) {
       const prev = sessionMemoryMB.get(data.sessionId) || 0
       const curr = Math.round(data.memory.active_mb)
-      if (Math.abs(curr - prev) >= 10) {  // Only rebuild if change >= 10 MB
+      if ((curr === 0 && prev !== 0) || Math.abs(curr - prev) >= 10) {  // Only rebuild if change >= 10 MB
         sessionMemoryMB.set(data.sessionId, curr)
         rebuildMenu(processManager, getWindow)
       } else if (prev === 0 && curr > 0) {
@@ -371,6 +376,8 @@ export function createTray(
       }
     }
   }
+  sessionManager.on('session:memory', sessionHealthFn)
+  boundListeners.push({ event: 'session:memory', fn: sessionHealthFn })
   sessionManager.on('session:health', sessionHealthFn)
   boundListeners.push({ event: 'session:health', fn: sessionHealthFn })
 

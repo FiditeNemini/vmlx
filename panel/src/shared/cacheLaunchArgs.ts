@@ -75,16 +75,19 @@ export function buildCacheLaunchArgs(input: CacheLaunchArgsInput): CacheLaunchAr
     return { args, policy, blockDiskOnly }
   }
 
-  if (input.noMemoryAwareCache && !input.forceMemoryAwareCache) {
+  if (policy.enableLegacyDiskCache) {
+    // Exact typed prompt snapshots use the memory-aware restore adapter, but
+    // completed payloads belong on SSD just like native block records. Zero
+    // explicitly disables its retained L1; omitting it enables the RAM default.
+    args.push('--cache-memory-mb', '0')
+  } else if (input.noMemoryAwareCache && !input.forceMemoryAwareCache) {
     args.push('--no-memory-aware-cache')
     const prefixCacheSize = finitePositiveInteger(input.prefixCacheSize)
     if (prefixCacheSize != null) args.push('--prefix-cache-size', prefixCacheSize.toString())
     const prefixCacheMaxBytes = finitePositiveInteger(input.prefixCacheMaxBytes)
     if (prefixCacheMaxBytes != null) args.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
   } else if (!blockDiskOnly) {
-    // SSD-only block mode retains no L1 payload, so RAM-budget and TTL controls
-    // are intentionally absent there. They remain meaningful for the separate
-    // memory-aware/prompt-L2 lane used by exact typed runtimes.
+    // RAM-budget controls apply only when neither SSD backend is selected.
     const cacheMemoryMb = finitePositiveInteger(input.cacheMemoryMb)
     if (cacheMemoryMb != null) args.push('--cache-memory-mb', cacheMemoryMb.toString())
     const cacheMemoryPercent = finitePositiveNumber(input.cacheMemoryPercent)

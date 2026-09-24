@@ -11482,13 +11482,14 @@ class Scheduler:
                                 # re-fed before generation. M3's default route
                                 # is memory-aware (paged off), so write L2 here
                                 # too; DiskCacheManager preserves M3 idx_keys.
+                                prompt_disk_durable = False
                                 if (
                                     self.disk_cache is not None
                                     and not self._is_hybrid
                                     and len(cache_key_tokens) == max(prompt_len - 1, 0)
                                 ):
                                     try:
-                                        _call_with_optional_cache_extra(
+                                        disk_accepted = _call_with_optional_cache_extra(
                                             self.disk_cache.store,
                                             prompt_tokens,
                                             cache_to_store,
@@ -11499,8 +11500,30 @@ class Scheduler:
                                                 None,
                                             ),
                                         )
+                                        if disk_accepted:
+                                            # Terminal dispatch waits for this
+                                            # cleanup frame. Do not publish the
+                                            # tool completion while its prompt
+                                            # entry is still in the SSD queue.
+                                            prompt_disk_durable = self.disk_cache.flush_pending_writes(
+                                                prompt_tokens,
+                                                cache_extra_keys=getattr(
+                                                    request, "_cache_extra_keys", None
+                                                ),
+                                            )
+                                        if not prompt_disk_durable:
+                                            _PERSIST.record(
+                                                request_id,
+                                                "failed" if disk_accepted else "refused",
+                                                "prompt SSD entry was not persisted",
+                                                durable=False,
+                                            )
                                     except Exception as de:
-                                        logger.debug(
+                                        _PERSIST.record(
+                                            request_id, "failed", f"prompt SSD: {de}",
+                                            durable=False,
+                                        )
+                                        logger.warning(
                                             f"Disk cache store failed for "
                                             f"{request_id}: {de}"
                                         )
@@ -11552,7 +11575,19 @@ class Scheduler:
                                             f"from {prompt_len} prompt tokens, "
                                             f"KV truncated to {prompt_len - 1})"
                                         )
-                                    _PERSIST.record(request_id, "stored", "memory-aware", retained_tokens=len(cache_key_tokens))
+                                    _PERSIST.record(
+                                        request_id, "stored", "memory-aware",
+                                        retained_tokens=len(cache_key_tokens),
+                                        durable=prompt_disk_durable,
+                                    )
+                                elif prompt_disk_durable:
+                                    # SSD-only typed sessions deliberately give
+                                    # the memory-aware adapter a zero L1 budget.
+                                    # Its refusal is not a failed SSD publication.
+                                    _PERSIST.record(
+                                        request_id, "stored", "prompt SSD; no retained RAM payload",
+                                        retained_tokens=len(cache_key_tokens), durable=True,
+                                    )
                                 else:
                                     logger.warning(
                                         f"Cache store rejected for request {request_id} "

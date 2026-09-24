@@ -81,6 +81,11 @@ describe('authoritative cache launch arguments', () => {
     expect(result.args).toContain('--no-paged-cache')
     expect(result.args).not.toContain('--no-memory-aware-cache')
     expect(result.args).toContain('--enable-disk-cache')
+    const budgetIndex = result.args.indexOf('--cache-memory-mb')
+    expect(budgetIndex).toBeGreaterThan(-1)
+    expect(result.args[budgetIndex + 1]).toBe('0')
+    expect(result.args).not.toContain('--cache-memory-percent')
+    expect(result.args).not.toContain('--cache-ttl-minutes')
     expect(result.args).toContain('--disable-block-disk-cache')
   })
 

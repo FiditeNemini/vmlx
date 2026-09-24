@@ -1172,11 +1172,12 @@ class DiskCacheManager:
                 )
                 return False
 
-            # GLM's expanded MLA state can consume most of the headroom left
-            # beside a 95GB model. Carry BF16 as exact uint16 bits (the same
-            # lossless contract as BlockDiskStore) instead of creating a full
-            # FP32 Metal widening image. Generic caches keep their established
-            # f32 widening format for backward compatibility.
+            # Carry every BF16 tensor as exact uint16 bits, matching the
+            # block store. This preserves NaN payloads and native byte width
+            # without allocating a full FP32 staging image. The reader still
+            # accepts older widened files through their dtype metadata.
+            # GLM keeps its one-array-at-a-time detachment below because its
+            # expanded MLA state can exhaust the remaining Metal headroom.
             glm_typed_payload = {
                 "Glm5KDACache",
                 "Glm5MLACache",
@@ -1184,8 +1185,7 @@ class DiskCacheManager:
             bitcast_dtypes = {
                 key: "bfloat16"
                 for key, value in cache_data_flat.items()
-                if glm_typed_payload
-                and isinstance(value, mx.array)
+                if isinstance(value, mx.array)
                 and value.dtype == mx.bfloat16
             }
 
@@ -1194,26 +1194,9 @@ class DiskCacheManager:
             save_metadata["created_at"] = str(time.time())
             save_metadata["runtime_cache_fingerprint"] = _runtime_cache_fingerprint()
 
-            # Record which flattened arrays the loop below is about to widen
-            # (bf16 -> f32; numpy has no bf16) so _fetch_impl can cast them
-            # back. Without the record a restored bf16 cache re-enters
-            # generation as f32 and STAYS f32: KVCache.update_and_fetch
-            # extends through mx.concatenate, which promotes bf16+f32 to f32.
-            widened_dtypes = {
-                k: "bfloat16"
-                for k, v in cache_data_flat.items()
-                if isinstance(v, mx.array)
-                and v.dtype == mx.bfloat16
-                and k not in bitcast_dtypes
-            }
-            if widened_dtypes:
-                save_metadata[_WIDENED_DTYPES_META_KEY] = json.dumps(
-                    widened_dtypes
-                )
-            else:
-                # Callers may hand in a reused metadata dict; never let a
-                # previous store's record describe this cache's arrays.
-                save_metadata.pop(_WIDENED_DTYPES_META_KEY, None)
+            # A caller may reuse metadata from an older widened store. Do
+            # not let that stale record cast raw integer payloads numerically.
+            save_metadata.pop(_WIDENED_DTYPES_META_KEY, None)
             if bitcast_dtypes:
                 save_metadata[_BITCAST_DTYPES_META_KEY] = json.dumps(
                     bitcast_dtypes
@@ -1230,27 +1213,10 @@ class DiskCacheManager:
             # kernel panics. numpy conversion does a CPU memcpy that fully
             # decouples from Metal.
             #
-            # IMPORTANT: Gemma 4 sliding-window RotatingKVCache.values may be
-            # a non-contiguous MLX view after prefill. Direct np.array(v) on
-            # that view can serialize wrong values while keys/full KV remain
-            # exact, corrupting fresh-process disk-prefix restores into
-            # incoherent output. Materialize a contiguous MLX array before the
-            # CPU copy. bfloat16 must be cast because numpy has no bf16 — but
-            # to float32, NOT float16.
-            #
-            # bf16 and f16 are both 16 bits and are NOT interchangeable: bf16
-            # spends 8 bits on the exponent (range ~1e38, same as f32) and f16
-            # spends 5 (max 65504). Casting bf16 -> f16 therefore sends any KV
-            # value above 65504 to +/-inf and anything below ~6e-5 to zero, so a
-            # restored cache could differ from a fresh compute — the exact
-            # "a hit must equal a recompute" class that produced the mixed-SWA
-            # cold-vs-warm divergence. The old comment called it "acceptable
-            # precision for prompt cache" with nothing measured behind it.
-            #
-            # bf16 -> f32 is lossless (f32 has both a wider mantissa and the
-            # same exponent range), which is what the block disk store already
-            # does for the same reason. It costs 2x the bytes for bf16 caches;
-            # correctness is worth more than the disk.
+            # Rotating-cache state may be non-contiguous. Materialize it
+            # before exposing its raw BF16 bits and copying into CPU-owned
+            # NumPy storage. Reinterpreting BF16 as uint16 is lossless;
+            # casting BF16 to float16 would corrupt its exponent range.
             import numpy as np
             np_cache = {}
             if glm_typed_payload:
@@ -1274,15 +1240,14 @@ class DiskCacheManager:
                 cache_data_flat = np_cache
             else:
                 pending_arrays = []
-                # The widened keys were recorded in save_metadata above
-                # (_WIDENED_DTYPES_META_KEY); _fetch_impl casts them back on load,
-                # mirroring block_disk_store's per-tensor orig_dtype restore.
-                # Old files without the record still load, widened-but-exact.
+                # _fetch_impl restores the recorded raw-bit dtypes before
+                # constructing native cache objects.
                 arrays_to_eval = []
                 for k, v in cache_data_flat.items():
                     if isinstance(v, mx.array):
-                        arr = v.astype(mx.float32) if v.dtype == mx.bfloat16 else v
-                        arr = mx.contiguous(arr)
+                        arr = mx.contiguous(v)
+                        if k in bitcast_dtypes:
+                            arr = arr.view(mx.uint16)
                         pending_arrays.append((k, arr))
                         arrays_to_eval.append(arr)
                     else:

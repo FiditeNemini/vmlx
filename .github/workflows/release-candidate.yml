@@ -134,7 +134,10 @@ jobs:
           "$UV_BIN" venv --seed --python 3.13 .venv
           .venv/bin/python -c 'import pathlib, sys; assert sys.version_info[:2] == (3, 13), sys.version; assert pathlib.Path(sys.executable).absolute() == (pathlib.Path.cwd() / ".venv/bin/python").absolute(), sys.executable'
           .venv/bin/python -m pip install --upgrade pip build twine
-          .venv/bin/python -m pip install -e '.[dev]'
+          # Install the exact checked-out JANG source together with vMLX. A
+          # candidate may precede publishing that JANG version to PyPI.
+          .venv/bin/python -m pip install -e ../jangq/jang-tools -e '.[dev]'
+          .venv/bin/python -m pip check
           cd panel
           /opt/homebrew/bin/npm ci
 

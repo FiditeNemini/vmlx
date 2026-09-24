@@ -6516,6 +6516,32 @@ describe("native MTP surface / engine parity", () => {
     expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/runtime unwired/);
   });
 
+  it("accepts hidden MTP controls only with a complete inconsistent-artifact verdict", () => {
+    const result: any = nonMtpBundleResult();
+    Object.assign(result.server.health.mtp, {
+      index_has_mtp_tensors: true, mtp_tensor_count: 42,
+      artifact_available: false, runtime_supported: false,
+      runtime_available: false, runtime_active: false,
+      status: "metadata_inconsistent", runtime_reason: "metadata_inconsistent",
+      issues: ["config declares 1 layer but index has 2"],
+    });
+    expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
+    for (const field of ["artifact_available", "runtime_supported", "runtime_available", "runtime_active"]) {
+      for (const value of [true, undefined]) {
+        const contradictory = structuredClone(result);
+        contradictory.server.health.mtp[field] = value;
+        expect(validateNativeMtpSurfaceParity(contradictory).length).toBeGreaterThan(0);
+      }
+    }
+    for (const issues of [[], undefined]) {
+      const missing = structuredClone(result);
+      missing.server.health.mtp.issues = issues;
+      expect(validateNativeMtpSurfaceParity(missing).length).toBeGreaterThan(0);
+    }
+    result.serverCacheControls.nativeMtpControl.modeSelectPresent = true;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(/inconsistent/);
+  });
+
   it.each(["runtime_supported", "runtime_available", "runtime_active"])(
     "does not hide supported controls when the unwired %s verdict is contradictory or absent",
     (field) => {

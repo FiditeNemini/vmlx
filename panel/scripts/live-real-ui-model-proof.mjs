@@ -5497,8 +5497,10 @@ export function validateServerCacheEvidence(result) {
 // MiMo-V2.6 also carries 72 MTP tensors but explicitly reports the runtime
 // unwired. Its absent control is correct. Require the complete engine verdict;
 // a missing capability field or contradictory active runtime is not an excuse
-// to hide a supported control. Compatibility-blocked supported families retain
-// the existing control and fallback checks.
+// to hide a supported control. Scott's Nemotron bundle has indexed MTP tensors
+// but inconsistent layer metadata: no usable artifact and no supported runtime.
+// Require that complete verdict too; compatibility-blocked supported families
+// retain the existing control and fallback checks.
 export function validateNativeMtpSurfaceParity(result) {
   const failures = []
   if (result?.requestedServerCacheControls !== true) return failures
@@ -5523,9 +5525,16 @@ export function validateNativeMtpSurfaceParity(result) {
     && mtp.runtime_supported === false
     && mtp.runtime_available === false
     && mtp.runtime_active === false
-  if (runtimeUnwired && mtp.index_has_mtp_tensors === true) {
+  const inconsistentArtifact = mtp.status === 'metadata_inconsistent'
+    && mtp.runtime_reason === 'metadata_inconsistent'
+    && mtp.artifact_available === false
+    && mtp.runtime_supported === false
+    && mtp.runtime_available === false
+    && mtp.runtime_active === false
+    && Array.isArray(mtp.issues) && mtp.issues.some(issue => typeof issue === 'string' && issue.trim())
+  if ((runtimeUnwired || inconsistentArtifact) && mtp.index_has_mtp_tensors === true) {
     if (surface.labelVisible === true || surface.modeSelectPresent === true) {
-      failures.push('engine reports native MTP runtime unwired but the UI rendered a Native MTP control')
+      failures.push(`engine reports native MTP ${inconsistentArtifact ? 'artifact inconsistent' : 'runtime unwired'} but the UI rendered a Native MTP control`)
     }
   } else if (mtp.index_has_mtp_tensors === true) {
     if (surface.labelVisible !== true) {

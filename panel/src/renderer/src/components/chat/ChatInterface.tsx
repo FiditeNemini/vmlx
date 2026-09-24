@@ -612,11 +612,9 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       try {
         const freshMessages = await window.api.chat.getMessages(chatId)
         if (chatIdRef.current !== chatId) return
-        if (freshMessages.length > 0) {
-          setMessages(hydrateMessages(freshMessages))
-        } else {
-          setMessages(prev => prev.filter(m => m.id !== tempId))
-        }
+        // An empty persisted history is authoritative too: a rejected first
+        // request can leave a typing-only assistant in the optimistic UI.
+        setMessages(hydrateMessages(freshMessages))
       } catch {
         // If reload also fails, at least remove the temp message
         if (chatIdRef.current === chatId) {

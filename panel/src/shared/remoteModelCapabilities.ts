@@ -28,6 +28,7 @@ export interface RemoteDetectedConfig {
   supportsThinking?: boolean
   supportsTools?: boolean
   remoteReasoningFormat?: RemoteReasoningFormat
+  supportsAdaptiveThinking?: boolean
   supportsInstructMode?: boolean
   supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>
   defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -151,12 +152,20 @@ export function generationDefaultsFromRemoteCapabilities(
     sampling.max_thinking_tokens,
     sampling.thinking_budget,
   )
-  if (maxThinkingTokens != null) defaults.maxThinkingTokens = maxThinkingTokens
+  // Runtime admission wins over a bundle's text-only default or legacy
+  // template hint. Native media may share the endpoint but reject hard caps.
+  const budgetSupported = explicitBoolean(
+    capabilities.supports_thinking_budget,
+    capabilities.thinking_budget_supported,
+  )
+  if (maxThinkingTokens != null && budgetSupported !== false) {
+    defaults.maxThinkingTokens = maxThinkingTokens
+  }
   if (typeof capabilities.supports_thinking_budget === 'boolean') {
     defaults.supportsThinkingBudget = capabilities.supports_thinking_budget
   }
   if (typeof capabilities.thinking_budget_supported === 'boolean') {
-    defaults.thinkingBudgetSupported = capabilities.thinking_budget_supported
+    defaults.thinkingBudgetSupported = budgetSupported
   }
 
   return Object.keys(defaults).length > 0 ? defaults : null
@@ -206,6 +215,9 @@ export function detectedConfigFromRemoteCapabilities(
   if (reasoningParser) detected.reasoningParser = reasoningParser
   if (typeof capabilities.supports_thinking === 'boolean') {
     detected.supportsThinking = capabilities.supports_thinking
+  }
+  if (Array.isArray(capabilities.native_thinking_modes)) {
+    detected.supportsAdaptiveThinking = capabilities.native_thinking_modes.includes('adaptive')
   }
   if (typeof capabilities.supports_instruct_mode === 'boolean') {
     detected.supportsInstructMode = capabilities.supports_instruct_mode

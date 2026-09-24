@@ -560,13 +560,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     runtimeModalities: detectedRuntimeModalities,
     liveRuntimeModalities,
   })
-  const showVideoControls = !dsv4Active && !detectedForceTextOnly && multimodalActive && (
+  const showVideoControls = !dsv4Active && !detectedForceTextOnly && !effectiveSmeltActive && config.isMultimodal !== false && multimodalActive && (
     detectedRuntimeVideoCapable ||
     (!normalizedDetectedFamily && config.isMultimodal === true)
   )
   const nativeMtpDetected = detectedNativeMtp !== undefined
   const nativeMtpSupported = !!detectedNativeMtp?.supported
-  const omniBackendVisible = normalizedDetectedFamily === 'nemotron-h' && multimodalActive
+  const omniBackendVisible = normalizedDetectedFamily === 'nemotron-h' && multimodalActive && config.isMultimodal !== false && !effectiveSmeltActive
+  const nativeOmniStage1 = omniBackendVisible && (config.omniBackend || 'stage1') === 'stage1'
   const nativeMtpMode = config.nativeMtpMode || DEFAULT_CONFIG.nativeMtpMode || 'auto'
   const nativeMtpDepth = config.nativeMtpDepthOverride === true
     ? resolveFixedNativeMtpDepth(config.nativeMtpDepth, detectedNativeMtp?.depth)
@@ -1074,7 +1075,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={blockDiskOnly
           ? t('sessions.config.dsv4SsdOnlyNote')
           : t('sessions.config.dsv4RamL1Note')} />}
-        {architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
+        {nativeOmniStage1 && cachePolicy.blockDiskCacheChecked && <div data-vmlx-section="omni-native-ssd-note"><InfoNote text={t('sessions.config.omniNativeSsdNote')} /></div>}
+        {architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !nativeOmniStage1 && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
           ? stepMixedSwaBlockDiskOnly
             ? t('sessions.config.stepSsdOnlyNote')
             : t('sessions.config.mixedSwaSsdOnlyNote')
@@ -1200,7 +1202,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text={t('sessions.config.hy3AutoHint')} />}
         {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? t('sessions.config.bonsaiHybridHint') : t('sessions.config.qwenHybridHint')} />}
         {!effectivelyNoBatching && !prefixOff && qwenFullTqActive && <PerformanceHint text={t('sessions.config.qwenFullKvHint')} />}
-        {!effectivelyNoBatching && !prefixOff && isMambaCache && !qwenHybridTqActive && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text={t('sessions.config.hybridStatefulHint')} />}
+        {!effectivelyNoBatching && !prefixOff && isMambaCache && !qwenHybridTqActive && !mixedSwaCacheActive && !dsv4Active && !m3Active && !nativeOmniStage1 && !openPanguExactTypedCache && <PerformanceHint text={t('sessions.config.hybridStatefulHint')} />}
         {!effectivelyNoBatching && dsv4Active && <PerformanceHint text={t('sessions.config.dsv4KvQuantHint')} />}
         {!effectivelyNoBatching && m3Active && <PerformanceHint text={t('sessions.config.m3KvQuantHint')} />}
         {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text={t('sessions.config.openPanguKvQuantHint')} />}
@@ -1535,6 +1537,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               step={2}
               defaultValue={8}
             />
+            {omniBackendVisible && <div data-vmlx-section="omni-video-controls-note"><InfoNote text={t('sessions.config.omniVideoControlsNote', { defaultOption: t('sessions.config.videoMaxPixelsDefault') })} /></div>}
             <Field settingKey="videoMaxPixels" label={t('sessions.config.videoMaxPixels')} tooltip={t('sessions.config.videoMaxPixelsTooltip')}>
               <select
                 className="cfg-input"
@@ -1543,11 +1546,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 onChange={e => onChange('videoMaxPixels', e.target.value ? Number(e.target.value) : undefined)}
               >
                 <option value="">{t('sessions.config.videoMaxPixelsDefault')}</option>
-                <option value="100352">128 px² · 100k ({t('sessions.config.videoMaxPixelsFastest')})</option>
-                <option value="200704">256 px² · 200k</option>
-                <option value="301056">301k</option>
-                <option value="401408">401k</option>
-                <option value="602112">602k ({t('sessions.config.videoMaxPixelsMax')})</option>
+                <option value="100352" disabled={omniBackendVisible}>128 px² · 100k ({t('sessions.config.videoMaxPixelsFastest')})</option>
+                <option value="200704" disabled={omniBackendVisible}>256 px² · 200k</option>
+                <option value="301056" disabled={omniBackendVisible}>301k</option>
+                <option value="401408" disabled={omniBackendVisible}>401k</option>
+                <option value="602112" disabled={omniBackendVisible}>602k ({t('sessions.config.videoMaxPixelsMax')})</option>
               </select>
             </Field>
             <Field settingKey="videoTokenBudget" label={t('sessions.config.videoTokenBudget')} tooltip={t('sessions.config.videoTokenBudgetTooltip')}>
@@ -1559,7 +1562,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               >
                 <option value="">{t('sessions.config.videoMaxPixelsDefault')}</option>
                 {[256, 512, 1024, 2048, 4096, 8192, 16384].map(n => (
-                  <option key={n} value={String(n)}>{n}</option>
+                  <option key={n} value={String(n)} disabled={omniBackendVisible}>{n}</option>
                 ))}
               </select>
             </Field>

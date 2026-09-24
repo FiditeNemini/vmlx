@@ -1330,7 +1330,8 @@ _REASONING_STRENGTH_BY_EFFORT = {
 
 
 def _merge_ct_kwargs(
-    request_kwargs: dict | None, reasoning_effort: str | None = None
+    request_kwargs: dict | None, reasoning_effort: str | None = None,
+    *, enable_thinking: bool | None = None,
 ) -> dict:
     """Merge server-wide default chat_template_kwargs with per-request overrides.
 
@@ -1346,6 +1347,14 @@ def _merge_ct_kwargs(
     wins — a caller who names the kwarg directly meant it.
     """
     base = dict(_default_chat_template_kwargs) if _default_chat_template_kwargs else {}
+    request_mode = (request_kwargs or {}).get("thinking_mode")
+    if request_mode in ("enabled", "disabled", "adaptive"):
+        # Remove only the inherited boolean alias, never a caller conflict.
+        base.pop("enable_thinking", None)
+    elif enable_thinking is not None and base.get("thinking_mode") in (
+        "enabled", "disabled", "adaptive"
+    ):
+        base.pop("thinking_mode", None)
     if request_kwargs:
         base.update(request_kwargs)
     if (
@@ -3763,6 +3772,7 @@ def _log_resolved_sampling_kwargs(
                 "reasoning_effort",
                 "reasoning_strength",
                 "thinking_budget",
+                "thinking_mode",
                 "enable_thinking",
             )
             if key in ct_kwargs
@@ -4134,6 +4144,8 @@ def _log_multimodal_request_shape(route: str, model_name: str, summary: dict) ->
 
 
 def _loaded_omni_modalities() -> list[str] | None:
+    if _force_text_only:
+        return None
     try:
         from .omni_multimodal import omni_multimodal_component_status
         _omni_path = _model_path or _model_name
@@ -4146,16 +4158,31 @@ def _loaded_omni_modalities() -> list[str] | None:
     return None
 
 
-def _loaded_block_disk_cache_enabled() -> bool:
-    """Return the effective loaded-engine L2 toggle for sidecar media caches."""
+def _loaded_disk_cache_config():
     engine = _engine
     config = getattr(engine, "_scheduler_config", None) if engine is not None else None
     if config is None and engine is not None:
-        scheduler = getattr(engine, "scheduler", None) or getattr(
-            engine, "_scheduler", None
-        )
+        scheduler = getattr(engine, "scheduler", None) or getattr(engine, "_scheduler", None)
         config = getattr(scheduler, "config", None)
-    return bool(getattr(config, "enable_block_disk_cache", False))
+    return config
+
+
+def _loaded_block_disk_cache_enabled() -> bool:
+    """Return the effective loaded-engine L2 toggle for sidecar media caches."""
+    return bool(getattr(_loaded_disk_cache_config(), "enable_block_disk_cache", False))
+
+
+def _loaded_omni_disk_cache_policy() -> dict[str, Any]:
+    config = _loaded_disk_cache_config()
+    return {
+        "root": str(Path(getattr(config, "block_disk_cache_dir", None) or
+                         Path.home() / ".cache" / "vmlx-engine" / "block-cache").expanduser()),
+        "max_size_bytes": int(float(getattr(config, "block_disk_cache_max_gb", 10.0)) * 1024**3),
+        # cache_ttl_minutes is a RAM-cache control; the app explicitly
+        # disables it in SSD-only mode. Do not turn a hidden/stale RAM value
+        # into an unexpected disk expiry. SSD retention needs its own control.
+        "ttl_minutes": 0.0,
+    }
 
 
 def _bundle_explicit_modality_flag(
@@ -4653,6 +4680,8 @@ def _loaded_mllm_modalities() -> list[str] | None:
 
 
 def _loaded_runtime_modalities() -> list[str]:
+    if _force_text_only:
+        return ["text"]
     modalities = _loaded_omni_modalities()
     if modalities is not None:
         return modalities
@@ -4816,6 +4845,19 @@ def _normalize_modality_set(modalities: set[str] | list[str] | tuple[str, ...]) 
     return normalized
 
 
+def _enforce_text_only_override(endpoint: str, requested_modalities: set[str]) -> None:
+    """Apply the operator override before any native media or fallback route."""
+    if _force_text_only and requested_modalities:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{endpoint} received {', '.join(sorted(requested_modalities))} media "
+                "while Force text-only (--text-only) is enabled. Restart the session "
+                "with multimodal mode Auto or On, or send a text-only conversation."
+            ),
+        )
+
+
 def _reject_unsupported_multimodal(
     endpoint: str,
     requested_modalities: set[str] | None = None,
@@ -4926,6 +4968,27 @@ def _resolve_enable_thinking(
         _family = str(model_key or "")
     _family_l = str(_family).lower()
 
+    native_mode = ct_kwargs.get("thinking_mode")
+    if native_mode in ("enabled", "disabled", "adaptive"):
+        native_modes = (getattr(_mc, "architecture_hints", None) or {}).get(
+            "native_thinking_modes", []
+        )
+        if native_mode not in native_modes or getattr(_mc, "supports_thinking", None) is False:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{_family} does not support native thinking_mode={native_mode!r}",
+            )
+        native_value = {"enabled": True, "disabled": False, "adaptive": None}[native_mode]
+        for value in (request_value, ct_kwargs.get("enable_thinking")):
+            if value is not None and value is not native_value:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"native thinking_mode={native_mode!r} conflicts with enable_thinking",
+                )
+        # A native per-request mode outranks server defaults and effort's
+        # generic boolean opt-in. Adaptive must reach its template unchanged.
+        return native_value
+
     def _reject_unsupported_instruct_mode(source: str) -> None:
         if _mc is None or getattr(_mc, "supports_instruct_mode", None) is not False:
             return
@@ -5024,6 +5087,31 @@ def _resolve_enable_thinking(
     if _supports_thinking and not _effort_disables:
         return True
     return None
+
+
+def _resolve_omni_reasoning_request(request):
+    """Apply the shared thinking policy before the native media early return.
+
+    Chat and Messages enter the media bridge before the ordinary generation
+    setup. Resolve a request copy so server defaults and normalized template
+    booleans reach that bridge without changing shared defaults or callers.
+    """
+    kwargs = _merge_ct_kwargs(
+        request.chat_template_kwargs,
+        request.reasoning_effort,
+        enable_thinking=request.enable_thinking,
+    )
+    enabled = _resolve_enable_thinking(
+        request_value=request.enable_thinking,
+        ct_kwargs=kwargs,
+        tools_present=bool(request.tools),
+        model_key=_model_path or _model_name or request.model,
+        reasoning_effort=request.reasoning_effort,
+    )
+    return request.model_copy(update={
+        "enable_thinking": enabled,
+        "chat_template_kwargs": kwargs,
+    })
 
 
 # Global MCP manager
@@ -13912,9 +14000,13 @@ async def health():
         if _omni_status.get("bundle_compatible"):
             result["omni_multimodal"] = {
                 "bundle_compatible": True,
+                "enabled": not _force_text_only,
+                "disabled_reason": "force_text_only" if _force_text_only else None,
                 "backend": OmniMultimodalDispatcher._pick_backend(),
-                "modalities": _omni_status.get("modalities")
-                or ["text", "audio", "image"],
+                "artifact_modalities": _omni_status.get("modalities") or ["text"],
+                "modalities": ["text"] if _force_text_only else (
+                    _omni_status.get("modalities") or ["text"]
+                ),
                 "components": {
                     "radio": bool(_omni_status.get("has_radio_weights")),
                     "parakeet": bool(_omni_status.get("has_parakeet_weights")),
@@ -13922,7 +14014,8 @@ async def health():
                 },
                 "session_l2": OmniMultimodalDispatcher.session_l2_status_for(
                     _omni_path,
-                    enabled=_loaded_block_disk_cache_enabled(),
+                    enabled=not _force_text_only and _loaded_block_disk_cache_enabled(),
+                    disk_cache_policy=_loaded_omni_disk_cache_policy(),
                 ),
             }
     except Exception:
@@ -14963,6 +15056,7 @@ def _cache_contract_render_and_tokenize(
     ct_kwargs = _merge_ct_kwargs(
         dry_request.chat_template_kwargs,
         getattr(dry_request, "reasoning_effort", None),
+        enable_thinking=dry_request.enable_thinking,
     )
     resolved_thinking = _resolve_enable_thinking(
         request_value=dry_request.enable_thinking,
@@ -16148,6 +16242,19 @@ async def clear_cache(
             except Exception:
                 pass
 
+    if clear_prefix_l2 or cache_type == "multimodal":
+        from .omni_multimodal import OmniMultimodalDispatcher, is_omni_multimodal_bundle
+        omni_path = _model_path or _model_name
+        if omni_path and is_omni_multimodal_bundle(omni_path):
+            try:
+                await OmniMultimodalDispatcher.clear_disk_cache_for(
+                    omni_path, disk_cache_policy=_loaded_omni_disk_cache_policy(),
+                )
+                cleared.append("omni_session_disk")
+            except Exception:
+                logger.exception("Native Omni SSD clear did not finish")
+                skipped.append("omni_session_disk:clear_failed")
+
     # Clear multimodal caches
     if cache_type in ("multimodal", "all"):
         try:
@@ -16165,11 +16272,15 @@ async def clear_cache(
 
     if not cleared:
         if skipped:
+            failed = any(tier.endswith(":clear_failed") for tier in skipped)
             return {
-                "status": "busy",
+                "status": "clear_failed" if failed else "busy",
                 "cache_type": cache_type,
                 "skipped": skipped,
-                "detail": "cache tiers are in use by live requests; retry when idle",
+                "detail": (
+                    "cache clearing failed; inspect server logs before retrying"
+                    if failed else "cache tiers are in use by live requests; retry when idle"
+                ),
             }
         return {"status": "no_caches_found", "cache_type": cache_type}
     result = {"status": "cleared", "caches": cleared, "cache_type": cache_type}
@@ -16429,6 +16540,7 @@ async def model_capabilities(model_id: str) -> dict:
     mimo_runtime_modalities = _mimo_v2_runtime_modalities(_model_path or model_key)
     if (
         modalities == ["text"]
+        and not _force_text_only
         and engine_is_mllm
         and family != "mimo_v2"
         and mimo_runtime_modalities is None
@@ -16537,15 +16649,52 @@ async def model_capabilities(model_id: str) -> dict:
 
     _capability_compat_warnings = list(quantization_status.get("compat_warnings", []))
 
+    # Text and native media share an endpoint, not a decoder/cache contract.
+    # Flat capability flags must be safe for either advertised route; clients
+    # that select text explicitly can inspect its more permissive contract.
+    text_cache = {
+        "prefix": prefix_cache_enabled,
+        "type": cache_type,
+        "paged": paged_cache_enabled,
+        "block_disk_l2": block_disk_store is not None,
+        "block_disk_only": block_disk_only,
+        "dsv4_composite_state": dsv4_composite_state,
+        "native": native_cache or None,
+    }
+    text_supports_budget = family in _THINKING_BUDGET_CAP_FAMILIES
+    request_routes = {"text": {
+        "selection": "text_only_conversation",
+        "modalities": ["text"],
+        "supports_thinking_budget": text_supports_budget,
+        "supports_tools": bool(tool_parser),
+        "cache": text_cache,
+    }}
+    native_media = None
+    omni_modalities = _loaded_omni_modalities()
+    if omni_modalities is not None:
+        from .omni_multimodal import OmniMultimodalDispatcher
+        from .omni_native_controls import native_media_capability_contract
+
+        native_media = native_media_capability_contract(
+            backend=OmniMultimodalDispatcher._pick_backend(),
+            modalities=omni_modalities,
+            disk_enabled=_loaded_block_disk_cache_enabled(),
+            disk_policy=_loaded_omni_disk_cache_policy(),
+        )
+        request_routes["native_media"] = native_media
+
     return {
         "id": model_id,
         "loaded_model": _resolve_model_name(),
         "model_path": _model_path,
         "family": family,
         "compat_warnings": _capability_compat_warnings,
-        "supports_tools": bool(tool_parser),
+        "supports_tools": bool(tool_parser) and (native_media is None or native_media["supports_tools"]),
         "tool_parser": tool_parser,
         "supports_thinking": supports_thinking,
+        "native_thinking_modes": list(
+            (getattr(cfg, "architecture_hints", None) or {}).get("native_thinking_modes", [])
+        ) if supports_thinking else [],
         # The panel gates its Max Thinking Tokens control on this key
         # (remoteModelCapabilities.ts reads `supports_thinking_budget` /
         # `thinking_budget_supported`, ChatSettings renders the field only when
@@ -16554,7 +16703,7 @@ async def model_capabilities(model_id: str) -> dict:
         # REMOTE session the control simply never appeared, for every family
         # that honours a thinking budget. Locally the panel reads its registry
         # instead, which is why this went unnoticed.
-        "supports_thinking_budget": family in _THINKING_BUDGET_CAP_FAMILIES,
+        "supports_thinking_budget": text_supports_budget and native_media is None,
         "supports_instruct_mode": supports_instruct_mode,
         "reasoning_parser": reasoning_parser,
         "think_in_template": think_in_template,
@@ -16564,14 +16713,10 @@ async def model_capabilities(model_id: str) -> dict:
         "default_reasoning_effort": default_reasoning_effort,
         "modalities": modalities,
         "media": _loaded_media_capability_status(modalities),
+        **({"request_routes": request_routes} if native_media else {}),
         "cache": {
-            "prefix": prefix_cache_enabled,
-            "type": cache_type,
-            "paged": paged_cache_enabled,
-            "block_disk_l2": block_disk_store is not None,
-            "block_disk_only": block_disk_only,
-            "dsv4_composite_state": dsv4_composite_state,
-            "native": native_cache or None,
+            **text_cache,
+            **({"scope": "text", "native_media": native_media["cache"]} if native_media else {}),
         },
         "quantization": quantization_status,
         "acceleration": acceleration_status,
@@ -16643,6 +16788,7 @@ async def create_anthropic_message(
         )
     try:
         anthropic_req = AnthropicRequest(**body)
+        chat_req = to_chat_completion(anthropic_req)
     except Exception as e:
         return JSONResponse(
             status_code=400,
@@ -16651,9 +16797,6 @@ async def create_anthropic_message(
                 "error": {"type": "invalid_request_error", "message": str(e)},
             },
         )
-
-    # Convert to chat completion request
-    chat_req = to_chat_completion(anthropic_req)
 
     # Resolve model name
     resolved_name = _resolve_model_name()
@@ -16676,6 +16819,9 @@ async def create_anthropic_message(
     # actually seeing the image. Mirrors the dispatch in
     # `create_chat_completion` at server.py:5295-5311.
     try:
+        _enforce_text_only_override(
+            "/v1/messages", _messages_requested_modalities(chat_req.messages)
+        )
         from .omni_multimodal import (
             is_omni_multimodal_bundle,
             request_has_multimodal,
@@ -16695,9 +16841,10 @@ async def create_anthropic_message(
             # path can then re-wrap into Anthropic's content_block format.
             from .api.anthropic_adapter import to_anthropic_response
             cc = await dispatch_omni_chat_completion(
-                chat_req,
+                _resolve_omni_reasoning_request(chat_req),
                 _omni_path,
                 disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+                disk_cache_policy=_loaded_omni_disk_cache_policy(),
                 effective_max_tokens=_resolve_max_tokens(
                     chat_req.max_tokens, chat_req.model
                 ),
@@ -16761,13 +16908,29 @@ async def create_anthropic_message(
 
                 return _SR(_adapt_omni_stream(), media_type="text/event-stream")
             return cc
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        # Omni validates controls before streaming starts. Keep that rejection
+        # in the native Messages error envelope, rather than FastAPI's detail
+        # object, so SDKs can read the actual constraint and status.
+        return JSONResponse(
+            status_code=exc.status_code,
+            headers=exc.headers,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "api_error" if exc.status_code >= 500 else "invalid_request_error",
+                    "message": str(exc.detail),
+                },
+            },
+        )
     except Exception as _omni_route_err:  # pragma: no cover
-        logger.warning(
-            "Omni multimodal dispatch failed in /v1/messages (%s); "
-            "falling back to standard path",
-            _omni_route_err,
+        logger.exception("Omni multimodal dispatch failed in /v1/messages")
+        return JSONResponse(
+            status_code=500,
+            content={"type": "error", "error": {
+                "type": "api_error",
+                "message": f"Omni multimodal dispatch failed: {_omni_route_err}",
+            }},
         )
 
     engine = get_engine()
@@ -16818,6 +16981,7 @@ async def create_anthropic_message(
     _ct_kwargs = _merge_ct_kwargs(
         chat_req.chat_template_kwargs,
         getattr(chat_req, "reasoning_effort", None),
+        enable_thinking=chat_req.enable_thinking,
     )
     _msg_tool_choice = chat_req.tool_choice
     _msg_effective_tools = _request_tools_for_generation_prompt(chat_req)
@@ -17693,6 +17857,9 @@ async def ollama_chat(fastapi_request: Request):
         _model_path or _model_name or chat_req.model,
         _messages_multimodal_summary(chat_req.messages),
     )
+    _enforce_text_only_override(
+        "/api/chat", _messages_requested_modalities(chat_req.messages)
+    )
     _ollama_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
 
     _ollama_wake_ns = int(getattr(fastapi_request.state, "vmlx_wake_ns", 0) or 0)
@@ -17769,6 +17936,7 @@ async def ollama_chat(fastapi_request: Request):
     _ollama_ct_kwargs = _merge_ct_kwargs(
         chat_req.chat_template_kwargs,
         getattr(chat_req, "reasoning_effort", None),
+        enable_thinking=chat_req.enable_thinking,
     )
     _et = _resolve_enable_thinking(
         request_value=chat_req.enable_thinking,
@@ -19855,6 +20023,9 @@ async def create_chat_completion(
         _messages_multimodal_summary(request.messages),
     )
 
+    _enforce_text_only_override(
+        "/v1/chat/completions", _messages_requested_modalities(request.messages)
+    )
     _chat_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
     if request.logprobs:
@@ -19890,9 +20061,10 @@ async def create_chat_completion(
             )
         ):
             return await dispatch_omni_chat_completion(
-                request,
+                _resolve_omni_reasoning_request(request),
                 _omni_path,
                 disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+                disk_cache_policy=_loaded_omni_disk_cache_policy(),
                 effective_max_tokens=_resolve_max_tokens(
                     request.max_tokens, request.model
                 ),
@@ -19904,10 +20076,8 @@ async def create_chat_completion(
     except HTTPException:
         raise
     except Exception as _omni_route_err:  # pragma: no cover
-        logger.warning(
-            "Omni multimodal dispatch failed (%s); falling back to standard path",
-            _omni_route_err,
-        )
+        logger.exception("Omni multimodal dispatch failed")
+        raise HTTPException(status_code=500, detail=f"Omni multimodal dispatch failed: {_omni_route_err}") from _omni_route_err
 
     # Reject empty prompts with a clear 400 instead of letting mlx-vlm
     # crash inside stream_generate with ValueError:
@@ -20055,6 +20225,7 @@ async def create_chat_completion(
     _ct_kwargs = _merge_ct_kwargs(
         request.chat_template_kwargs,
         getattr(request, "reasoning_effort", None),
+        enable_thinking=request.enable_thinking,
     )
     _explicit_thinking_off = request.enable_thinking is False or (
         _ct_kwargs.get("enable_thinking") is False
@@ -21983,6 +22154,7 @@ def _responses_input_to_messages(
     instructions: str | None = None,
     preserve_multimodal: bool = False,
     preserve_native_roles: bool = False,
+    strict_tool_arguments: bool = False,
 ) -> list[dict]:
     """Convert Responses API input to chat messages format.
 
@@ -22180,7 +22352,13 @@ def _responses_input_to_messages(
             # Parse arguments to dict — chat templates (Qwen3, Llama, etc.)
             # call .items() on arguments, so they must be a mapping, not a string
             args_raw = item.get("arguments", "{}")
-            if isinstance(args_raw, str):
+            if strict_tool_arguments:
+                from .omni_native_tools import _object_arguments
+                try:
+                    args_parsed = _object_arguments(args_raw)
+                except (TypeError, ValueError) as error:
+                    raise HTTPException(400, f"Invalid native tool history arguments: {error}") from error
+            elif isinstance(args_raw, str):
                 try:
                     args_parsed = json.loads(args_raw)
                 except (json.JSONDecodeError, TypeError):
@@ -22661,10 +22839,11 @@ def _adapt_omni_chat_completion_to_responses_payload(
     message = choice.get("message") or {}
     visible_text = message.get("content") or ""
     reasoning_text = message.get("reasoning_content") or ""
+    tool_calls = message.get("tool_calls") or []
     finish_reason = choice.get("finish_reason")
     terminal = _responses_terminal_state(
         finish_reason,
-        reasoning_only_no_content=bool(reasoning_text and not visible_text),
+        reasoning_only_no_content=bool(reasoning_text and not visible_text and not tool_calls),
     )
     usage = chat_completion.get("usage") or {}
 
@@ -22681,7 +22860,7 @@ def _adapt_omni_chat_completion_to_responses_payload(
                 "content": [],
             }
         )
-    if visible_text or not reasoning_text:
+    if visible_text or (not reasoning_text and not tool_calls):
         output.append(
             {
                 "type": "message",
@@ -22698,6 +22877,14 @@ def _adapt_omni_chat_completion_to_responses_payload(
             }
         )
 
+    for call in tool_calls:
+        function = call["function"]
+        output.append({
+            "id": f"fc_{uuid.uuid4().hex[:12]}", "type": "function_call",
+            "status": terminal.item_status, "call_id": call["id"],
+            "name": function["name"], "arguments": function["arguments"],
+        })
+
     payload = {
         "id": f"resp_{uuid.uuid4().hex[:12]}",
         "object": "response",
@@ -22710,12 +22897,14 @@ def _adapt_omni_chat_completion_to_responses_payload(
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
+            **({"input_tokens_details": dict(usage["prompt_tokens_details"])}
+               if isinstance(usage.get("prompt_tokens_details"), dict) else {}),
         },
     }
     if terminal.incomplete_details:
         payload["incomplete_details"] = terminal.incomplete_details
     reasoning_only_warnings = _current_response_warnings_for_reasoning_only(
-        bool(reasoning_text and not visible_text),
+        bool(reasoning_text and not visible_text and not tool_calls),
         finish_reason,
     )
     if reasoning_only_warnings:
@@ -22741,6 +22930,7 @@ async def _adapt_omni_chat_stream_to_responses(
     reasoning_item_finished = False
     reasoning_item: dict | None = None
     output_items_by_index: dict[int, dict] = {}
+    tool_items: dict[int, tuple[int, dict]] = {}
     created_at = int(time.time())
     seq = 0
 
@@ -22903,6 +23093,7 @@ async def _adapt_omni_chat_stream_to_responses(
 
     async def _handle_payload(payload: dict) -> AsyncIterator[str]:
         nonlocal reasoning_text, content_text, finish_reason, usage, stream_failed
+        nonlocal next_output_index
         if isinstance(payload.get("error"), dict):
             stream_failed = True
             error = payload["error"]
@@ -22957,6 +23148,34 @@ async def _adapt_omni_chat_stream_to_responses(
                         "delta": content_delta,
                     },
                 )
+            for call in delta.get("tool_calls") or []:
+                if reasoning_item_started and not reasoning_item_finished:
+                    for event in _finish_reasoning_item_events(reasoning_text):
+                        yield event
+                call_index = int(call.get("index", 0))
+                function = call.get("function") or {}
+                if call_index not in tool_items:
+                    output_index = next_output_index
+                    next_output_index += 1
+                    item = {
+                        "id": f"fc_{uuid.uuid4().hex[:12]}", "type": "function_call",
+                        "status": "in_progress", "call_id": call["id"],
+                        "name": function["name"], "arguments": "",
+                    }
+                    tool_items[call_index] = (output_index, item)
+                    yield _sse("response.output_item.added", {
+                        "type": "response.output_item.added", "output_index": output_index,
+                        "item": dict(item),
+                    })
+                output_index, item = tool_items[call_index]
+                arguments = function.get("arguments") or ""
+                if arguments:
+                    item["arguments"] += arguments
+                    yield _sse("response.function_call_arguments.delta", {
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": item["id"], "output_index": output_index,
+                        "delta": arguments,
+                    })
             if choice.get("finish_reason"):
                 finish_reason = str(choice["finish_reason"])
         chat_usage = payload.get("usage")
@@ -22970,6 +23189,8 @@ async def _adapt_omni_chat_stream_to_responses(
                     chat_usage.get("total_tokens")
                     or prompt_tokens + completion_tokens
                 ),
+                **({"input_tokens_details": dict(chat_usage["prompt_tokens_details"])}
+                   if isinstance(chat_usage.get("prompt_tokens_details"), dict) else {}),
             }
 
     async for raw in chat_stream.body_iterator:
@@ -23013,7 +23234,7 @@ async def _adapt_omni_chat_stream_to_responses(
 
     reasoning_text = reasoning_text.strip()
     content_text = content_text.strip()
-    if reasoning_text and not content_text:
+    if reasoning_text and not content_text and not tool_items:
         reasoning_only_warning = _current_response_warnings_for_reasoning_only(
             True,
             finish_reason,
@@ -23029,7 +23250,7 @@ async def _adapt_omni_chat_stream_to_responses(
 
     terminal = _responses_terminal_state(
         finish_reason,
-        reasoning_only_no_content=bool(reasoning_text and not content_text),
+        reasoning_only_no_content=bool(reasoning_text and not content_text and not tool_items),
     )
     if reasoning_text:
         for event in _finish_reasoning_item_events(
@@ -23037,7 +23258,7 @@ async def _adapt_omni_chat_stream_to_responses(
             status=terminal.item_status,
         ):
             yield event
-    if content_text or not reasoning_text:
+    if content_text or message_item_started or (not reasoning_text and not tool_items):
         for event in _start_message_item_events():
             yield event
         message_item = {
@@ -23087,6 +23308,18 @@ async def _adapt_omni_chat_stream_to_responses(
             raise RuntimeError("Omni message item finalized before allocation")
         output_items_by_index[message_output_index] = message_item
 
+    for output_index, item in tool_items.values():
+        item["status"] = terminal.item_status
+        yield _sse("response.function_call_arguments.done", {
+            "type": "response.function_call_arguments.done", "item_id": item["id"],
+            "output_index": output_index, "arguments": item["arguments"],
+        })
+        yield _sse("response.output_item.done", {
+            "type": "response.output_item.done", "output_index": output_index,
+            "item": item,
+        })
+        output_items_by_index[output_index] = item
+
     output_items = [
         output_items_by_index[index] for index in sorted(output_items_by_index)
     ]
@@ -23110,7 +23343,7 @@ async def _adapt_omni_chat_stream_to_responses(
             response_id,
             (history_messages or [])
             + _responses_output_to_assistant_messages(output_items),
-            reasoning_only=bool(reasoning_text and not content_text),
+            reasoning_only=bool(reasoning_text and not content_text and not tool_items),
         )
     yield _sse(
         terminal.event_type,
@@ -23189,6 +23422,7 @@ async def create_response(
     engine = get_engine()
     _responses_has_media = _responses_input_has_multimodal(request.input)
     _responses_requested_modalities = _responses_input_requested_modalities(request.input)
+    _enforce_text_only_override("/v1/responses", _responses_requested_modalities)
     _log_multimodal_request_shape(
         "/v1/responses",
         _model_path or _model_name or request.model,
@@ -23229,6 +23463,7 @@ async def create_response(
     # for omni bundles too, otherwise input_image gets collapsed to text and the
     # encoder never sees the image.
     _preserve_mm = bool(engine.is_mllm)
+    _native_omni_resp = False
     if not _preserve_mm:
         _resp_modalities_for_preserve = _responses_input_requested_modalities(request.input)
         if _m3_vl_response_media_supported(engine, _resp_modalities_for_preserve):
@@ -23239,6 +23474,7 @@ async def create_response(
             _omni_path_resp = _model_path or _model_name
             if _omni_path_resp and is_omni_multimodal_bundle(_omni_path_resp):
                 _preserve_mm = True
+                _native_omni_resp = True
         except Exception:
             pass
     # Responses ``instructions`` are request-scoped. OpenAI's chaining
@@ -23251,15 +23487,20 @@ async def create_response(
         None,
         preserve_multimodal=_preserve_mm,
         preserve_native_roles=_preserves_native_developer_role(request.model),
+        strict_tool_arguments=_native_omni_resp,
     )
     messages = _responses_input_to_messages(
         request.input,
         request.instructions,
         preserve_multimodal=_preserve_mm,
         preserve_native_roles=_preserves_native_developer_role(request.model),
+        strict_tool_arguments=_native_omni_resp,
     )
     if request.previous_response_id:
         previous_messages = _responses_get_history(request.previous_response_id)
+        _enforce_text_only_override(
+            "/v1/responses", _messages_requested_modalities(previous_messages)
+        )
         if previous_messages and _responses_should_scrub_multimodal_history_for_followup(
             request.input,
             current_request_has_media=_responses_has_media,
@@ -23282,7 +23523,7 @@ async def create_response(
                 request.previous_response_id,
             )
     messages = _canonicalize_mimo_v26_tool_history(messages)
-    if _preserve_mm:
+    if _preserve_mm and not _native_omni_resp:
         messages = _coerce_orphan_tool_messages_for_template(messages)
     if engine.is_mllm and _should_coerce_zaya_vl_tool_history(request.model):
         messages = _coerce_zaya_vl_tool_history_for_template(messages)
@@ -23327,12 +23568,20 @@ async def create_response(
         history_messages,
         preserve_native_order=_preserves_native_system_order(request.model),
     )
+    if _native_omni_resp:
+        from .omni_native_tools import prepare_native_tools
+        # Chained request instructions initially follow the saved assistant
+        # call. Normalize their system position before checking result batches;
+        # generic orphan coercion must not erase malformed native history.
+        messages = prepare_native_tools(None, None, messages).messages
+        history_messages = prepare_native_tools(None, None, history_messages).messages
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
     # Strip <think> blocks from history when thinking is OFF (same as Chat Completions path)
     _ct_kwargs = _merge_ct_kwargs(
         request.chat_template_kwargs,
         getattr(request, "reasoning_effort", None),
+        enable_thinking=request.enable_thinking,
     )
     _explicit_thinking_off = request.enable_thinking is False or (
         _ct_kwargs.get("enable_thinking") is False
@@ -23720,11 +23969,27 @@ async def create_response(
                 stream=bool(request.stream),
                 enable_thinking=request.enable_thinking,
                 reasoning_effort=request.reasoning_effort,
+                max_thinking_tokens=request.max_thinking_tokens,
+                chat_template_kwargs=_ct_kwargs,
+                skip_prefix_cache=request.skip_prefix_cache,
+                cache_salt=request.cache_salt,
+                tools=all_tools or None,
+                tool_choice=_tool_choice,
+                response_format=_response_text_format,
+                top_k=request.top_k,
+                min_p=request.min_p,
+                repetition_penalty=request.repetition_penalty,
+                frequency_penalty=request.frequency_penalty,
+                presence_penalty=request.presence_penalty,
+                seed=request.seed,
+                stop=request.stop,
+                **video_control_kwargs(request),
             )
             cc = await _omni_dispatch_resp(
-                _cc_req,
+                _resolve_omni_reasoning_request(_cc_req),
                 _omni_path_dispatch,
                 disk_cache_enabled=_loaded_block_disk_cache_enabled(),
+                disk_cache_policy=_loaded_omni_disk_cache_policy(),
                 effective_max_tokens=chat_kwargs["max_tokens"],
                 effective_temperature=chat_kwargs["temperature"],
                 effective_top_p=chat_kwargs["top_p"],
@@ -23767,16 +24032,23 @@ async def create_response(
                     cc_dict,
                     resolved_name,
                 )
+                if _resp_payload.get("status") == "completed":
+                    _native_output = _resp_payload.get("output") or []
+                    _responses_store_history(
+                        _resp_payload["id"],
+                        (history_messages if history_messages is not None else messages)
+                        + _responses_output_to_assistant_messages(_native_output),
+                        reasoning_only=bool(_native_output) and all(
+                            item.get("type") == "reasoning" for item in _native_output
+                        ),
+                    )
                 return _JR2(content=_resp_payload)
             return cc
     except HTTPException:
         raise
     except Exception as _omni_resp_err:  # pragma: no cover
-        logger.warning(
-            "Omni dispatch failed in /v1/responses (%s); "
-            "falling back to text-only LLM path.",
-            _omni_resp_err,
-        )
+        logger.exception("Omni multimodal dispatch failed in /v1/responses")
+        raise HTTPException(status_code=500, detail=f"Omni multimodal dispatch failed: {_omni_resp_err}") from _omni_resp_err
 
     if request.stream:
         return StreamingResponse(
@@ -25333,6 +25605,7 @@ async def stream_chat_completion(
     _ct_kwargs = _merge_ct_kwargs(
         request.chat_template_kwargs,
         getattr(request, "reasoning_effort", None),
+        enable_thinking=request.enable_thinking,
     )
     _effective_thinking = _resolve_enable_thinking(
         request_value=request.enable_thinking,
@@ -27964,6 +28237,7 @@ async def stream_responses_api(
     _ct_kwargs = _merge_ct_kwargs(
         request.chat_template_kwargs,
         getattr(request, "reasoning_effort", None),
+        enable_thinking=request.enable_thinking,
     )
     _effective_thinking = _resolve_enable_thinking(
         request_value=request.enable_thinking,

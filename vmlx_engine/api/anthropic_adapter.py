@@ -52,7 +52,7 @@ from .models import (
 
 
 class AnthropicThinking(BaseModel):
-    type: str = "enabled"  # "enabled" or "disabled"
+    type: Literal["enabled", "disabled", "adaptive"]
     budget_tokens: int | None = Field(default=None, strict=True, ge=1)
 
 
@@ -87,7 +87,7 @@ class AnthropicRequest(BaseModel):
     stream: bool = False
     tools: list[AnthropicToolInput | dict] | None = None
     tool_choice: dict | None = None
-    thinking: AnthropicThinking | dict | None = None
+    thinking: AnthropicThinking | None = None
     output_config: AnthropicOutputConfig | None = None
     metadata: dict | None = None
     # vMLX extension: per-request prompt/context admission cap. The engine
@@ -136,6 +136,18 @@ class AnthropicRequest(BaseModel):
     image_resized_height: int | None = None
     image_resized_width: int | None = None
     media_controls_strict: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_adaptive_controls(self):
+        if self.thinking and self.thinking.type == "adaptive":
+            if self.thinking.budget_tokens is not None:
+                raise ValueError("thinking.budget_tokens is not supported with adaptive thinking")
+            kwargs = self.chat_template_kwargs or {}
+            if self.enable_thinking is not None or kwargs.get("enable_thinking") is not None:
+                raise ValueError("adaptive thinking conflicts with enable_thinking")
+            if kwargs.get("thinking_mode") not in (None, "adaptive"):
+                raise ValueError("adaptive thinking conflicts with chat_template_kwargs.thinking_mode")
+        return self
 
     @model_validator(mode="after")
     def validate_native_effort_aliases(self):
@@ -298,6 +310,12 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
         elif thinking.get("type") == "disabled":
             enable_thinking = False
             _thinking_source_seen = True
+        elif thinking.get("type") == "adaptive":
+            enable_thinking = None
+            if chat_template_kwargs is None:
+                chat_template_kwargs = {}
+            chat_template_kwargs["thinking_mode"] = "adaptive"
+            _thinking_source_seen = True
     # Explicit enable_thinking (highest prio)
     if req.enable_thinking is not None:
         enable_thinking = req.enable_thinking
@@ -431,6 +449,25 @@ def _convert_user_message(msg: dict) -> Message | list[Message]:
             if not isinstance(block, dict):
                 continue
             block_type = block.get("type", "text")
+
+            if block_type in {"image", "video", "video_url", "audio", "input_audio"}:
+                # These Messages media extensions use the native source
+                # envelope. A Chat-style payload here used to silently lose
+                # its media and continue as a successful text-only request.
+                source = block.get("source")
+                if not isinstance(source, dict):
+                    raise ValueError(
+                        f"{block_type} requires a source object with type base64 or url"
+                    )
+                source_type = source.get("type")
+                payload_key = {"base64": "data", "url": "url"}.get(source_type)
+                if payload_key is None:
+                    raise ValueError(f"{block_type}.source.type must be base64 or url")
+                payload = source.get(payload_key)
+                if not isinstance(payload, str) or not payload.strip():
+                    raise ValueError(
+                        f"{block_type}.source.{payload_key} must be a nonempty string"
+                    )
 
             if block_type == "tool_result":
                 # Convert to tool response message
@@ -635,6 +672,9 @@ def _anthropic_usage(usage: dict) -> dict:
     }
     cached = _cached_prompt_tokens(usage)
     if cached:
+        # Chat prompt_tokens includes reused tokens; Anthropic input_tokens
+        # is the uncached portion. The three input categories are disjoint.
+        out["input_tokens"] = max(0, out["input_tokens"] - cached)
         out["cache_read_input_tokens"] = cached
         out["cache_creation_input_tokens"] = 0
     return out
@@ -1017,13 +1057,12 @@ class AnthropicStreamAdapter:
         # message_delta with final usage (include input_tokens since message_start
         # emits 0 — prompt tokens aren't known until the final streaming chunk)
         usage = {"output_tokens": self._output_tokens}
-        if self._input_tokens > 0:
-            usage["input_tokens"] = self._input_tokens
-        if self._cached_tokens > 0:
-            # Anthropic clients read this to show how much of the prompt was
-            # served from cache; omitting it makes a reused prefix look cold.
-            usage["cache_read_input_tokens"] = self._cached_tokens
-            usage["cache_creation_input_tokens"] = 0
+        if self._input_tokens > 0 or self._cached_tokens > 0:
+            usage.update(_anthropic_usage({
+                "prompt_tokens": self._input_tokens,
+                "completion_tokens": self._output_tokens,
+                "prompt_tokens_details": {"cached_tokens": self._cached_tokens},
+            }))
         events.append(self._sse("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},

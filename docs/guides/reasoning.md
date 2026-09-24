@@ -57,6 +57,31 @@ Budget enforcement depends on the loaded runtime's
 `supports_thinking_budget` capability. An accepted field alone does not prove
 that a model supports a thinking-token cap. Total output limits remain separate.
 
+Nemotron Omni's multimodal session supports a total output limit, but no
+separate thinking-token cap. Its route rejects explicit thinking budgets with
+HTTP 400 before loading the multimodal components; omit that field and use the
+protocol's total output-token limit.
+
+### Native adaptive thinking
+
+The loaded model's `/v1/capabilities` response lists `native_thinking_modes`.
+For a model that advertises `adaptive`, Chat Completions and Responses accept
+`"thinking_mode": "adaptive"`; Anthropic Messages accepts
+`"thinking": {"type": "adaptive"}`. This explicitly selects the model's native
+decision about when to think. Omitting the control still uses the server and
+model defaults.
+
+MLX Studio shows an **Adaptive** option in Chat Settings only when the detected
+runtime advertises support. Saving it preserves the choice through tool
+continuations. **Auto** inherits defaults; **On** requests thinking each turn;
+**Off** selects the supported direct-answer mode. Reset clears the override.
+
+MiniMax-M3 supports native enabled, disabled and adaptive modes. An explicit
+native mode overrides inherited server defaults. Conflicting per-request
+boolean controls return an error, as does selecting a native mode unsupported
+by the loaded family. Anthropic adaptive thinking does not accept the legacy
+`thinking.budget_tokens` field. A thinking block is optional in adaptive mode.
+
 ### Start the Server with Reasoning Parser
 
 The easiest way is to use `auto`, which detects the correct parser from the model name:

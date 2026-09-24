@@ -46,19 +46,21 @@ def _write_omni_bundle(
         json.dumps({"sound_config": {"model_type": sound_model_type}})
     )
     (tmp_path / "configuration_radio.py").write_text("# radio config placeholder\n")
-    weight_map = {}
+    import numpy as np
+    from safetensors.numpy import save_file
+    shapes = {}
     if radio:
-        weight_map[
-            "vision_model.radio_model.model.blocks.0.attn.qkv.weight"
-        ] = "model.safetensors"
+        shapes["vision_model.radio_model.model.blocks.0.attn.qkv.weight"] = (12, 4)
+        shapes["vision_model.radio_model.model.patch_generator.embedder.weight"] = (4, 3)
     if parakeet:
-        weight_map[
-            "sound_encoder.encoder.layers.0.conv.depthwise_conv.weight"
-        ] = "model.safetensors"
+        shapes["sound_encoder.encoder.layers.0.conv.depthwise_conv.weight"] = (3, 3)
     if projector:
-        weight_map["mlp1.0.weight"] = "model.safetensors"
+        shapes.update({"mlp1.0.weight": (4,), "mlp1.1.weight": (8, 4), "mlp1.3.weight": (6, 8),
+                       "sound_projection.norm.weight": (3,), "sound_projection.linear1.weight": (5, 3),
+                       "sound_projection.linear2.weight": (6, 5)})
+    save_file({k: np.zeros(shape, dtype=np.float16) for k,shape in shapes.items()}, str(tmp_path / "model.safetensors"))
     (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": weight_map})
+        json.dumps({"weight_map": {k: "model.safetensors" for k in shapes}})
     )
     if video_preprocessor:
         (tmp_path / "video_preprocessor_config.json").write_text(
@@ -203,6 +205,7 @@ def test_omni_dispatcher_sets_thinking_flag_on_first_session_turn(tmp_path):
 
     dispatcher = OmniMultimodalDispatcher.__new__(OmniMultimodalDispatcher)
     dispatcher.bundle_path = "/fake"
+    dispatcher._backend = "stage1"
     dispatcher._session = _FakeSession()
     dispatcher._lock = __import__("threading").Lock()
     dispatcher._last_signature = None
@@ -298,7 +301,7 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         def reset(self):
             pass
 
-        def schedule_session_l2_persist(self):
+        def finish_request_cache(self):
             self.persist_calls += 1
             return None
 
@@ -336,6 +339,8 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         top_p = 1
         chat_template_kwargs = {}
         enable_thinking = True
+        skip_prefix_cache = True
+        cache_salt = "isolated-request"
 
     response = await dispatch_omni_chat_completion(
         _Request(),
@@ -370,10 +375,14 @@ async def test_omni_stream_emits_generation_time_reasoning_content_and_usage(
         "completion_tokens": 5,
         "total_tokens": 28,
     }
-    assert dispatcher.persist_calls == 1
+    # Both bypass spellings above prohibit publication as well as reuse.
+    assert dispatcher.persist_calls == 0
     assert captured["max_tokens"] == 16_384
     assert captured["temperature"] == 0.6
     assert captured["top_p"] == 0.95
+
+    assert captured["force_reset"] is True
+    assert captured["cache_salt"] == "isolated-request"
 
 
 def test_omni_dispatcher_uses_one_persistent_native_runtime_owner_thread():
@@ -432,6 +441,8 @@ def test_omni_session_l2_roundtrips_the_NATIVE_representation(tmp_path):
     dispatcher._last_signature = "media-prefix-a"
     dispatcher._session_l2_fingerprint = "bundle-a"
     dispatcher._session_l2_path = tmp_path / "latest.safetensors"
+    dispatcher._session_l2_policy = {"root": str(tmp_path), "max_size_bytes": 10000000}
+    dispatcher._session_l2_store = None
     dispatcher._session_l2_stats = {
         "stores": 0,
         "hits": 0,
@@ -464,6 +475,8 @@ def test_omni_session_l2_roundtrips_the_NATIVE_representation(tmp_path):
     restored._last_signature = None
     restored._session_l2_fingerprint = "bundle-a"
     restored._session_l2_path = dispatcher._session_l2_path
+    restored._session_l2_policy = dispatcher._session_l2_policy
+    restored._session_l2_store = None
     restored._session_l2_stats = {
         "stores": 0,
         "hits": 0,
@@ -505,6 +518,8 @@ def test_omni_session_l2_rejects_a_different_media_prefix(tmp_path):
     dispatcher._last_signature = None
     dispatcher._session_l2_fingerprint = "bundle-a"
     dispatcher._session_l2_path = tmp_path / "latest.safetensors"
+    dispatcher._session_l2_policy = {"root": str(tmp_path), "max_size_bytes": 10000000}
+    dispatcher._session_l2_store = None
     dispatcher._session_l2_stats = {
         "stores": 0,
         "hits": 0,
@@ -632,7 +647,7 @@ def test_omni_conversation_signature_salts_audio_bytes():
     assert _hash_user_texts(orange) != _hash_user_texts(blue)
 
 
-def test_omni_dispatcher_resets_when_replayed_prefix_media_changes(tmp_path):
+def test_omni_dispatcher_resets_when_replayed_prefix_media_changes(tmp_path, monkeypatch):
     class _Session:
         def __init__(self):
             self.reset_count = 0
@@ -677,8 +692,19 @@ def test_omni_dispatcher_resets_when_replayed_prefix_media_changes(tmp_path):
         {"role": "assistant", "content": "READY"},
         {"role": "user", "content": "Repeat the marker."},
     ]
+    # This fixture has no encoders. Capture the full-history handoff while
+    # preserving the original changed-media extraction assertion below.
+    replayed = []
+    def replay(session, messages, **kwargs):
+        replayed.append(messages)
+        text, images, audio, video = _extract_parts(
+            messages, tmp_path, rehydrate_history_media=True,
+        )
+        return session.turn(text=text, images=images, audio=audio, video=video)
+    monkeypatch.setattr("vmlx_engine.omni_multimodal._run_omni_full_history", replay)
     dispatcher.chat(changed_media_history)
 
+    assert replayed == [changed_media_history]
     assert dispatcher._session.reset_count == 2
     assert dispatcher._session.turns[-1]["audio"] is not None
     assert dispatcher._session.turns[-1]["audio"].read_bytes() == b"BLUE"

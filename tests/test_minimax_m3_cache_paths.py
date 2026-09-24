@@ -604,6 +604,10 @@ def test_scheduler_memory_aware_m3_store_also_writes_prompt_disk_l2(monkeypatch)
             disk_stores.append((list(tokens), cache, cache_type))
             return True
 
+        def flush_pending_writes(self, tokens, cache_extra_keys=None):
+            assert list(tokens) == disk_stores[-1][0]
+            return True
+
     scheduler = object.__new__(Scheduler)
     scheduler.running = {request.request_id: request}
     scheduler.requests = {request.request_id: request}

@@ -4,6 +4,13 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.66] - 2026-09-24
+
+- Prompt SSD cache: preserve BF16 payloads losslessly at native 16-bit width, reducing their stored tensor bytes by half. Existing cache files remain readable; native FP32, FP16 and packed states retain their formats.
+- Tool continuations: wait for queued prompt-cache writes to finish before terminal delivery and report failed or immediately evicted snapshots accurately. Prompt SSD mode retains zero application RAM cache entries.
+- Whole-prompt SSD eviction follows access recency so older conversations containing system messages cannot indefinitely crowd out new tool snapshots. Configured disk limits remain enforced; block-cache prefix eligibility is unchanged.
+- Chat and Server Settings show capability-specific reasoning and cache guidance and hide RAM controls that do not apply to SSD-only prompt storage.
+
 ## [1.6.64] - 2026-09-18
 
 - XML tool calls: preserve arguments declared as strings before attempting JSON decoding, including literal JSON text, indentation and newlines. Streaming, recovery and Chat/Responses schema paths share the same rule; object and ambiguous union arguments retain their existing decoding behavior.

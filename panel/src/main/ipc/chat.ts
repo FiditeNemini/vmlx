@@ -93,7 +93,7 @@ import {
 import { appendVisibleToolContent, visibleToolStreamContent } from "../../shared/toolContent";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay";
-import { resolveChatMediaPolicy } from "../../shared/chatMediaPolicy";
+import { hasPersistedUserMedia, resolveChatMediaPolicy } from "../../shared/chatMediaPolicy";
 import {
   calculatePrefillTps,
   parseServerDecodeUsage,
@@ -1510,6 +1510,10 @@ export function registerChatHandlers(
         configuredMode: typeof chatSessionConfig.isMultimodal === "boolean"
           ? chatSessionConfig.isMultimodal : undefined,
         hasMediaAttachments: !!hasMediaAttachments,
+        // Reject before persisting a new turn: text-only replay must not
+        // silently remove media already present in this conversation.
+        hasMediaHistory: chatSessionConfig.isMultimodal === false
+          && hasPersistedUserMedia(db.getMessages(chatId)),
       });
       if (mediaPolicy.attachmentError) throw new Error(mediaPolicy.attachmentError);
       chatIsMultimodal = mediaPolicy.multimodal;

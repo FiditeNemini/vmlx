@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveChatMediaPolicy } from '../src/shared/chatMediaPolicy'
+import { hasPersistedUserMedia, resolveChatMediaPolicy } from '../src/shared/chatMediaPolicy'
 
 describe('chat request media policy', () => {
   it('keeps Force Off ahead of detected vision when selecting tools', () => {
@@ -28,5 +28,41 @@ describe('chat request media policy', () => {
 
   it('does not turn an unknown artifact into a multimodal model without media', () => {
     expect(resolveChatMediaPolicy({})).toEqual({ multimodal: false })
+  })
+
+  it('rejects a text follow-up with media history under Force Off instead of silently stripping history', () => {
+    const input = { configuredMode: false, hasMediaHistory: true }
+    expect(resolveChatMediaPolicy(input).attachmentError).toContain('conversation already contains')
+  })
+})
+
+describe('persisted media admission', () => {
+  it.each(['image_url', 'video_url', 'input_audio'])('finds prior %s when the new message is text-only', (type) => {
+    const history = [
+      { role: 'user', content: JSON.stringify([{ type: 'text', text: 'Describe this' }, { type, [type]: {} }]) },
+      { role: 'assistant', content: 'A previous answer' },
+      { role: 'user', content: 'Explain that again' },
+    ]
+    expect(hasPersistedUserMedia(history)).toBe(true)
+    expect(resolveChatMediaPolicy({ configuredMode: false, hasMediaHistory: hasPersistedUserMedia(history) }).attachmentError).toContain('start a new text-only chat')
+  })
+
+  it('preserves media history in Auto and On for runtime validation', () => {
+    for (const configuredMode of [undefined, true]) {
+      expect(resolveChatMediaPolicy({ configuredMode, detectedMultimodal: true, hasMediaHistory: true }).attachmentError).toBeUndefined()
+    }
+  })
+
+  it.each([
+    '[not JSON mentioning image_url',
+    'Explain input_audio and video_url',
+    JSON.stringify([{ type: 'text', text: '[Attached file: example.json]\n{"type":"image_url"}' }]),
+    JSON.stringify([null, 12, { type: 'input_text', text: 'image_url' }]),
+  ])('does not misclassify text or malformed history: %s', (content) => {
+    expect(hasPersistedUserMedia([{ role: 'user', content }])).toBe(false)
+  })
+
+  it('does not interpret assistant prose as user attachment history', () => {
+    expect(hasPersistedUserMedia([{ role: 'assistant', content: '[{"type":"image_url"}]' }])).toBe(false)
   })
 })

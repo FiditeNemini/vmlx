@@ -12,8 +12,9 @@ from vmlx_engine.request import Request, RequestStatus, SamplingParams
 from vmlx_engine.scheduler import Scheduler
 
 
+@pytest.mark.parametrize("memory_accepts", [False, True])
 @pytest.mark.parametrize("fail_write", [False, True])
-def test_memory_aware_terminal_waits_for_real_prompt_writer(tmp_path, monkeypatch, fail_write):
+def test_memory_aware_terminal_waits_for_real_prompt_writer(tmp_path, monkeypatch, fail_write, memory_accepts):
     import vmlx_engine.scheduler as scheduler_module
 
     monkeypatch.setattr(scheduler_module, "clear_mlx_memory_cache", lambda log=None: None)
@@ -38,7 +39,7 @@ def test_memory_aware_terminal_waits_for_real_prompt_writer(tmp_path, monkeypatc
     scheduler.batch_generator = None
     scheduler.stop_tokens = set()
     scheduler.block_aware_cache = None
-    scheduler.memory_aware_cache = SimpleNamespace(store=lambda *a, **kw: True)
+    scheduler.memory_aware_cache = SimpleNamespace(store=lambda *a, **kw: memory_accepts)
     scheduler.prefix_cache = None
     scheduler.disk_cache = manager
     scheduler._kv_cache_bits = 0

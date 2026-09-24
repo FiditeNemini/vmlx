@@ -11580,6 +11580,14 @@ class Scheduler:
                                         retained_tokens=len(cache_key_tokens),
                                         durable=prompt_disk_durable,
                                     )
+                                elif prompt_disk_durable:
+                                    # SSD-only typed sessions deliberately give
+                                    # the memory-aware adapter a zero L1 budget.
+                                    # Its refusal is not a failed SSD publication.
+                                    _PERSIST.record(
+                                        request_id, "stored", "prompt SSD; no retained RAM payload",
+                                        retained_tokens=len(cache_key_tokens), durable=True,
+                                    )
                                 else:
                                     logger.warning(
                                         f"Cache store rejected for request {request_id} "

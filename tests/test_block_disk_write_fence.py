@@ -43,6 +43,48 @@ def _large_cache_data(value: float) -> list[tuple]:
     return [("kv", keys, values)]
 
 
+@pytest.mark.parametrize("cache_class", ["KVCache", "RotatingKVCache", "MiniMaxM3SparseCache"])
+def test_ssd_only_refuses_writes_when_request_fence_cannot_begin(tmp_path, monkeypatch, cache_class):
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    manager = PagedCacheManager(block_size=4, max_blocks=16, disk_store=store, disk_only=True)
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+    writes = []
+    original_write = store.write_block_async
+    original_begin = store.begin_write_fence
+
+    def tracked_write(*args, **kwargs):
+        writes.append(kwargs)
+        return original_write(*args, **kwargs)
+
+    def refuse_fence(*args, **kwargs):
+        raise RuntimeError("request fence admission unavailable")
+
+    monkeypatch.setattr(store, "begin_write_fence", refuse_fence)
+    monkeypatch.setattr(store, "write_block_async", tracked_write)
+    tensor = mx.ones((1, 1, 4, 8), dtype=mx.float16)
+    state = (tensor, tensor, tensor) if cache_class == "MiniMaxM3SparseCache" else (tensor, tensor)
+    meta = ("0", "8", "4", "4") if cache_class == "RotatingKVCache" else ("4",)
+    data = [{"state": state, "meta_state": meta, "class_name": cache_class}]
+    try:
+        result = cache.store_cache("tool-boundary", [1, 2, 3, 4], data)
+        assert result is None
+        assert writes == [], "An untracked writer can outlive the tool completion barrier"
+        pipeline = store.get_stats()["write_pipeline"]
+        assert pipeline["pending_items"] == 0
+        assert pipeline["pending_bytes"] == 0
+        # A failed optional cache store must not poison the next tool boundary.
+        monkeypatch.setattr(store, "begin_write_fence", original_begin)
+        continued = cache.store_cache("next-tool-boundary", [1, 2, 3, 4], data)
+        assert continued is not None
+        assert writes and all(write.get("fence_id") for write in writes)
+        assert store.get_stats()["write_pipeline"]["pending_items"] == 0
+    finally:
+        store.shutdown()
+
+
 def _wait_for_fence(
     store: BlockDiskStore,
     fence_id: str,

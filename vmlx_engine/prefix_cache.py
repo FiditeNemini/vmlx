@@ -5213,6 +5213,18 @@ class BlockAwarePrefixCache:
                     _write_fence["disk_store"] = disk_store
                     _write_fence["fence_id"] = disk_write_fence_id
                 except Exception as fence_error:
+                    if _disk_only:
+                        # Without a request fence, cleanup cannot wait for this
+                        # writer. Refuse before extracting or enqueueing any
+                        # payload so a following tool request cannot race an
+                        # untracked write or inherit hidden RAM ownership.
+                        logger.error(
+                            "Block-disk-only cache publication refused for %s: "
+                            "could not begin request write fence: %s; no writes queued",
+                            request_id,
+                            fence_error,
+                        )
+                        return None
                     # The write still proceeds, but WITHOUT a fence: the guards
                     # below treat a None fence id as "no tracking", so nothing
                     # settles it and a native payload can stay keep_resident

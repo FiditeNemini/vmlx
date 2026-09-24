@@ -93,6 +93,7 @@ import {
 import { appendVisibleToolContent, visibleToolStreamContent } from "../../shared/toolContent";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay";
+import { resolveChatMediaPolicy } from "../../shared/chatMediaPolicy";
 import {
   calculatePrefillTps,
   parseServerDecodeUsage,
@@ -1074,6 +1075,7 @@ export function registerChatHandlers(
       let sessionHasReasoningParser = false;
       let isHarmonyModel = false;
       let chatIsMultimodal = false;
+      let chatModelForceTextOnly = false;
       let chatDetectedFamily: string | undefined;
       let chatUsesZayaAppleScriptToolBundle = false;
       let thinkingBudgetSupported: boolean | undefined;
@@ -1150,6 +1152,7 @@ export function registerChatHandlers(
               thinkingBudgetSupported = undefined;
             }
             chatDetectedFamily = detected.family;
+            chatModelForceTextOnly = detected.forceTextOnly === true;
             chatUsesZayaAppleScriptToolBundle = isZayaAppleScriptToolBundle(
               chatDetectedFamily,
               chat.modelPath,
@@ -1167,16 +1170,12 @@ export function registerChatHandlers(
               chatDetectedFamily,
             );
             const smeltActive = !!sessionConfig.smelt;
-            chatIsMultimodal =
-              smeltActive || detected.forceTextOnly
-                ? false
-                : detected.isMultimodal === true
-                  ? true
-                  : sessionConfig.isMultimodal === true
-                    ? true
-                    : sessionConfig.isMultimodal === false
-                      ? false
-                      : false;
+            chatIsMultimodal = resolveChatMediaPolicy({
+              smelt: smeltActive,
+              forceTextOnly: detected.forceTextOnly,
+              detectedMultimodal: detected.isMultimodal,
+              configuredMode: sessionConfig.isMultimodal,
+            }).multimodal;
 
             const effectiveReasoningParser = resolveEffectiveReasoningParser({
               configuredParser: sessionConfig.reasoningParser,
@@ -1490,17 +1489,13 @@ export function registerChatHandlers(
       // user messages when the server isn't ready yet.
       // When attachments are present, store content as JSON array of content parts.
       const hasAttachments = attachments && attachments.length > 0;
-      // mlxstudio#69: explicit media attachments override chatIsMultimodal
-      // detection. The user clicked "attach image" — that intent must be
-      // honored even when (a) the session lookup failed, (b) the session
-      // config has isMultimodal=false from an older save, or (c) the model
-      // dir's config.json doesn't expose vision_config. The downstream
-      // server will reject the request properly if the model truly cannot
-      // handle media, which is far better than silently dropping it. Text-file
-      // attachments are plain text context and do not need multimodal routing.
+      // Explicit media may be forwarded when capability detection is unknown;
+      // the server still validates the real runtime. It must never override
+      // Force Off or a text-only route, or be silently dropped. Text files are
+      // ordinary text context and do not require multimodal routing.
       const hasMediaAttachments =
         hasAttachments && attachments!.some((a) => inferKind(a) !== "text");
-      const modelForceTextOnly = (() => {
+      const modelForceTextOnly = chatModelForceTextOnly || (() => {
         try {
           return !!chat.modelPath &&
             detectModelConfigFromDir(chat.modelPath).forceTextOnly === true;
@@ -1508,22 +1503,16 @@ export function registerChatHandlers(
           return false;
         }
       })();
-      if (hasMediaAttachments && modelForceTextOnly) {
-        const imgs = attachments!.filter((a) => inferKind(a) === "image").length;
-        const vids = attachments!.filter((a) => inferKind(a) === "video").length;
-        const auds = attachments!.filter((a) => inferKind(a) === "audio").length;
-        console.log(
-          `[CHAT] Keeping multimodal=false for ${chatId} — model is forceTextOnly and user attached ${imgs} image(s), ${vids} video(s), ${auds} audio file(s)`,
-        );
-      } else if (hasMediaAttachments && !chatIsMultimodal) {
-        const imgs = attachments!.filter((a) => inferKind(a) === "image").length;
-        const vids = attachments!.filter((a) => inferKind(a) === "video").length;
-        const auds = attachments!.filter((a) => inferKind(a) === "audio").length;
-        console.log(
-          `[CHAT] Forcing multimodal=true for ${chatId} — user attached ${imgs} image(s), ${vids} video(s), ${auds} audio file(s)`,
-        );
-        chatIsMultimodal = true;
-      }
+      const mediaPolicy = resolveChatMediaPolicy({
+        smelt: !!chatSessionConfig.smelt,
+        forceTextOnly: modelForceTextOnly,
+        detectedMultimodal: chatIsMultimodal,
+        configuredMode: typeof chatSessionConfig.isMultimodal === "boolean"
+          ? chatSessionConfig.isMultimodal : undefined,
+        hasMediaAttachments: !!hasMediaAttachments,
+      });
+      if (mediaPolicy.attachmentError) throw new Error(mediaPolicy.attachmentError);
+      chatIsMultimodal = mediaPolicy.multimodal;
       if (hasAttachments || chatIsMultimodal) {
         pushChatSessionLog(
           chatSession?.id || resolvedSession?.id,

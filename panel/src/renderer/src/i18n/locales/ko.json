@@ -1181,7 +1181,9 @@
       "saveAndRestart": "저장 및 다시 시작",
       "loading": "세션을 불러오는 중...",
       "modelLabel": "모델",
-      "cliCommandPreview": "CLI 명령 미리보기"
+      "cliCommandPreview": "CLI 명령 미리보기",
+      "cliMetadataLoading": "명령을 생성하기 전에 모델 메타데이터를 불러오는 중…",
+      "cliMetadataUnavailable": "모델 메타데이터를 사용할 수 없습니다. 저장된 설정으로 미리보기를 표시하며, 자동 파서 및 캐시 옵션이 불완전할 수 있습니다."
     },
     "view": {
       "back": "세션",

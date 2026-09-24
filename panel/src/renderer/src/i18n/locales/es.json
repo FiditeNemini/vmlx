@@ -1181,7 +1181,9 @@
       "saveAndRestart": "Guardar y reiniciar",
       "loading": "Cargando sesión...",
       "modelLabel": "Modelo",
-      "cliCommandPreview": "Vista previa del comando CLI"
+      "cliCommandPreview": "Vista previa del comando CLI",
+      "cliMetadataLoading": "Cargando los metadatos del modelo antes de crear el comando…",
+      "cliMetadataUnavailable": "Los metadatos del modelo no están disponibles. Esta vista previa usa la configuración guardada; las opciones automáticas del analizador y de la caché pueden estar incompletas."
     },
     "view": {
       "back": "Sesiones",

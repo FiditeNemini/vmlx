@@ -1181,7 +1181,9 @@
       "saveAndRestart": "保存并重启",
       "loading": "加载会话中...",
       "modelLabel": "模型",
-      "cliCommandPreview": "CLI 命令预览"
+      "cliCommandPreview": "CLI 命令预览",
+      "cliMetadataLoading": "正在加载模型元数据以生成命令…",
+      "cliMetadataUnavailable": "模型元数据不可用。此预览使用已保存的设置；自动解析器和缓存选项可能不完整。"
     },
     "view": {
       "back": "会话",

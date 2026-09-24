@@ -506,7 +506,14 @@ class QwenToolParser(ToolParser):
                 # advertised tool and the parsed argument keys validate
                 # against that tool's schema.
                 repaired = False
-                for call in func_calls:
+                # Keep each call paired with its original XML bytes. Values
+                # decoded under an unknown/truncated name have no schema and
+                # may already have lost literal string types ("null", "123").
+                function_bodies = [
+                    body for name, body in self.FUNCTION_PATTERN.findall(cleaned_text)
+                    if name.strip()
+                ]
+                for call, body in zip(func_calls, function_bodies):
                     parsed_name = str(call.get("name") or "")
                     if len(parsed_name) < 4:
                         continue
@@ -527,7 +534,14 @@ class QwenToolParser(ToolParser):
                     except (json.JSONDecodeError, TypeError):
                         continue
                     if arg_keys and arg_keys <= set(props):
-                        call["name"] = suffix_matches[0]
+                        recovered_name = suffix_matches[0]
+                        call["arguments"] = json.dumps(
+                            self._xml_arguments_from_body(
+                                body, self._argument_properties(request, recovered_name)
+                            ),
+                            ensure_ascii=False,
+                        )
+                        call["name"] = recovered_name
                         repaired = True
                 if not repaired:
                     # Qwen3.6-35B doubled-wrapper miskeying: the block parse

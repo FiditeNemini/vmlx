@@ -61,6 +61,25 @@ def _tensor_snapshot(mx, num_tokens):
 
 
 class TestFetchCacheTelemetryTaxonomy:
+    @pytest.mark.parametrize("accepted", [0, 4, 8])
+    def test_consumer_boundary_is_separate_from_lookup_candidate(self, accepted):
+        """Nemotron may accept SSM512 after finding KV768, or reject it all."""
+        _paged, cache = _new_cache()
+        tokens = list(range(8))
+        cache.store_cache("writer", tokens, ["state"])
+        cache.fetch_cache("reader", tokens + [99])
+        # A later request must keep its own last-fetch record while the worker
+        # reconciles this request's candidate.
+        cache.fetch_cache("unrelated", [100, 101, 102, 103, 104])
+        cache.adjust_cache_hit_credit("reader", accepted_tokens=accepted)
+        stats = cache.get_stats()
+        row = next(r for r in stats["recent_fetch_telemetry"] if r["request_id"] == "reader")
+        assert row["logical_restored_tokens"] == 8  # preserve fetch outcome
+        assert row["consumer_accepted_tokens"] == accepted
+        assert stats["tokens_saved"] == accepted
+        assert stats["last_fetch_telemetry"]["request_id"] == "unrelated"
+        assert stats["last_fetch_telemetry"]["consumer_accepted_tokens"] is None
+
     def test_chain_block_hit_records_correct_token_count(self):
         mx = pytest.importorskip("mlx.core")
         paged, cache = _new_cache()

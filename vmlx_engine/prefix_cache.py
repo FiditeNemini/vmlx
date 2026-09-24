@@ -3078,6 +3078,10 @@ class BlockAwarePrefixCache:
                 "match_kind": match_kind,
                 "origin": origin,
                 "logical_restored_tokens": int(logical_restored_tokens),
+                # Fetch describes the KV candidate. Hybrid worker validation
+                # can subsequently accept a shorter recurrent-state boundary.
+                # None means the consumer has not reported a decision here.
+                "consumer_accepted_tokens": None,
                 "native_companion_boundary": (
                     int(native_companion_boundary)
                     if native_companion_boundary is not None
@@ -6708,6 +6712,16 @@ class BlockAwarePrefixCache:
             accepted = max(0, min(int(accepted_tokens or 0), credited_tokens))
         except (TypeError, ValueError):
             accepted = 0
+        # Preserve the original fetch outcome and annotate the actual accepted
+        # credit on that request, without replacing a newer last-fetch record.
+        # This is observability only: absent/evicted telemetry cannot change
+        # cache accounting or the generation path.
+        try:
+            record = self._fetch_telemetry.get(request_id)
+            if record is not None:
+                record["consumer_accepted_tokens"] = accepted
+        except Exception:
+            logger.debug("Cache consumer telemetry failed for %s", request_id, exc_info=True)
         if accepted >= credited_tokens:
             return False
 

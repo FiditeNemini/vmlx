@@ -7043,3 +7043,22 @@ describe("media semantics are bound to the submitted attachment turn", () => {
     expect(score("green bicycle", "", "audio", false).audioSemanticVerified).toBe(false);
   });
 });
+
+
+describe("packaged media fixture decoding without data fetch", () => {
+  it("preserves binary bytes without a network or renderer fetch", () => {
+    expect(Array.from((proofHarness as any).decodeProofAttachment({
+      dataUrl: "data:image/png;base64,AAEC/w==", type: "image/png",
+    }))).toEqual([0, 1, 2, 255]);
+  });
+  it("rejects a MIME mismatch instead of injecting a mislabeled attachment", () => {
+    expect(() => (proofHarness as any).decodeProofAttachment({
+      dataUrl: "data:image/png;base64,AAEC/w==", type: "audio/wav",
+    })).toThrow(/MIME/);
+  });
+  it("rejects non-fixture URLs", () => {
+    expect(() => (proofHarness as any).decodeProofAttachment({
+      dataUrl: "https://example.invalid/file", type: "image/png",
+    })).toThrow(/data URL/);
+  });
+});

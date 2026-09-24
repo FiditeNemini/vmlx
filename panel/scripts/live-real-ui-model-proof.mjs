@@ -26,6 +26,15 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import vm from 'node:vm'
 
+// The packaged renderer blocks fetch(data:) under its production policy.
+// Decode test fixture bytes locally; do not relax CSP or bypass InputBox.
+export function decodeProofAttachment(item) {
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(item?.dataUrl || '')
+  if (!match || match[1] !== item.type) throw new Error('Invalid media fixture data URL or MIME type')
+  const bytes = Uint8Array.from(atob(match[2]), char => char.charCodeAt(0))
+  return bytes
+}
+
 // Match only the answer to the submitted attachment, never another chat turn.
 // Kept closure-free because the proof runner injects it into the renderer.
 export function validateMediaTurnAnswer({ messages, binding, kind, pattern }) {
@@ -9311,6 +9320,7 @@ async function main() {
         const independentBundleDefaults = ${JSON.stringify(bundleGenerationContract.defaults)};
         const endpoint = { host: '127.0.0.1', port: ${JSON.stringify(serverPort)} };
         const validateMediaTurnAnswer = ${validateMediaTurnAnswer.toString()};
+        const decodeProofAttachment = ${decodeProofAttachment.toString()};
         const l2DiskStorageSeen = ${l2DiskStorageSeen.toString()};
         const correlateTerminalResponseToCacheExecution =
           ${correlateTerminalResponseToCacheExecution.toString()};
@@ -11166,8 +11176,7 @@ async function main() {
               if (!(input instanceof HTMLInputElement)) throw new Error('Media file input unavailable');
               const transfer = new DataTransfer();
               for (const item of attachments) {
-                const blob = await (await fetch(item.dataUrl)).blob();
-                transfer.items.add(new File([blob], item.name, { type: item.type }));
+                transfer.items.add(new File([decodeProofAttachment(item)], item.name, { type: item.type }));
               }
               input.files = transfer.files;
               input.dispatchEvent(new Event('change', { bubbles: true }));

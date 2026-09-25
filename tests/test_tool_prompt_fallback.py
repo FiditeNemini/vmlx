@@ -240,9 +240,13 @@ def test_openpangu_tool_result_preserves_native_history_without_forcing_answer()
     assert "<|message_start|>tool\nPath: panel/package.json" in injected
 
 
-def test_openpangu_incomplete_native_schema_still_gets_fallback():
+@pytest.mark.parametrize("user_text", [
+    "Call file_info for panel/package.json.",
+    "Inspect panel/package.json using the available tools.",
+])
+def test_openpangu_incomplete_native_schema_still_gets_fallback(user_text):
     tools = _file_info_tool()
-    messages = [{"role": "user", "content": "Call file_info for panel/package.json."}]
+    messages = [{"role": "user", "content": user_text}]
     tokenizer = OpenPanguLikeTokenizer()
     incomplete = [{"type": "function", "function": {"name": "file_info"}}]
     prompt = tokenizer.apply_chat_template(messages, tools=incomplete)

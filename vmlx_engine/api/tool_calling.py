@@ -730,6 +730,7 @@ def check_and_inject_fallback_tools(
     _native_tools_schema_verdict = _rendered_tools_block_schema_verdict()
     _openpangu_has_concrete_tool_examples = (
         is_openpangu_native_tool_prompt
+        and _native_tools_schema_verdict is not False
         and not explicit_tool_requested
         and not tool_choice_required
         and "<|tool_call_start|>" in instruction_prompt

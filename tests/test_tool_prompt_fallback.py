@@ -176,7 +176,7 @@ def _file_info_tool() -> list[dict]:
     ]
 
 
-def test_openpangu_explicit_file_info_uses_native_json_list_with_bound_path():
+def test_openpangu_explicit_file_info_preserves_complete_native_schema():
     tools = _file_info_tool()
     user_request = (
         "Call the built-in file_info tool exactly once with path "
@@ -196,14 +196,11 @@ def test_openpangu_explicit_file_info_uses_native_json_list_with_bound_path():
         tool_parser_id="openpangu",
     )
 
-    assert "native openPangu JSON-list shape" in injected
-    assert "<tool_call>\n" not in injected
-    assert '"name": "file_info"' in injected
-    assert '"path": "panel/package.json"' in injected
-    assert '"path": "VALUE_HERE"' not in injected
+    assert injected == prompt
+    assert '"required": ["path"]' in injected
 
 
-def test_openpangu_tool_result_continuation_finishes_visible_answer():
+def test_openpangu_tool_result_preserves_native_history_without_forcing_answer():
     tools = _file_info_tool()
     messages = [
         {
@@ -239,10 +236,27 @@ def test_openpangu_tool_result_continuation_finishes_visible_answer():
         tool_parser_id="openpangu",
     )
 
-    assert "Native openPangu tool-result continuation" in injected
-    assert "Do not emit another <|tool_call_start|> block" in injected
-    assert "Your next assistant message must be exactly: PG2-FINAL-DONE" in injected
+    assert injected == prompt
     assert "<|message_start|>tool\nPath: panel/package.json" in injected
+
+
+@pytest.mark.parametrize("user_text", [
+    "Call file_info for panel/package.json.",
+    "Inspect panel/package.json using the available tools.",
+])
+def test_openpangu_incomplete_native_schema_still_gets_fallback(user_text):
+    tools = _file_info_tool()
+    messages = [{"role": "user", "content": user_text}]
+    tokenizer = OpenPanguLikeTokenizer()
+    incomplete = [{"type": "function", "function": {"name": "file_info"}}]
+    prompt = tokenizer.apply_chat_template(messages, tools=incomplete)
+    repaired = check_and_inject_fallback_tools(
+        prompt, messages, tools, tokenizer,
+        {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+        tool_parser_id="openpangu",
+    )
+    assert repaired != prompt
+    assert '"required": ["path"]' in repaired
 
 
 def test_qwen_explicit_run_exactly_binds_command_and_narrows_schema():

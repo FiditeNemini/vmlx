@@ -730,11 +730,22 @@ def check_and_inject_fallback_tools(
     _native_tools_schema_verdict = _rendered_tools_block_schema_verdict()
     _openpangu_has_concrete_tool_examples = (
         is_openpangu_native_tool_prompt
+        and _native_tools_schema_verdict is not False
         and not explicit_tool_requested
         and not tool_choice_required
         and "<|tool_call_start|>" in instruction_prompt
         and "<|tool_call_end|>" in instruction_prompt
         and all(name in instruction_prompt for name in tool_names)
+    )
+    # A complete native catalog already defines argument contracts and the
+    # JSON-list dialect. An explicit tool request or real tool result does not
+    # invalidate that catalog. Replacing it with turn-specific instructions
+    # destroys the reusable prefix and can forbid a legitimate second call.
+    _openpangu_has_native_tool_schema = (
+        is_openpangu_native_tool_prompt
+        and _native_tools_schema_verdict is True
+        and "<|tool_call_start|>" in instruction_prompt
+        and "<|tool_call_end|>" in instruction_prompt
     )
     _minimax_has_concrete_tool_examples = (
         is_minimax_native_tool_prompt
@@ -820,7 +831,11 @@ def check_and_inject_fallback_tools(
             )
             or _lfm2_has_concrete_tool_examples
         )
-        and (not is_openpangu_native_tool_prompt or _openpangu_has_concrete_tool_examples)
+        and (
+            not is_openpangu_native_tool_prompt
+            or _openpangu_has_concrete_tool_examples
+            or _openpangu_has_native_tool_schema
+        )
         and (
             not is_minimax_native_tool_prompt
             or _minimax_has_concrete_tool_examples

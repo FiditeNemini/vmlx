@@ -4,6 +4,11 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.67] - 2026-09-24
+
+- OpenPangu tool requests preserve complete native tool schemas across result continuations instead of replacing them with turn-specific fallback prompts. This preserves usable SSD cache prefixes and allows dependent tool calls within the same request.
+- Incomplete native parameter schemas still receive fallback guidance, including when a template provides generic tool-call examples.
+
 ## [1.6.66] - 2026-09-24
 
 - Prompt SSD cache: preserve BF16 payloads losslessly at native 16-bit width, reducing their stored tensor bytes by half. Existing cache files remain readable; native FP32, FP16 and packed states retain their formats.

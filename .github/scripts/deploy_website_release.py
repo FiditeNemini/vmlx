@@ -102,7 +102,7 @@ def main() -> int:
         count=1,
     )
     updated = re.sub(
-        rf"(?<![0-9.]){re.escape(old_version)}(?![0-9.])",
+        rf"(?<![0-9.]){re.escape(old_version)}(?![0-9]|\.[0-9])",
         version,
         updated,
     )

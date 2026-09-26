@@ -28,7 +28,7 @@ SORT_THRESHOLD = 64
 ROTATIONS = ("none", "hadamard32")
 # Where decode applies the Hadamard-32: "host" = once per activation row (x once per token, h once per expert-token)
 # then the unrotated fast kernels; "kernel" = in-register inside every threadgroup (redundant: measured 1.05-1.15x).
-from .runtime_identity import DECODE_ROT, EXPERT_TILES
+from .runtime_identity import DECODE_ROT, EXPERT_TILES, GATEUP_H32
 
 
 class TQSwitchLinear(nn.Module):
@@ -101,11 +101,13 @@ class TQSwitchGLU(nn.Module):
         xs = rotate_rows(x, g)[order // kk]
         if self._use_expert_tiles(x, kk):
             plan = K.expert_tile_plan(idx_s, g.num_experts)
+            rotate_output = GATEUP_H32 == "1"
             h = K.gather_qmm_expert_sorted(
                 xs, g.tq2_packed, g.tq2_scales, idx_s, g.bits, plan,
-                packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit)
+                packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit,
+                rotate_output=rotate_output)
             y = K.gather_qmm_expert_sorted(
-                rotate_rows(h, d), d.tq2_packed, d.tq2_scales, idx_s, d.bits, plan)
+                h if rotate_output else rotate_rows(h, d), d.tq2_packed, d.tq2_scales, idx_s, d.bits, plan)
             return y[inv]
         h = K.gather_qmm_sorted(xs, g.tq2_packed, g.tq2_scales, g._cb, idx_s, g.bits,
                                 packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit)

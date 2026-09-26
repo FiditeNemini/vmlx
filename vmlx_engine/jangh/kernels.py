@@ -21,6 +21,7 @@ MLX custom kernels cannot #include MLX headers, so they are inlined from the RUN
 from __future__ import annotations
 
 import functools
+import math
 import os
 import re
 
@@ -133,17 +134,40 @@ struct TQBlockLoader {
 
 _NAX_IMPL = r'''
 using namespace mlx::steel;
+// Copyright © 2024 Apple Inc.
+// Adapted from MLX 0.32.2 hadamard.h; preserve its FP32 addition order.
+template <short R>
+METAL_FUNC void jangh_h32_radix(thread float* x) {
+  constexpr short logR = __builtin_ctz(R);
+  short h = 1;
+  STEEL_PRAGMA_UNROLL
+  for (short s = 0; s < logR; s++) {
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < R / 2; i++) {
+      short k = i & (h - 1);
+      short j = ((i - k) << 1) + k;
+      float a = x[j];
+      float b = x[j + h];
+      x[j] = a + b;
+      x[j + h] = a - b;
+    }
+    h <<= 1;
+  }
+}
+
 METAL_FUNC float tq_act(float g, float u, float lim) {
   if (lim > 0.0f) { g = metal::min(g, lim); u = metal::clamp(u, -lim, lim); }
   return (g / (1.0f + metal::fast::exp(-g))) * u;
 }
 // FUSED=false: y = x W^T for one weight.  FUSED=true: y = act(x Wg^T, x Wu^T).
-template <typename T, int bits, bool FUSED, bool EXPERT_ALIGNED = false>
+template <typename T, int bits, bool FUSED, bool EXPERT_ALIGNED = false, bool H32 = false>
 METAL_FUNC void tq_gather_qmm_nax(
     const device T* x, const device uint32_t* wg, const device half* sg, const device uint32_t* wu, const device half* su,
     const device uint32_t* indices, device T* y, const int M, const int N, const int K, const float lim,
     threadgroup T* Wg, threadgroup T* Wu, uint3 tid, uint simd_group_id, uint simd_lane_id,
-    const device int* expert_offsets = nullptr, const device int* tile_offsets = nullptr, const int E = 0) {
+    const device int* expert_offsets = nullptr, const device int* tile_offsets = nullptr, const int E = 0, const float h32_scale = 0.0f) {
+  static_assert(!H32 || (FUSED && EXPERT_ALIGNED && metal::is_same<T, bfloat16_t>::value),
+                "H32 requires BF16 fused expert tiles");
   constexpr int BM = 64, BK = 64, BN = 64, WM = 2, WN = 2;
   constexpr int pack_factor = get_pack_factor<bits, 8>();
   constexpr int bytes_per_pack = get_bytes_per_pack<bits>();
@@ -224,9 +248,44 @@ METAL_FUNC void tq_gather_qmm_nax(
           Gt.val_frags[i][e] = tq_act(Gt.val_frags[i][e], Ut.val_frags[i][e], lim);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (sg_active) {
-      if (m_lo_lim == 0 && m_hi_lim == SM && sgp_sn == SN) Gt.store(y + tm * N + tn, N);
-      else Gt.store_slice(y + tm * N + tn, N, short2(0, m_lo_lim), short2(sgp_sn, m_hi_lim));
+    if constexpr (H32) {
+      // All final-K weight reads precede the barrier above. Reuse dead Wg.
+      // Match native output-store rounding before the FP32 transform.
+      if (sg_active) {
+        for (short f = 0; f < decltype(Gt)::kNumFrags; ++f) {
+          for (short e = 0; e < decltype(Gt)::kElemsPerFrag; ++e) {
+            const short2 pos = BaseNAXFrag::get_coord(e);
+            const int row = tm + (f / TN) * 16 + pos.y;
+            const int col = tn + (f % TN) * 16 + pos.x;
+            if (row >= offset && row < offset_next && col < tgp_bn)
+              Wg[row * BN + col] = T(Gt.val_frags[f][e]);
+          }
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      const uint linear = simd_group_id * 32 + simd_lane_id;
+      const uint hrow = linear / 2;
+      const uint hcol = (linear % 2) * 32;
+      // Invalid rows do not read scratch. Every lane still joins both barriers.
+      if (hrow < uint(tgp_bm)) {
+        float v[32];
+        for (uint j = 0; j < 32; ++j) v[j] = float(Wg[hrow * BN + hcol + j]);
+        jangh_h32_radix<16>(v);
+        jangh_h32_radix<16>(v + 16);
+        for (uint j = 0; j < 16; ++j) {
+          float a = v[j], b = v[j + 16];
+          v[j] = a + b;
+          v[j + 16] = a - b;
+        }
+        for (uint j = 0; j < 32; ++j)
+          y[hrow * N + hcol + j] = T(v[j] * h32_scale);
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    } else {
+      if (sg_active) {
+        if (m_lo_lim == 0 && m_hi_lim == SM && sgp_sn == SN) Gt.store(y + tm * N + tn, N);
+        else Gt.store_slice(y + tm * N + tn, N, short2(0, m_lo_lim), short2(sgp_sn, m_hi_lim));
+      }
     }
   }
 }
@@ -256,19 +315,19 @@ def _nax_kernel(bits: int, fused: bool, tname: str):
 
 
 @functools.lru_cache(maxsize=None)
-def _expert_nax_kernel(bits: int, fused: bool, tname: str):
+def _expert_nax_kernel(bits: int, fused: bool, tname: str, h32: bool = False):
     src = f'''
   constexpr int BK_padded = (64 + 16 / sizeof({tname}));
   threadgroup {tname} Wg[64 * BK_padded];
   threadgroup {tname} Wu[{'64' if fused else '1'} * BK_padded];
-  tq_gather_qmm_nax<{tname}, {bits}, {'true' if fused else 'false'}, true>(
+  tq_gather_qmm_nax<{tname}, {bits}, {'true' if fused else 'false'}, true, {'true' if h32 else 'false'}>(
       x, wg, sg, wu, su, indices, y, meta[0], meta[1], meta[2], lim[0], Wg, Wu,
       threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup,
-      expert_offsets, tile_offsets, meta[3]);
+      expert_offsets, tile_offsets, meta[3]{", scale[0]" if h32 else ""});
 '''
     return mx.fast.metal_kernel(
-        name=f"jangh_expert_qmm_nax_b{bits}_{fused}_{tname}",
-        input_names=["x", "wg", "sg", "wu", "su", "indices", "expert_offsets", "tile_offsets", "meta", "lim"],
+        name=f"jangh_expert_qmm_nax_b{bits}_{fused}_{tname}" + ("_h32" if h32 else ""),
+        input_names=["x", "wg", "sg", "wu", "su", "indices", "expert_offsets", "tile_offsets", "meta", "lim"] + (["scale"] if h32 else []),
         output_names=["y"], header=_nax_header(), source=src)
 
 
@@ -280,16 +339,33 @@ def expert_tile_plan(idx_sorted, experts):
     return starts, tiles
 
 
-def gather_qmm_expert_sorted(x, packed, scales, idx, bits, plan, *, packed_u=None, scales_u=None, limit=0.0):
+@functools.lru_cache(maxsize=1)
+def _h32_scale():
+    return mx.array([float(1.0 / math.sqrt(32))], dtype=mx.float32)
+
+
+def gather_qmm_expert_sorted(x, packed, scales, idx, bits, plan, *, packed_u=None, scales_u=None, limit=0.0, rotate_output=False):
     """Internal NAX route, admitted only for qualified geometry by the switch."""
     M, width = x.shape
     experts, columns = packed.shape[:2]
     fused = packed_u is not None
     starts, tiles = plan
-    return _expert_nax_kernel(bits, fused, _TNAME[x.dtype])(
+    if rotate_output:
+        expected_packed = (288, 2048, 4096 * bits // 32)
+        if not (fused and scales_u is not None and bits in (2, 3) and x.dtype == mx.bfloat16
+                and (width, columns, experts) == (4096, 2048, 288) and M >= 64
+                and packed.shape == packed_u.shape == expected_packed
+                and packed.dtype == packed_u.dtype == mx.uint32
+                and scales.shape == scales_u.shape == (288, 2048)
+                and scales.dtype == scales_u.dtype == mx.float16
+                and idx.dtype == mx.uint32 and idx.size == M
+                and starts.shape == tiles.shape == (289,)
+                and starts.dtype == tiles.dtype == mx.int32 and nax_available()):
+            raise ValueError("JANGH H32 requires qualified BF16 GLM expert tiles")
+    return _expert_nax_kernel(bits, fused, _TNAME[x.dtype], rotate_output)(
         inputs=[x, packed, scales, packed_u if fused else packed, scales_u if fused else scales,
                 idx, starts, tiles, mx.array([M, columns, width, experts], dtype=mx.int32),
-                _consts(float(limit), dtype=mx.float32)],
+                _consts(float(limit), dtype=mx.float32)] + ([_h32_scale()] if rotate_output else []),
         grid=(((columns + BN - 1) // BN) * 128, (M + BM - 1) // BM + experts, 1),
         threadgroup=(128, 1, 1), output_shapes=[(M, columns)], output_dtypes=[x.dtype])[0]
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 
-def assemble(instructions, previous, current, *, native_order=True):
+def assemble(instructions, previous, current, *, native_order=True, preserve_media=False):
     source = (Path(__file__).parents[1] / "vmlx_engine/server.py").read_text()
     tree = ast.parse(source)
     route = next(
@@ -51,15 +51,22 @@ def assemble(instructions, previous, current, *, native_order=True):
         _preserve_mm=False,
         _native_omni_resp=False,
         _responses_has_media=False,
+        engine=SimpleNamespace(is_mllm=False),
+        _responses_preserves_loaded_media_history=lambda _: preserve_media,
         _responses_input_to_messages=convert,
         _preserves_native_developer_role=lambda _: True,
         _preserves_native_system_order=lambda _: native_order,
         _responses_get_history=lambda *a, **k: copy.deepcopy(previous),
         _enforce_text_only_override=lambda *a: None,
         _messages_requested_modalities=lambda _: [],
-        _responses_should_scrub_multimodal_history_for_followup=lambda *a, **k: False,
+        _responses_should_scrub_multimodal_history_for_followup=lambda *a, **k: not k["preserve_historical_media"] if preserve_media else False,
         logger=SimpleNamespace(debug=lambda *a: None),
     )
+    if preserve_media:
+        policy = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "_responses_should_scrub_multimodal_history_for_followup")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[policy], type_ignores=[])),
+                     "<actual Responses media policy>", "exec"), env)
     exec(compile(module, "<actual Responses route assembly>", "exec"), env)
     return env["messages"], env["history_messages"]
 
@@ -127,6 +134,20 @@ class InstructionPlacement(unittest.TestCase):
         self.assertEqual(messages[0]["content"], "new")
         self.assertNotIn("old", str(messages))
         self.assertNotIn("new", str(again))
+
+
+    def test_retained_media_reaches_inference_and_descendant_history(self):
+        previous = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,IMAGE"}},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,VIDEO"}},
+        ]}, {"role": "assistant", "content": "Inspected."}]
+        current = [{"role": "user", "content": "Inspect the earlier details again."}]
+        messages, stored = assemble("transient", previous, current, preserve_media=True)
+        self.assertEqual(messages[1:], previous + current)
+        self.assertEqual(stored, previous + current)
+        result = [{"role": "tool", "tool_call_id": "call1", "content": "42"}]
+        _, descendant = assemble(None, stored, result, preserve_media=True)
+        self.assertEqual(descendant, previous + current + result)
 
 
 if __name__ == "__main__":

@@ -22140,10 +22140,24 @@ def _responses_scrub_multimodal_history_for_text_followup(messages: list[dict]) 
     return scrubbed
 
 
+def _responses_preserves_loaded_media_history(engine: Any) -> bool:
+    """Keep authored media on the qualified GLM multimodal replay path.
+
+    Resolve the loaded bundle, never the caller's model alias. Cache availability
+    must not change conversation meaning: a miss keeps media for cold prefill
+    (or explicit admission rejection), rather than silently deleting it.
+    """
+    if not getattr(engine, "is_mllm", False):
+        return False
+    config = _current_model_config()
+    return getattr(config, "family_name", None) in {"glm5_next", "glm5_next_text"}
+
+
 def _responses_should_scrub_multimodal_history_for_followup(
     input_data: str | list,
     *,
     current_request_has_media: bool,
+    preserve_historical_media: bool = False,
 ) -> bool:
     """Decide whether a chained text request may discard prior media payloads.
 
@@ -22151,10 +22165,11 @@ def _responses_should_scrub_multimodal_history_for_followup(
     encoders. A ``function_call_output`` request is different: it is the
     continuation of the same assistant turn that consumed the media. Scrubbing
     at that boundary makes the model forget media-derived facts between its
-    tool call and final answer. Keep prior media for that one logical tool loop;
-    later ordinary text turns retain the existing scrub behavior.
+    tool call and final answer. Keep prior media for that logical tool loop.
+    Qualified loaded runtimes retain media across ordinary turns too; other
+    families retain their existing policy pending replay qualification.
     """
-    if current_request_has_media:
+    if preserve_historical_media or current_request_has_media:
         return False
     if not isinstance(input_data, list):
         return True
@@ -23596,9 +23611,22 @@ async def create_response(
         _enforce_text_only_override(
             "/v1/responses", _messages_requested_modalities(previous_messages)
         )
+        preserve_historical_media = _responses_preserves_loaded_media_history(engine)
+        if previous_messages and preserve_historical_media:
+            # Current-input admission does not see media replayed from an older
+            # response (possibly created by another loaded model). Validate the
+            # retained payloads instead of silently dropping unsupported parts.
+            historical_modalities = _messages_requested_modalities(previous_messages)
+            if historical_modalities:
+                unsupported_historical = _responses_modalities_unsupported_after_m3_vl_carveout(
+                    engine, historical_modalities
+                )
+                if unsupported_historical:
+                    _reject_unsupported_multimodal("/v1/responses", unsupported_historical)
         if previous_messages and _responses_should_scrub_multimodal_history_for_followup(
             request.input,
             current_request_has_media=_responses_has_media,
+            preserve_historical_media=preserve_historical_media,
         ):
             previous_messages = _responses_scrub_multimodal_history_for_text_followup(
                 previous_messages

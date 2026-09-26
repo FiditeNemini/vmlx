@@ -11208,7 +11208,16 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
         runtime["status_collection_error"] = type(exc).__name__
 
     runtime["features"] = runtime_features
-    return build_acceleration_contract(family, runtime)
+    contract = build_acceleration_contract(family, runtime)
+    if family == "qwen4_exp":
+        from .qwen4_rope_policy import exact_rope_attn_status
+
+        # Numerical identity is not an acceleration feature; the feature
+        # formatter intentionally emits only registered accelerator entries.
+        contract["numerical_policy"] = {
+            "attention_exact_rope": exact_rope_attn_status(),
+        }
+    return contract
 
 
 def _model_acceleration_status(bundle_path: str | None = None) -> dict:

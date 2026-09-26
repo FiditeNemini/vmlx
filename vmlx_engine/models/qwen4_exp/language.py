@@ -1531,9 +1531,9 @@ def _qsa_exact_rope_attn_enabled() -> bool:
     """Exact angles for the QSA ATTENTION rotary (default off: model-wide
     numerics change awaiting its own long-context quality A/B;
     ``VMLX_QWEN4_EXACT_ROPE_ATTN=1``)."""
-    return os.environ.get("VMLX_QWEN4_EXACT_ROPE_ATTN", "0").strip().lower() not in {
-        "", "0", "false", "no", "off"
-    }
+    from vmlx_engine.qwen4_rope_policy import exact_rope_attn_enabled
+
+    return exact_rope_attn_enabled()
 
 
 def _qsa_pool_retention_enabled() -> bool:

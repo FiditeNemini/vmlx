@@ -178,6 +178,11 @@ def _resolve_runtime_cache_fingerprint() -> str:
     from .jangh.runtime_identity import runtime_identity as jangtq2_identity
 
     parts.append(jangtq2_identity())
+    from .qwen4_rope_policy import exact_rope_attn_cache_identity
+
+    rope_identity = exact_rope_attn_cache_identity()
+    if rope_identity:
+        parts.append(rope_identity)
     source_id = _resolve_source_checkout_id()
     if source_id:
         parts.append(f"src={source_id}")
@@ -587,6 +592,11 @@ def compute_model_cache_key(
     # Opt-in Qwen4 math paths can differ in floating-point accumulation.
     # Separate persisted state across configurations even within one release.
     if any(p in {"model_type=qwen4_exp", "model_type=qwen4_exp_text"} for p in parts):
+        from .qwen4_rope_policy import exact_rope_attn_cache_identity
+
+        rope_identity = exact_rope_attn_cache_identity()
+        if rope_identity:
+            parts.append(rope_identity)
         from vmlx_engine.qwen4_decode_policy import (
             QWEN4_PRECISE_GDN_EPILOGUE_MATH_ABI,
             precise_gdn_epilogue_requested,

@@ -17977,20 +17977,19 @@ class MLLMBatchGenerator:
         pending = getattr(state, "pending_verify", None)
         if not isinstance(pending, dict):
             return
-        state.pending_verify = None
         if cache is None:
-            return
+            raise RuntimeError("native MTP pending-verify rollback has no cache")
         try:
-            _native_mtp_restore_replay_cache(
+            restored = _native_mtp_restore_replay_cache(
                 cache,
                 pending["snapshot"],
                 pending["n_inputs"],
             )
-        except Exception:
-            logger.warning(
-                "native MTP pending-verify rollback failed; cache may hold "
-                "unverified draft positions"
-            )
+        except Exception as exc:
+            raise RuntimeError("native MTP pending-verify rollback failed") from exc
+        if not restored:
+            raise RuntimeError("native MTP pending-verify cache rejected rollback")
+        state.pending_verify = None
 
     def _rewind_native_mtp_terminal_boundary(
         self,
@@ -19085,9 +19084,38 @@ class MLLMBatchGenerator:
                 )
                 mtp_state_for_finish = getattr(req, "_native_mtp_state", None)
                 if mtp_state_for_finish is not None:
-                    self._rewind_native_mtp_terminal_boundary(
-                        req, batch.cache, mtp_state_for_finish
-                    )
+                    try:
+                        self._rewind_native_mtp_terminal_boundary(
+                            req, batch.cache, mtp_state_for_finish
+                        )
+                    except Exception as exc:
+                        # Never retry a streamed request or publish cache state
+                        # after its confirmed-prefix rollback failed. end_idx
+                        # already owns this row's normal batch removal below.
+                        logger.error(
+                            "MLLM native MTP terminal rollback failed for %s: %s",
+                            request_id, exc,
+                        )
+                        mtp_state_for_finish.pending_verify = None
+                        mtp_state_for_finish.terminal_snapshot = None
+                        mtp_state_for_finish.queue.clear()
+                        for name in (
+                            "_native_mtp_state", "_native_mtp_ar_tier",
+                            "_media_clean_prefix_cache", "_media_clean_prefix_len",
+                            "_mixed_swa_boundary",
+                        ):
+                            if hasattr(req, name):
+                                delattr(req, name)
+                        responses.append(MLLMBatchResponse(
+                            uid=uid,
+                            request_id=request_id,
+                            token=0,
+                            logprobs=logprobs[i],
+                            finish_reason="error",
+                            error=f"NativeMTPError: {exc}",
+                            prompt_cache=None,
+                        ))
+                        continue
                     _fs = mtp_state_for_finish.stats
                     _fs.configured_depth = int(
                         mtp_state_for_finish.ladder_depth

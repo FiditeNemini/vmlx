@@ -76,6 +76,7 @@ import {
 } from "../../shared/reasoningEffortPolicy";
 import {
   isMetalHeadroomBubbleContent,
+  nativeMtpChatErrorWarning,
   isPromptTooLongBubbleContent,
   projectedMetalHeadroomChatErrorContent,
   promptTooLongChatErrorContent,
@@ -5032,6 +5033,13 @@ export function registerChatHandlers(
         // GH #253: honest engine 413 (prompt_too_long) must render as a
         // graceful in-chat message, not a raw IPC error dialog.
         const promptTooLongErrorContent = promptTooLongChatErrorContent(errMsg);
+        const nativeMtpErrorWarning = abortController.signal.aborted
+          ? null
+          : nativeMtpChatErrorWarning(errMsg);
+        const abortWarnings = Array.from(new Set([
+          ...(responseWarnings || []),
+          ...(nativeMtpErrorWarning ? [nativeMtpErrorWarning] : []),
+        ]));
         if (
           !projectedMetalHeadroomErrorContent &&
           !promptTooLongErrorContent &&
@@ -5113,6 +5121,7 @@ export function registerChatHandlers(
           abortReasoningContent.trim() ||
           projectedMetalHeadroomErrorContent ||
           promptTooLongErrorContent ||
+          nativeMtpErrorWarning ||
           collectedToolStatuses.length > 0 ||
           abortTotalTokens > 0;
         // True when the ONLY thing to show is the prompt-too-long bubble — no
@@ -5133,6 +5142,9 @@ export function registerChatHandlers(
               promptTooLongErrorContent ||
               "[Generation interrupted]";
           assistantMessage.tokens = abortTotalTokens;
+          if (abortWarnings.length > 0) {
+            assistantMessage.warningsJson = JSON.stringify(abortWarnings);
+          }
 
           // Calculate real metrics for the partial generation (not hardcoded zeros)
           const abortTotalTime = (Date.now() - startTime) / 1000;
@@ -5205,6 +5217,7 @@ export function registerChatHandlers(
                     ? abortReasoningSegments
                     : undefined,
                 finishReason: abortFinishReason,
+                warnings: abortWarnings.length > 0 ? abortWarnings : undefined,
                 metrics: abortMetrics,
               });
             }

@@ -97,3 +97,17 @@ export function isMetalHeadroomBubbleContent(content: unknown): boolean {
     content.startsWith(METAL_HEADROOM_BUBBLE_PREFIX)
   )
 }
+
+/** Persist a native-MTP failure as UI metadata, never assistant text. */
+export function nativeMtpChatErrorWarning(message: string | null | undefined): string | null {
+  let detail = String(message || '').trim()
+  const unwrap = (value: string) => value.replace(/^(?:(?:(?:Failed to send message|Server error|Stream generation failed|RuntimeError):\s*)|(?:API error:\s*\d{3}\s*-\s*))+/i, '')
+  detail = unwrap(detail)
+  try {
+    const parsed = JSON.parse(detail)
+    const nested = parsed?.error?.message ?? parsed?.detail
+    if (typeof nested === 'string') detail = unwrap(nested.trim())
+  } catch { /* already plain text */ }
+  if (!/^NativeMTPError:\s*\S/.test(detail)) return null
+  return `Generation failed: ${detail}`
+}

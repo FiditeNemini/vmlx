@@ -60,6 +60,13 @@ def _inv_Phi(p):
 from .contract import CUBIC_PARAMS as _RUNTIME_CUBIC_PARAMS
 
 CUBIC_PARAMS = dict(_RUNTIME_CUBIC_PARAMS)
+# Uniform-width fits used by generated kernel headers, not additional bundle
+# formats. These are the exact float64 results of the existing 400-step search;
+# retaining them avoids refitting unused 6/8-bit widths on first kernel use.
+CUBIC_PARAMS.update({
+    6: (0.10413533834586466, 0.0),
+    8: (0.030780075187969925, 0.0),
+})
 
 _CB_CACHE: dict[int, np.ndarray] = {}
 

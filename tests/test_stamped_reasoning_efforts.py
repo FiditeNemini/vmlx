@@ -77,3 +77,56 @@ def test_normalizes_case_and_drops_a_default_outside_the_levels(tmp_path):
     assert levels == ("low", "medium", "xhigh")
     # "high" is not offered by this bundle, so it cannot be its default.
     assert default is None
+
+
+def test_reads_glm_jangh_chat_effort_contract(tmp_path):
+    (tmp_path / "jang_config.json").write_text(json.dumps({"chat": {
+        "reasoning_efforts": ["low", "high", "max"],
+        "reasoning_effort_default": "max",
+    }}))
+    assert _stamped_reasoning_effort_contract(str(tmp_path)) == (
+        ("low", "high", "max"), "max",
+    )
+
+
+def test_reasoning_stamp_takes_precedence_over_chat_alias(tmp_path):
+    (tmp_path / "jang_config.json").write_text(json.dumps({
+        "reasoning": {"supported_reasoning_efforts": ["low", "medium", "xhigh"],
+                      "default_reasoning_effort": "xhigh"},
+        "chat": {"reasoning_efforts": ["low", "high", "max"],
+                 "reasoning_effort_default": "max"},
+    }))
+    assert _stamped_reasoning_effort_contract(str(tmp_path)) == (
+        ("low", "medium", "xhigh"), "xhigh",
+    )
+
+
+@pytest.mark.parametrize("levels", ["low,high,max", 3, {"low": True}])
+def test_malformed_chat_effort_list_is_not_a_contract(tmp_path, levels):
+    (tmp_path / "jang_config.json").write_text(json.dumps({"chat": {
+        "reasoning_efforts": levels, "reasoning_effort_default": "max",
+    }}))
+    assert _stamped_reasoning_effort_contract(str(tmp_path)) == ((), None)
+
+
+def test_glm_chat_stamp_reports_unsupported_effort_substitution(tmp_path, monkeypatch):
+    from vmlx_engine import server
+    from vmlx_engine.context_limits import pop_effort_substitution
+
+    (tmp_path / "jang_config.json").write_text(json.dumps({"chat": {
+        "reasoning_efforts": ["low", "high", "max"],
+        "reasoning_effort_default": "max",
+    }}))
+    monkeypatch.setattr(server, "_model_path", str(tmp_path))
+    monkeypatch.setattr(server, "_is_hy3_model", lambda _: False)
+    monkeypatch.setattr(server, "_model_family_for_defaults", lambda _: "glm5_next")
+    request_id = "test-glm-chat-stamp-substitution"
+    chat, template = {"reasoning_effort": "xhigh"}, {}
+    server._apply_stamped_effort_policy(
+        chat, template, model_key=str(tmp_path), request_id=request_id,
+    )
+    assert chat["reasoning_effort"] == template["reasoning_effort"] == "max"
+    assert pop_effort_substitution(request_id) == {
+        "requested_effort": "xhigh", "effective_effort": "max",
+        "stamped_levels": ["low", "high", "max"],
+    }

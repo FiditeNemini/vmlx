@@ -2434,9 +2434,11 @@ def _stamped_reasoning_effort_contract(
     """
     if not bundle_path:
         return (), None
-    reasoning = _read_bundle_json(bundle_path, "jang_config.json").get("reasoning")
-    if not isinstance(reasoning, dict):
-        return (), None
+    stamp = _read_bundle_json(bundle_path, "jang_config.json")
+    reasoning = stamp.get("reasoning")
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
+    chat = stamp.get("chat")
+    chat = chat if isinstance(chat, dict) else {}
     # Two spellings name this one fact: `supported_reasoning_efforts` mirrors
     # the engine identifier (Qwen3.8 onward), `reasoning_effort_levels` is what
     # the DSV4/Muse stamps already ship. Read both here so neither side has to
@@ -2445,6 +2447,13 @@ def _stamped_reasoning_effort_contract(
     raw_levels = reasoning.get("supported_reasoning_efforts") or reasoning.get(
         "reasoning_effort_levels"
     )
+    # GLM JANGH stamps the same native contract directly under chat. Keep
+    # older reasoning stamps authoritative when both representations exist.
+    from_chat = not raw_levels
+    if from_chat:
+        raw_levels = chat.get("reasoning_efforts")
+    if not isinstance(raw_levels, (list, tuple)):
+        return (), None
     levels = tuple(
         dict.fromkeys(
             value.strip().lower()
@@ -2454,8 +2463,10 @@ def _stamped_reasoning_effort_contract(
     )
     if not levels:
         return (), None
-    default = reasoning.get("default_reasoning_effort") or reasoning.get(
-        "default_effort"
+    default = (
+        chat.get("reasoning_effort_default")
+        if from_chat
+        else reasoning.get("default_reasoning_effort") or reasoning.get("default_effort")
     )
     normalized_default = default.strip().lower() if isinstance(default, str) else ""
     return levels, normalized_default if normalized_default in levels else None

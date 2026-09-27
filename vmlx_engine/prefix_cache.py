@@ -6054,6 +6054,10 @@ class BlockAwarePrefixCache:
         if np_sources:
             np_sources.clear()
         np_sources = None
+        # The extraction loop's last BF16-to-F32 pair otherwise survives in
+        # these locals after the views are gone. Per-block payloads now own
+        # their bytes; release the temporary bridges before writer admission.
+        k_np = v_np = None
         try:
             import gc as _gc
             _cleanup_phase_t0 = _cleanup_phase_start()

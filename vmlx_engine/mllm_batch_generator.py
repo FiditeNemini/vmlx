@@ -122,6 +122,7 @@ from .native_mtp_ar_safety import (
     median,
 )
 from .native_mtp_seed_trace import start_native_mtp_seed_trace
+from .native_mtp_forward_probe import start_native_mtp_forward_probe
 from .metal.affine_moe_pair_decode import affine_moe_ar_scope
 
 import mlx.core as mx
@@ -17399,6 +17400,10 @@ class MLLMBatchGenerator:
         extending the draft chain is worth another forward.
         """
         sampler = self._make_request_sampler(request)
+        forward_probe = start_native_mtp_forward_probe(
+            request, "head", mx, inputs=(hidden_state, next_token),
+            model_type=getattr(self, "_model_type", None),
+        )
         try:
             mtp_output = self.language_model.mtp_forward(
                 hidden_state,
@@ -17419,6 +17424,8 @@ class MLLMBatchGenerator:
             mtp_hidden = _native_mtp_hidden_tensor(mtp_output.hidden_states)
         else:
             mtp_logits, mtp_hidden = mtp_output, None
+        if forward_probe is not None:
+            forward_probe.finish(mtp_logits, mtp_hidden)
         final_logits = mtp_logits[:, -1, :]
         draft_tok, draft_lp = _native_mtp_sample_one(final_logits, sampler)
         if return_margin:
@@ -17976,6 +17983,12 @@ class MLLMBatchGenerator:
         from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_scope
         from .metal.native_mtp_verify_pad import native_mtp_verify_pad_scope
 
+        forward_probe = start_native_mtp_forward_probe(
+            request, "verify", mx, inputs=(inputs,),
+            model_type=getattr(self, "_model_type", None),
+            verify_rows=len(verify_inputs),
+        )
+
         # Two self-contained verify-projection acceleration lanes, both default
         # off and mutually compatible (the pad dispatcher only pads small-M
         # activations that the dflash kernel's rows==4 gate would also own).
@@ -18003,6 +18016,8 @@ class MLLMBatchGenerator:
             hidden = _native_mtp_hidden_tensor(output.hidden_states)
         else:
             raise RuntimeError("native MTP verify did not return hidden states")
+        if forward_probe is not None:
+            forward_probe.finish(logits, hidden)
         _native_mtp_async_eval(logits, hidden)
         return {
             "snapshot": replay_snapshot,

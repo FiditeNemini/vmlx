@@ -2339,6 +2339,43 @@ def _diag_logits_fp(output: Any) -> str:
         return f"logits-fp-error:{exc}"
 
 
+def _diag_position_window() -> Optional[Tuple[int, int]]:
+    """Optional inclusive target-token window, bounded to 32 positions."""
+    raw = os.environ.get("VMLX_DIAG_RESTORE_POSITION")
+    if raw is None:
+        return None
+    try:
+        start, stop = (int(item) for item in raw.split(":"))
+        if 0 <= start <= stop and stop - start < 32:
+            return start, stop
+    except (TypeError, ValueError):
+        pass
+    # An invalid explicit window must not silently trace unrelated positions.
+    return -1, -1
+
+
+def _diag_position_logits(output: Any, end_offset: int, window: Tuple[int, int]) -> str:
+    """Describe only requested target rows, after a known native KV offset."""
+    import json
+    import numpy as np
+
+    logits = output[0] if isinstance(output, tuple) else getattr(output, "logits", output)
+    if getattr(logits, "ndim", 0) != 3 or logits.shape[0] != 1:
+        return "unsupported-logit-shape"
+    first_target = end_offset - int(logits.shape[1]) + 1
+    rows = []
+    for index in range(int(logits.shape[1])):
+        position = first_target + index
+        if window[0] <= position <= window[1]:
+            row = np.asarray(logits[0, index].astype(mx.float32))
+            top = np.argsort(row)[-2:][::-1]
+            rows.append({"target_position": position, "row": index,
+                         "top_ids": [int(x) for x in top],
+                         "top_logits": [float(row[x]) for x in top],
+                         "margin": float(row[top[0]] - row[top[1]])})
+    return json.dumps(rows, separators=(",", ":"))
+
+
 def _diag_state_point(tag: str, request: Any, cache: Optional[List[Any]], kv_positions: Any) -> None:
     """Opt-in: layer-0/1 recurrent-state fingerprints at a named point of the
     request lifecycle, to bracket where a live state changes."""
@@ -14062,18 +14099,47 @@ class MLLMBatchGenerator:
         return _absolute_text_position_ids(input_ids, cache, lm)
 
     def _diag_decode_fingerprint(self, batch: Any, req: Any, cache: Optional[List[Any]], output: Any, site: str) -> None:
-        """Opt-in: logits and sparse-lane fingerprints for the first four decode
-        steps of each request, whichever decode call site ran."""
+        """Opt-in: at most four calls, optionally inside an absolute target window.
+
+        Without a window, retain the first-four-call diagnostic. A position
+        window requires known, agreeing KV offsets and reports each target row.
+        """
         try:
+            window = _diag_position_window()
+            position_detail = None
+            if window is not None:
+                if window == (-1, -1) or not cache:
+                    return
+                # Select a known KV lane; recurrent lanes need not expose a
+                # logical offset. Never guess zero for an unknown position.
+                positions = getattr(self, "_hybrid_kv_positions", None) or []
+                offsets = [getattr(cache[i], "offset", None) for i in positions
+                           if 0 <= i < len(cache)]
+                if not offsets or any(not isinstance(x, int) for x in offsets):
+                    return
+                if len(set(offsets)) != 1:
+                    return
+                end_offset = offsets[0]
+                logits = output[0] if isinstance(output, tuple) else getattr(output, "logits", output)
+                if getattr(logits, "ndim", 0) != 3 or logits.shape[0] != 1:
+                    return
+                first_target = end_offset - int(logits.shape[1]) + 1
+                if end_offset < window[0] or first_target > window[1]:
+                    return
+                position_detail = (end_offset, window)
             reqs = list(getattr(batch, "requests", None) or ([] if req is None else [req]))
             for _req in reqs:
                 _n = int(getattr(_req, "_diag_decode_steps", 0) or 0)
                 if _n < 4:
                     _req._diag_decode_steps = _n + 1  # type: ignore[attr-defined]
                     off = int(cache[0].offset) if cache and hasattr(cache[0], "offset") and cache[0].offset is not None else 0
+                    if position_detail is not None:
+                        off = position_detail[0]
                     logger.info(
                         "restore fingerprint DECODE step %d [%s] for %s: %s | cache %s",
-                        _n + 1, site, getattr(_req, "request_id", "?"), _diag_logits_fp(output),
+                        _n + 1, site, getattr(_req, "request_id", "?"),
+                        (_diag_position_logits(output, *position_detail)
+                         if position_detail is not None else _diag_logits_fp(output)),
                         _diag_cache_fingerprint(cache, self._hybrid_kv_positions, off),
                     )
         except Exception as exc:  # noqa: BLE001

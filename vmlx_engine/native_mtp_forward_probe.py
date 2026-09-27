@@ -17,20 +17,24 @@ _AR_PHASES = frozenset({"ar_model", "ar_sample"})
 
 
 class NativeMTPForwardProbe:
-    def __init__(self, mx, metadata, input_ready_ms, started):
+    def __init__(self, mx, metadata, input_ready_ms, started, started_cpu):
         self.mx = mx
         self.metadata = metadata
         self.input_ready_ms = input_ready_ms
         self.started = started
+        self.started_cpu = started_cpu
         self.finished = False
 
     def finish(self, *outputs):
         if self.finished:
             return
+        returned_cpu = time.thread_time()
+        returned = time.perf_counter()
         # Do not retain model arrays in the request or the published record.
         arrays = tuple(x for x in outputs if x is not None)
         self.mx.eval(*arrays)
         self.mx.synchronize()
+        completed_cpu = time.thread_time()
         completed = time.perf_counter()
         self.finished = True
         logger.info(
@@ -40,6 +44,13 @@ class NativeMTPForwardProbe:
                 **self.metadata,
                 "input_ready_ms": self.input_ready_ms,
                 "forward_ready_ms": (completed - self.started) * 1000.0,
+                # The forward may submit work itself. These are caller and
+                # completion boundaries, not isolated graph-build/GPU times.
+                "forward_call_wall_ms": (returned - self.started) * 1000.0,
+                "output_completion_wall_ms": (completed - returned) * 1000.0,
+                "forward_call_thread_cpu_ms": (returned_cpu - self.started_cpu) * 1000.0,
+                "output_completion_thread_cpu_ms": (completed_cpu - returned_cpu) * 1000.0,
+                "cpu_clock": "calling_thread_not_process_or_gpu",
                 "output_shapes": [list(x.shape) for x in arrays],
                 "output_dtypes": [str(x.dtype) for x in arrays],
                 "clock": "serialized_host_and_gpu_completion_wall",
@@ -71,10 +82,11 @@ def start_native_mtp_forward_probe(request, phase, mx, *, inputs=(), **metadata)
     if arrays:
         mx.eval(*arrays)
     mx.synchronize()
+    started_cpu = time.thread_time()
     started = time.perf_counter()
     return NativeMTPForwardProbe(mx, {
         **metadata,
         "request_id": getattr(request, "request_id", None),
         "phase": phase,
         "sample": count + 1,
-    }, (started - before) * 1000.0, started)
+    }, (started - before) * 1000.0, started, started_cpu)

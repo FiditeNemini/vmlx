@@ -73,7 +73,9 @@ class ForwardProbeTests(unittest.TestCase):
         request, device = SimpleNamespace(request_id="r"), Device()
         source = object()
         output = SimpleNamespace(shape=(1, 2, 32), dtype="float16")
-        with patch.object(probe.time, "perf_counter", side_effect=(1., 1.25, 1.75)):
+        with patch.object(probe.time, "perf_counter", side_effect=(1., 1.25, 1.5, 1.75)), patch.object(
+            probe.time, "thread_time", side_effect=(10., 10.05, 10.125)
+        ):
             record = probe.start_native_mtp_forward_probe(
                 request, "verify", device, inputs=(source, None), verify_rows=2
             )
@@ -85,6 +87,11 @@ class ForwardProbeTests(unittest.TestCase):
                 published = json.loads(log.call_args.args[1])
         self.assertEqual(published["input_ready_ms"], 250.)
         self.assertEqual(published["forward_ready_ms"], 500.)
+        self.assertEqual(published["forward_call_wall_ms"], 250.)
+        self.assertEqual(published["output_completion_wall_ms"], 250.)
+        self.assertAlmostEqual(published["forward_call_thread_cpu_ms"], 50.)
+        self.assertAlmostEqual(published["output_completion_thread_cpu_ms"], 75.)
+        self.assertEqual(published["cpu_clock"], "calling_thread_not_process_or_gpu")
         self.assertEqual(published["output_shapes"], [[1, 2, 32]])
         self.assertEqual(published["verify_rows"], 2)
         self.assertTrue(published["perturbs_pipeline"])

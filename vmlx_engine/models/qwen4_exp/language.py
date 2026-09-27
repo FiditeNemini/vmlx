@@ -2565,6 +2565,11 @@ def _layer_fingerprint_enabled(inputs) -> bool:
 
     if os.environ.get("VMLX_DIAG_RESTORE_FINGERPRINT") not in ("1", "true", "True", "yes", "on"):
         return False
+    if os.environ.get("VMLX_DIAG_RESTORE_POSITION") is not None:
+        # The bounded target-position probe owns its own observation window.
+        # Layer-wide tracing here would inflate the seed AR timing and change
+        # the depth controller before that window is reached.
+        return False
     try:
         if int(inputs.shape[-1]) != 1:
             _LAYER_FP_STEPS["n"] = 0  # a prefill starts a new request's trace

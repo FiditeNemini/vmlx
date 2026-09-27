@@ -86,3 +86,17 @@ def test_position_window_does_not_guess_unknown_offset(monkeypatch, caplog):
         host, None, request, [SimpleNamespace()], output, "verify",
     )
     assert not hasattr(request, "_diag_decode_steps")
+
+
+def test_position_window_excludes_broad_layer_tracing(monkeypatch):
+    from vmlx_engine.models.qwen4_exp import language
+
+    monkeypatch.setenv("VMLX_DIAG_RESTORE_FINGERPRINT", "1")
+    monkeypatch.setattr(language, "_LAYER_FP_STEPS", {"n": 0})
+    monkeypatch.setenv("VMLX_DIAG_RESTORE_POSITION", "122:122")
+    inputs = SimpleNamespace(shape=(1, 1))
+    assert not language._layer_fingerprint_enabled(inputs)
+    assert language._LAYER_FP_STEPS["n"] == 0
+    monkeypatch.delenv("VMLX_DIAG_RESTORE_POSITION")
+    assert language._layer_fingerprint_enabled(inputs)
+    assert language._LAYER_FP_STEPS["n"] == 1

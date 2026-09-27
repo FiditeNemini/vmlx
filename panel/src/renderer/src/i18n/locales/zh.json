@@ -625,8 +625,6 @@
       "remoteUsageUnavailable": "在提供方报告每个请求的用量前，token 用量不可用。流式事件数不等于 token 数。",
       "tpsTitle": "首个 token 之后的解码速度；包含推理和工具循环的补全 token",
       "ppsTitle": "未缓存的提示令牌数除以到首个令牌的时间。该时间窗包含排队、媒体处理、缓存恢复和首个令牌计算，因此不是单独的预填充吞吐量。",
-      "ppsTailLabel": "{speed} 未缓存尾部 pp/s",
-      "ppsTailTitle": "缓存命中后到首个令牌的未缓存输入速率：仅处理了未缓存尾部，已缓存令牌被单独恢复。",
       "promptLabel": "提示词 {n}",
       "cachedSuffix": "（{cached} 已缓存）",
       "promptTitleCache": "提示词 token — 缓存：{detail}",
@@ -635,7 +633,7 @@
       "elapsedTitle": "已用时间",
       "totalLabel": "共 {v} 秒",
       "totalTitle": "请求总时间",
-      "ppsLabel": "{speed} pp/s（至首个令牌）"
+      "ppsLabel": "{speed} 输入令牌/秒（输入 ÷ TTFT）"
     },
     "message": {
       "tokenCount": "{n} 个 token"

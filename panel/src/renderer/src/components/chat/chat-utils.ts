@@ -151,16 +151,15 @@ export function getMetricsItems(
         ? t('chat.metrics.remoteUsageUnavailable') : t('chat.metrics.tpsTitle'),
   });
 
-  if (metrics.ppSpeed) {
-    const isUncachedTail = Number.isFinite(metrics.cachedTokens) && (metrics.cachedTokens ?? 0) > 0;
+  // Cache-hit TTFT includes restoration, not just the uncached token tail.
+  // Dividing a tiny tail by that window looks like a prefill slowdown.
+  // Keep the stored metric, but show cache counts and TTFT instead here.
+  const hasCacheHit = Number.isFinite(metrics.cachedTokens) && (metrics.cachedTokens ?? 0) > 0;
+  if (metrics.ppSpeed && !hasCacheHit) {
     items.push({
-      label: isUncachedTail
-        ? t('chat.metrics.ppsTailLabel', { speed: metrics.ppSpeed })
-        : t('chat.metrics.ppsLabel', { speed: metrics.ppSpeed }),
+      label: t('chat.metrics.ppsLabel', { speed: metrics.ppSpeed }),
       value: metrics.ppSpeed,
-      title: isUncachedTail
-        ? t('chat.metrics.ppsTailTitle')
-        : t('chat.metrics.ppsTitle'),
+      title: t('chat.metrics.ppsTitle'),
     });
   }
 

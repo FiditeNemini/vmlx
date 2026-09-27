@@ -625,8 +625,6 @@
       "remoteUsageUnavailable": "El uso de tokens no está disponible hasta que el proveedor lo informe para cada solicitud. Los eventos del flujo no son tokens.",
       "tpsTitle": "Velocidad de decodificación tras el primer token; incluye tokens de razonamiento y del bucle de herramientas",
       "ppsTitle": "Tokens de prompt no cacheados divididos por el tiempo hasta el primer token. Esa ventana incluye cola, procesamiento de medios, restauración de caché y cómputo del primer token, así que no es un rendimiento de prefill aislado.",
-      "ppsTailLabel": "{speed} pp/s del tramo no cacheado",
-      "ppsTailTitle": "Tasa de entrada no cacheada hasta el primer token tras un acierto de caché: solo se procesó el tramo no cacheado; los tokens cacheados se restauraron por separado.",
       "promptLabel": "{n} de prompt",
       "cachedSuffix": " ({cached} en caché)",
       "promptTitleCache": "Tokens del prompt — caché: {detail}",
@@ -635,7 +633,7 @@
       "elapsedTitle": "Tiempo transcurrido",
       "totalLabel": "{v}s en total",
       "totalTitle": "Tiempo total de la solicitud",
-      "ppsLabel": "{speed} pp/s hasta el primer token"
+      "ppsLabel": "{speed} tokens de entrada/s (entrada ÷ TTFT)"
     },
     "message": {
       "tokenCount": "{n} tokens"

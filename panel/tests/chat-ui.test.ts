@@ -377,25 +377,22 @@ describe('Metrics Display Items', () => {
     expect(items[1].label).toBe('42.5 t/s')
   })
 
-  it('includes pp/s when available', () => {
+  it('labels the cold-input rate as input divided by TTFT', () => {
     const items = getMetricsItems({ ...baseMetrics, ppSpeed: '120.0' }, false, t)
-    const ppItem = items.find(i => i.label.includes('pp/s'))
-    // the footer's prefill rate is uncached input over time-to-first-token (queue, media, restore and first-token
-    // compute included), so the label says so instead of posing as isolated prefill compute (CACHE-PERF-DISPLAY-AUDIT)
-    expect(ppItem?.label).toBe('120.0 pp/s to first token')
-    expect(ppItem?.title).toBe(en.chat.metrics.ppsTitle)
+    const rate = items.find(i => i.value === '120.0')
+    expect(rate?.label).toBe('120.0 input tok/s (input ÷ TTFT)')
+    expect(rate?.title).toBe(en.chat.metrics.ppsTitle)
   })
 
-  it('labels cache-hit pp/s as uncached-input speed to first token', () => {
-    const items = getMetricsItems({
-      ...baseMetrics,
-      promptTokens: 7753,
-      cachedTokens: 7744,
-      ppSpeed: '11.1',
-    }, false, t)
-    const ppItem = items.find(i => i.label.includes('pp/s'))
-    expect(ppItem?.label).toBe('11.1 pp/s to first token (uncached input)')
-    expect(ppItem?.title).toBe(en.chat.metrics.ppsTailTitle)
+  it('omits the derived rate after a cache hit while retaining cache and TTFT', () => {
+    const metrics = { ...baseMetrics, promptTokens: 171, cachedTokens: 170, ppSpeed: '1.3', ttft: '0.80' }
+    for (const streaming of [false, true]) {
+      const items = getMetricsItems(metrics, streaming, t)
+      expect(items.some(i => i.value === '1.3')).toBe(false)
+      expect(items.some(i => i.label.includes('170 cached'))).toBe(true)
+      expect(items.some(i => i.label.includes('0.80s'))).toBe(true)
+    }
+    expect(metrics.ppSpeed).toBe('1.3')
   })
 
   it('includes prompt tokens when available', () => {

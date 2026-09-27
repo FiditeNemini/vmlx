@@ -183,6 +183,12 @@ def _resolve_runtime_cache_fingerprint() -> str:
     rope_identity = exact_rope_attn_cache_identity()
     if rope_identity:
         parts.append(rope_identity)
+    # Legacy whole-prompt disk records use this fingerprint directly.
+    from .glm5_prefill_policy import (
+        glm5_kda_substitution_requested, glm5_kda_substitution_identity,
+    )
+    if glm5_kda_substitution_requested():
+        parts.append("glm5_kda_substitution=" + glm5_kda_substitution_identity())
     source_id = _resolve_source_checkout_id()
     if source_id:
         parts.append(f"src={source_id}")
@@ -659,12 +665,16 @@ def compute_model_cache_key(
         )
         from vmlx_engine.glm5_prefill_policy import (
             GLM5_REGISTER_SUM_MATH_ABI,
+            glm5_kda_substitution_requested,
+            glm5_kda_substitution_identity,
             glm5_prefill_layer_fence_enabled,
             glm5_register_pairwise_sum_requested,
         )
         from vmlx_engine.metal.glm5_kda_row_block import MATH_ABI, requested
         if requested():
             parts.append("glm5_kda_row_block=" + MATH_ABI)
+        if glm5_kda_substitution_requested():
+            parts.append("glm5_kda_substitution=" + glm5_kda_substitution_identity())
         if glm5_prefill_layer_fence_enabled():
             parts.append("glm5_prefill_layer_fence=same_shape_v1")
         if glm5_register_pairwise_sum_requested():

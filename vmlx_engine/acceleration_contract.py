@@ -218,6 +218,11 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "native_state": ["KDA", "DSA", "mHC", "MoE"],
         "features": [
             _feature(
+                "kda_substitution", label="bounded exact KDA prefill substitution",
+                kind="metal_kernel", scopes=("prefill",), default=False,
+                env=("VMLX_GLM5_KDA_SUBSTITUTION",),
+            ),
+            _feature(
                 "projection_groups",
                 label="exact KDA and dense projection grouping",
                 kind="load_time_graph",
@@ -435,6 +440,10 @@ def acceleration_family_from_config(config: dict[str, Any]) -> str | None:
 
 
 def _requested(spec: dict[str, Any]) -> tuple[bool, str | bool, str]:
+    if spec["id"] == "kda_substitution":
+        from .glm5_prefill_policy import glm5_kda_substitution_requested
+        selected = glm5_kda_substitution_requested()
+        return selected, selected, "startup:VMLX_GLM5_KDA_SUBSTITUTION"
     default = spec["default"]
     for env_name in spec["env"]:
         if env_name not in os.environ:

@@ -11167,6 +11167,7 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             from .metal.glm5_router_shared import glm5_router_shared_status
             from .metal.kda_conv_decode import glm5_kda_conv_status
             from .metal.kda_step_decode import glm5_kda_step_status
+            from .metal.glm5_kda_substitution import kda_substitution_status
             from .metal.sparse_index_score_decode import sparse_index_score_status
 
             runtime_features["affine_moe_pair"] = {
@@ -11176,6 +11177,7 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             }
             runtime_features["kda_conv_state"] = glm5_kda_conv_status()
             runtime_features["kda_recurrent_step"] = glm5_kda_step_status()
+            runtime_features["kda_substitution"] = kda_substitution_status()
             runtime_features["mhc_transform"] = glm5_mhc_status()
             runtime_features["mhc_transform"]["compound_weighted_rms"] = (
                 glm5_mhc_norm_status()

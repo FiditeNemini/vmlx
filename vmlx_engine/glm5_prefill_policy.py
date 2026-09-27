@@ -50,3 +50,21 @@ def glm5_prefill_layer_fence_enabled() -> bool:
     ordinary decode or short speculative verification.
     """
     return os.environ.get("VMLX_GLM5_PREFILL_LAYER_FENCE", "1") == "1"
+
+
+# Startup-frozen selection: math, cache identity and health use one value.
+_KDA_SUBSTITUTION_REQUESTED = os.environ.get("VMLX_GLM5_KDA_SUBSTITUTION", "0") == "1"
+GLM5_KDA_SUBSTITUTION_MATH_ABI = "mlx0322_col32x32_i1stock_v1"
+
+
+def glm5_kda_substitution_requested() -> bool:
+    return _KDA_SUBSTITUTION_REQUESTED
+
+
+@lru_cache(maxsize=1)
+def glm5_kda_substitution_identity() -> str:
+    import hashlib
+    from pathlib import Path
+
+    source = Path(__file__).with_name("metal") / "glm5_kda_substitution.py"
+    return GLM5_KDA_SUBSTITUTION_MATH_ABI + ":" + hashlib.sha256(source.read_bytes()).hexdigest()

@@ -101,6 +101,9 @@ def _stamp_compact_top_k_contract(
         top_p=float(top_p or 0.0),
         top_k=int(top_k),
     )
+    # Only this pure filter contract permits evaluating unused proposal rows.
+    # Identity also invalidates admission if a caller replaces the hook.
+    sampler._vmlx_acceptance_batch_contract = sampler._vmlx_acceptance_logprobs
     return sampler
 
 

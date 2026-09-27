@@ -2434,9 +2434,11 @@ def _stamped_reasoning_effort_contract(
     """
     if not bundle_path:
         return (), None
-    reasoning = _read_bundle_json(bundle_path, "jang_config.json").get("reasoning")
-    if not isinstance(reasoning, dict):
-        return (), None
+    stamp = _read_bundle_json(bundle_path, "jang_config.json")
+    reasoning = stamp.get("reasoning")
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
+    chat = stamp.get("chat")
+    chat = chat if isinstance(chat, dict) else {}
     # Two spellings name this one fact: `supported_reasoning_efforts` mirrors
     # the engine identifier (Qwen3.8 onward), `reasoning_effort_levels` is what
     # the DSV4/Muse stamps already ship. Read both here so neither side has to
@@ -2445,6 +2447,13 @@ def _stamped_reasoning_effort_contract(
     raw_levels = reasoning.get("supported_reasoning_efforts") or reasoning.get(
         "reasoning_effort_levels"
     )
+    # GLM JANGH stamps the same native contract directly under chat. Keep
+    # older reasoning stamps authoritative when both representations exist.
+    from_chat = not raw_levels
+    if from_chat:
+        raw_levels = chat.get("reasoning_efforts")
+    if not isinstance(raw_levels, (list, tuple)):
+        return (), None
     levels = tuple(
         dict.fromkeys(
             value.strip().lower()
@@ -2454,8 +2463,10 @@ def _stamped_reasoning_effort_contract(
     )
     if not levels:
         return (), None
-    default = reasoning.get("default_reasoning_effort") or reasoning.get(
-        "default_effort"
+    default = (
+        chat.get("reasoning_effort_default")
+        if from_chat
+        else reasoning.get("default_reasoning_effort") or reasoning.get("default_effort")
     )
     normalized_default = default.strip().lower() if isinstance(default, str) else ""
     return levels, normalized_default if normalized_default in levels else None
@@ -10170,6 +10181,13 @@ def _find_routed_down_layer_bit_plan(
 
 
 def _weight_matmul_dispatch_status(codec: str) -> dict:
+    if codec == "jangtq2_codebook":
+        return {
+            "primary": "vmlx_jangtq2_custom_kernels",
+            "uses_mlx_quantized_matmul": True,
+            "metal_na_eligible": False,
+            "reason": "mixed_bundle_jangtq2_experts_with_mlx_quantized_nonexperts",
+        }
     if codec == "turboquant_codebook":
         return {
             "primary": "jang_tools_turboquant_custom_kernels",
@@ -10870,6 +10888,40 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
             "prestacked_bundle": has_prestacked_bundle,
         },
     }
+    # The global affine default describes non-experts, not TQ2 routed
+    # weights. Report the actual per-module mixture without inventing a
+    # single target width or claiming runtime dispatch was measured here.
+    declaration = cfg.get("jangtq")
+    if isinstance(declaration, dict) and type(declaration.get("version")) is int and declaration["version"] == 2:
+        modules = {
+            key: value for key, value in q_cfg.items()
+            if isinstance(value, dict) and isinstance(value.get("mode"), str)
+        }
+        tq_modules = {key: value for key, value in modules.items() if value["mode"] == "jangtq2"}
+        if tq_modules:
+            widths = sorted({value["bits"] for value in tq_modules.values()
+                             if type(value.get("bits")) is int})
+            modes = sorted({value["mode"] for value in modules.values()})
+            result.update({
+                "codec": "jangtq2_codebook",
+                "weight_format": "jangtq2",
+                "backend": "vmlx_jangtq2",  # legacy machine-readable identifier
+                "runtime_component": "jangh",
+                "runtime_component_label": "JANGH",
+                "serialized_weight_format": "jangtq2",
+                "target_bits": None,
+                "group_size": None,
+                "routed_expert_bits": widths[0] if len(widths) == 1 else None,
+                "routed_expert_bit_widths": widths,
+                "routed_expert_bits_label": "/".join(map(str, widths)) + "-bit",
+                "mixed_precision": len(modes) > 1 or len(widths) > 1,
+                "module_quantization_modes": modes,
+                "jangtq2_projection_count": len(tq_modules),
+                "jangtq2_rotation": declaration.get("rotation", "none"),
+                "jangtq2_codebook_family": declaration.get("codebook_family"),
+                "quantization_metadata_source": "config.quantization",
+                "weight_matmul_dispatch": _weight_matmul_dispatch_status("jangtq2_codebook"),
+            })
     return {k: v for k, v in result.items() if v is not None}
 
 
@@ -11115,6 +11167,7 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             from .metal.glm5_router_shared import glm5_router_shared_status
             from .metal.kda_conv_decode import glm5_kda_conv_status
             from .metal.kda_step_decode import glm5_kda_step_status
+            from .metal.glm5_kda_substitution import kda_substitution_status
             from .metal.sparse_index_score_decode import sparse_index_score_status
 
             runtime_features["affine_moe_pair"] = {
@@ -11124,6 +11177,7 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             }
             runtime_features["kda_conv_state"] = glm5_kda_conv_status()
             runtime_features["kda_recurrent_step"] = glm5_kda_step_status()
+            runtime_features["kda_substitution"] = kda_substitution_status()
             runtime_features["mhc_transform"] = glm5_mhc_status()
             runtime_features["mhc_transform"]["compound_weighted_rms"] = (
                 glm5_mhc_norm_status()
@@ -11167,7 +11221,16 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
         runtime["status_collection_error"] = type(exc).__name__
 
     runtime["features"] = runtime_features
-    return build_acceleration_contract(family, runtime)
+    contract = build_acceleration_contract(family, runtime)
+    if family == "qwen4_exp":
+        from .qwen4_rope_policy import exact_rope_attn_status
+
+        # Numerical identity is not an acceleration feature; the feature
+        # formatter intentionally emits only registered accelerator entries.
+        contract["numerical_policy"] = {
+            "attention_exact_rope": exact_rope_attn_status(),
+        }
+    return contract
 
 
 def _model_acceleration_status(bundle_path: str | None = None) -> dict:
@@ -11176,7 +11239,13 @@ def _model_acceleration_status(bundle_path: str | None = None) -> dict:
     na_status = _mlx_metal_na_status()
     host = _host_supports_metal_na()
 
-    if codec == "turboquant_codebook":
+    if codec == "jangtq2_codebook":
+        # Codec capability, not evidence of a particular dispatched kernel.
+        kernel_type = "jangtq2_codebook"
+        active = False
+        metal_na_capable = True
+        reason = "custom_decode_with_nax_or_steel_prefill_route_not_observed"
+    elif codec == "turboquant_codebook":
         mpp_nax = _jangtq_mpp_nax_runtime_status(host)
         active = bool(mpp_nax.get("active"))
         kernel_type = (
@@ -11220,6 +11289,11 @@ def _model_acceleration_status(bundle_path: str | None = None) -> dict:
         },
         "host": host,
     }
+    if codec == "jangtq2_codebook":
+        result["runtime_component"] = "jangh"
+        result["dispatch_observed"] = False
+        result["prefill_backends"] = ["nax", "steel"]
+        result["decode_backend"] = "custom_metal"
     if codec == "turboquant_codebook":
         result["jangtq_acceleration"] = mpp_nax
     result["family_runtime"] = _family_acceleration_contract(
@@ -21294,7 +21368,31 @@ _responses_was_reasoning_only: set[str] = set()
 
 
 def _clone_response_messages(messages: list[dict]) -> list[dict]:
-    """JSON-deep-copy response history so later request mutation cannot leak."""
+    """Copy JSON containers while sharing immutable media/text payloads."""
+    active: set[int] = set()
+
+    def copy_json(value):
+        kind = type(value)
+        if kind in (str, int, float, bool, type(None)):
+            return value
+        if kind not in (list, dict) or id(value) in active:
+            raise ValueError("Use legacy JSON normalization")
+        active.add(id(value))
+        try:
+            if kind is list:
+                return [copy_json(item) for item in value]
+            if any(type(key) is not str for key in value):
+                raise ValueError("Use legacy JSON key normalization")
+            return {key: copy_json(item) for key, item in value.items()}
+        finally:
+            active.remove(id(value))
+
+    try:
+        return copy_json(messages)
+    except Exception:
+        # Preserve existing normalization and fallback for non-JSON types,
+        # subclasses, non-string keys and cycles rather than changing callers.
+        pass
     try:
         return json.loads(json.dumps(messages))
     except Exception:
@@ -22005,7 +22103,9 @@ def _structured_output_repair_warning(report: dict | None) -> list[str] | None:
     ]
 
 
-def _responses_get_history(response_id: str | None) -> list[dict]:
+def _responses_get_history(
+    response_id: str | None, *, required: bool = False
+) -> list[dict]:
     """Return template-safe replayable history for a chained turn.
 
     The STORE keeps the reasoning-only assistant turn for fidelity (the
@@ -22022,6 +22122,15 @@ def _responses_get_history(response_id: str | None) -> list[dict]:
     with _responses_history_lock:
         history = _responses_history.get(response_id)
         if history is None:
+            if required:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "previous_response_id was not found in local response history. "
+                        "It may have expired or been lost when the server restarted. "
+                        "Resend the complete conversation without previous_response_id."
+                    ),
+                )
             return []
         _responses_history.move_to_end(response_id)
         history = _clone_response_messages(history)
@@ -22053,10 +22162,24 @@ def _responses_scrub_multimodal_history_for_text_followup(messages: list[dict]) 
     return scrubbed
 
 
+def _responses_preserves_loaded_media_history(engine: Any) -> bool:
+    """Keep authored media on the qualified GLM multimodal replay path.
+
+    Resolve the loaded bundle, never the caller's model alias. Cache availability
+    must not change conversation meaning: a miss keeps media for cold prefill
+    (or explicit admission rejection), rather than silently deleting it.
+    """
+    if not getattr(engine, "is_mllm", False):
+        return False
+    config = _current_model_config()
+    return getattr(config, "family_name", None) in {"glm5_next", "glm5_next_text"}
+
+
 def _responses_should_scrub_multimodal_history_for_followup(
     input_data: str | list,
     *,
     current_request_has_media: bool,
+    preserve_historical_media: bool = False,
 ) -> bool:
     """Decide whether a chained text request may discard prior media payloads.
 
@@ -22064,10 +22187,11 @@ def _responses_should_scrub_multimodal_history_for_followup(
     encoders. A ``function_call_output`` request is different: it is the
     continuation of the same assistant turn that consumed the media. Scrubbing
     at that boundary makes the model forget media-derived facts between its
-    tool call and final answer. Keep prior media for that one logical tool loop;
-    later ordinary text turns retain the existing scrub behavior.
+    tool call and final answer. Keep prior media for that logical tool loop.
+    Qualified loaded runtimes retain media across ordinary turns too; other
+    families retain their existing policy pending replay qualification.
     """
-    if current_request_has_media:
+    if preserve_historical_media or current_request_has_media:
         return False
     if not isinstance(input_data, list):
         return True
@@ -23491,19 +23615,40 @@ async def create_response(
     )
     messages = _responses_input_to_messages(
         request.input,
-        request.instructions,
+        (
+            None
+            if _preserves_native_system_order(request.model)
+            else request.instructions
+        ),
         preserve_multimodal=_preserve_mm,
         preserve_native_roles=_preserves_native_developer_role(request.model),
         strict_tool_arguments=_native_omni_resp,
     )
     if request.previous_response_id:
-        previous_messages = _responses_get_history(request.previous_response_id)
+        # Resolve existence and copy atomically: eviction must not turn an
+        # explicitly chained request into a fresh, context-free generation.
+        previous_messages = _responses_get_history(
+            request.previous_response_id, required=True
+        )
         _enforce_text_only_override(
             "/v1/responses", _messages_requested_modalities(previous_messages)
         )
+        preserve_historical_media = _responses_preserves_loaded_media_history(engine)
+        if previous_messages and preserve_historical_media:
+            # Current-input admission does not see media replayed from an older
+            # response (possibly created by another loaded model). Validate the
+            # retained payloads instead of silently dropping unsupported parts.
+            historical_modalities = _messages_requested_modalities(previous_messages)
+            if historical_modalities:
+                unsupported_historical = _responses_modalities_unsupported_after_m3_vl_carveout(
+                    engine, historical_modalities
+                )
+                if unsupported_historical:
+                    _reject_unsupported_multimodal("/v1/responses", unsupported_historical)
         if previous_messages and _responses_should_scrub_multimodal_history_for_followup(
             request.input,
             current_request_has_media=_responses_has_media,
+            preserve_historical_media=preserve_historical_media,
         ):
             previous_messages = _responses_scrub_multimodal_history_for_text_followup(
                 previous_messages
@@ -23516,12 +23661,12 @@ async def create_response(
                 len(previous_messages),
                 request.previous_response_id,
             )
-        else:
-            logger.info(
-                "Responses API previous_response_id=%s not found in local history; "
-                "continuing with request input only",
-                request.previous_response_id,
-            )
+    # Native-order templates need request-scoped instructions before restored
+    # history. Keep authored system/developer messages in their native order and
+    # instructions out of history_messages. Generic templates retain their
+    # existing base-then-current instruction merging order.
+    if request.instructions and _preserves_native_system_order(request.model):
+        messages = [{"role": "system", "content": request.instructions}] + messages
     messages = _canonicalize_mimo_v26_tool_history(messages)
     if _preserve_mm and not _native_omni_resp:
         messages = _coerce_orphan_tool_messages_for_template(messages)
@@ -23570,9 +23715,8 @@ async def create_response(
     )
     if _native_omni_resp:
         from .omni_native_tools import prepare_native_tools
-        # Chained request instructions initially follow the saved assistant
-        # call. Normalize their system position before checking result batches;
-        # generic orphan coercion must not erase malformed native history.
+        # Validate native result adjacency after assembling request instructions
+        # and history; generic orphan coercion must not erase malformed history.
         messages = prepare_native_tools(None, None, messages).messages
         history_messages = prepare_native_tools(None, None, history_messages).messages
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)

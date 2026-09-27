@@ -122,6 +122,7 @@ from .native_mtp_ar_safety import (
     median,
 )
 from .native_mtp_seed_trace import start_native_mtp_seed_trace
+from .native_mtp_forward_probe import start_native_mtp_forward_probe
 from .metal.affine_moe_pair_decode import affine_moe_ar_scope
 
 import mlx.core as mx
@@ -1250,6 +1251,44 @@ def _media_chunk_boundaries(
         bounds.append(end)
         pos = end
     return bounds
+
+
+def _bounded_mimo_media_plan(seq_len, configured_step, heads, cached_tokens,
+                             active_bytes, limit_bytes, runs, clean_boundaries,
+                             *, allow_oversized_merged_runs=False):
+    """Conservative admission geometry, not a measured kernel allocation."""
+    headroom = int(limit_bytes) - int(active_bytes)
+    if active_bytes <= 0 or limit_bytes <= 0 or headroom <= 0:
+        raise PrefillAdmissionError("MiMo media prefill requires positive measured Metal headroom")
+    context = max(1, int(cached_tokens) + int(seq_len))
+    step = max(1, min(int(configured_step), _TIGHT_PROJECTED_STEP_CAP,
+                     max_prefill_chunk_tokens(heads, context,
+                                              budget_bytes=headroom // 4,
+                                              bytes_per_score=4)))
+    # Only the native causal LM may slice already-merged oversized runs.
+    # Short runs retain their previous edges; cache checkpoints never move
+    # inside any media item, even when its LM forward is split.
+    if any(a < edge < b for edge in clean_boundaries for a, b in runs):
+        raise PrefillAdmissionError("MiMo media clean checkpoint would split a protected span")
+    protected_runs = [
+        (a, b) for a, b in runs
+        if not allow_oversized_merged_runs or b - a <= step
+    ]
+    bounds = sorted(set(_media_chunk_boundaries(seq_len, step, protected_runs)) |
+                    set(clean_boundaries))
+    start = 0
+    for end in bounds:
+        if not start < end <= seq_len or end - start > step:
+            raise PrefillAdmissionError(
+                f"MiMo media prefill protected span [{start}:{end}) exceeds "
+                f"conservative {step}-token budget; active={active_bytes} limit={limit_bytes}"
+            )
+        if any(a < end < b for a, b in protected_runs):
+            raise PrefillAdmissionError("MiMo media clean checkpoint would split a protected span")
+        start = end
+    if start != seq_len:
+        raise PrefillAdmissionError("MiMo media prefill plan does not cover the full input")
+    return step, bounds
 
 
 def _media_placeholder_runs(
@@ -4366,6 +4405,7 @@ class MLLMNativeMTPStats:
     configured_depth: int = 0
     depth_policy: str = ""
     span_seconds: float = 0.0
+    span_finalized: bool = False
     accepts: int = 0
     rejects: int = 0
     init_emits: int = 0
@@ -4418,6 +4458,8 @@ class MLLMNativeMTPStats:
     stochastic_ratio_checks: int = 0
     stochastic_ratio_accepts: int = 0
     stochastic_residual_corrections: int = 0
+    stochastic_packed_probability_reads: int = 0
+    stochastic_reused_filter_pairs: int = 0
 
     def to_dict(
         self,
@@ -4459,6 +4501,7 @@ class MLLMNativeMTPStats:
             )
             depth_rates[label] = _rate(accepted, drafted)
 
+        confirmed = self.init_emits + self.draft_emits + self.bonus_emits + self.verify_emits
         draft_head = dict(self.draft_head)
         if draft_head:
             draft_head["calls"] = int(self.draft_head_calls)
@@ -4499,6 +4542,14 @@ class MLLMNativeMTPStats:
             },
             "draft_head": draft_head,
             "timings_ms": timings,
+            # This is segment ownership wall, not a sum of lazy phase timers.
+            "span_seconds": self.span_seconds,
+            "span_finalized": self.span_finalized,
+            "confirmed_popped_tokens": confirmed,
+            "confirmed_popped_tok_s": (
+                confirmed / self.span_seconds if self.span_seconds > 0.0 else None
+            ),
+            "span_scope": "post_seed_to_mtp_exit_excludes_ar_handoff_and_cleanup",
             "cache_lifecycle": native_mtp_cache_lifecycle_snapshot(
                 head_cache=self.mtp_head_cache,
                 recreated_on_rejects=self.mtp_cache_recreated_on_rejects,
@@ -4518,6 +4569,8 @@ class MLLMNativeMTPStats:
                 "residual_corrections": int(
                     self.stochastic_residual_corrections
                 ),
+                "packed_probability_reads": int(self.stochastic_packed_probability_reads),
+                "reused_filter_pairs": int(self.stochastic_reused_filter_pairs),
             },
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
@@ -5154,6 +5207,7 @@ def _native_mtp_accepted_count(
     target_lps: List[Optional[mx.array]],
     sampler: Optional[Callable[[mx.array], mx.array]] = None,
     telemetry: Optional[Dict[str, int]] = None,
+    filtered_rows: Optional[dict] = None,
 ) -> int:
     """Count leading accepted drafts for one MTP verify cycle.
 
@@ -5170,6 +5224,7 @@ def _native_mtp_accepted_count(
         stochastic=_NATIVE_MTP_STOCHASTIC_ACCEPT,
         sampler=sampler,
         telemetry=telemetry,
+        filtered_rows=filtered_rows,
     )
 
 
@@ -5179,6 +5234,7 @@ def _native_mtp_rejection_correction(
     target_lp: Optional[mx.array],
     draft_lp: Optional[mx.array],
     sampler: Callable[[mx.array], mx.array],
+    *, filtered_pair=None,
 ) -> Tuple[mx.array, int]:
     """Return the verifier correction after one rejected proposal.
 
@@ -5196,8 +5252,11 @@ def _native_mtp_rejection_correction(
 
     from .native_mtp_acceptance import accept_lp_for, residual_sample
 
-    target_accept_lp = accept_lp_for(sampler, target_lp)
-    draft_accept_lp = accept_lp_for(sampler, draft_lp)
+    if filtered_pair is None:
+        target_accept_lp = accept_lp_for(sampler, target_lp)
+        draft_accept_lp = accept_lp_for(sampler, draft_lp)
+    else:
+        target_accept_lp, draft_accept_lp = filtered_pair
     correction_id, _ = residual_sample(
         target_accept_lp,
         draft_accept_lp,
@@ -5792,6 +5851,35 @@ def _native_mtp_bump_emit(state: MLLMNativeMTPState, source: str) -> None:
         state.stats.bonus_emits += 1
     elif source == "verify":
         state.stats.verify_emits += 1
+
+
+def _native_mtp_finalize_span(state: MLLMNativeMTPState, *, now=None) -> None:
+    """Freeze post-seed segment wall at ownership exit, without any GPU fence.
+
+    Keep cycle_span_start untouched: the adaptive cost guard also owns it.
+    Emission counters count queue pops, not queued drafts or client delivery.
+    Error/cancelled records remain labelled as such by their existing publisher.
+    """
+    import math
+
+    stats = state.stats
+    if stats.span_finalized:
+        return
+    stats.configured_depth = int(
+        state.ladder_depth or state.depth_ceiling or state.depth or 0
+    )
+    stats.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
+    try:
+        start = float(getattr(state, "cycle_span_start", 0.0) or 0.0)
+        end = float(time.perf_counter() if now is None else now)
+        elapsed = end - start
+        valid = start > 0.0 and math.isfinite(start) and math.isfinite(end)
+        valid = valid and math.isfinite(elapsed) and elapsed >= 0.0
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+        elapsed = 0.0
+    stats.span_seconds = elapsed if valid else 0.0
+    stats.span_finalized = True
 
 
 def _native_mtp_log_stats(
@@ -8519,6 +8607,7 @@ class MLLMBatchGenerator:
         self._decode_trace_every = max(
             1, int(os.environ.get("VMLINUX_DECODE_TRACE_EVERY", "64") or "64")
         )
+        self._ar_forward_probe = os.environ.get("VMLX_AR_FORWARD_PROBE", "0") == "1"
         self._decode_trace_count = 0
         self._decode_trace_model_s = 0.0
         self._decode_trace_sample_s = 0.0
@@ -8864,6 +8953,7 @@ class MLLMBatchGenerator:
                 if mtp_state is None:
                     continue
                 try:
+                    _native_mtp_finalize_span(mtp_state)
                     self._abandon_pending_native_mtp_verify(
                         mtp_state, getattr(self.active_batch, "cache", None)
                     )
@@ -13252,7 +13342,28 @@ class MLLMBatchGenerator:
         straight back to the one-shot call.
         """
         _raise_if_prefill_cancelled(request)
-        one_shot = lambda: self.model(input_ids, **kwargs)
+        bounded_mimo = bool(getattr(self.model, "_mimo_v26_runtime", False)) and bool(
+            getattr(self, "_tight_memory_prefill_drain", False)
+        )
+
+        bounded_glm = (
+            os.environ.get("VMLX_GLM5_BOUNDED_MEDIA_PREFILL", "0") == "1"
+            and getattr(self.language_model, "model_type", "")
+            in {"glm5_next", "glm5_next_text"}
+            and bool(getattr(self, "_tight_memory_prefill_drain", False))
+        )
+
+        def one_shot():
+            if bounded_glm:
+                raise PrefillAdmissionError(
+                    "Bounded GLM media prefill cannot use an unbounded one-shot fallback"
+                )
+            if bounded_mimo:
+                raise PrefillAdmissionError(
+                    "Tight-memory MiMo media prefill requires bounded execution; "
+                    "one-shot fallback is unavailable"
+                )
+            return self.model(input_ids, **kwargs)
 
         if os.environ.get("VMLX_DISABLE_MEDIA_CHUNKED_PREFILL") in (
             "1", "true", "True", "yes", "on"
@@ -13334,16 +13445,11 @@ class MLLMBatchGenerator:
         # The generic 8192-token crossover is too late for a nearly resident
         # GLM-5.3: connected image prompts can OOM below it. Qualification-only
         # opt-in; other families and ordinary-headroom requests are unchanged.
-        bounded_glm = (
-            os.environ.get("VMLX_GLM5_BOUNDED_MEDIA_PREFILL", "0") == "1"
-            and getattr(lm, "model_type", "") in {"glm5_next", "glm5_next_text"}
-            and bool(getattr(self, "_tight_memory_prefill_drain", False))
-        )
         min_chunk_seq = _MEDIA_PREFILL_CHUNK_MIN_SEQ
-        if bounded_glm:
+        if bounded_glm or bounded_mimo:
             chunk = max(1, min(int(self.prefill_step_size), _TIGHT_PROJECTED_STEP_CAP))
             min_chunk_seq = chunk
-        if clean_boundary <= 0 and glm_native_boundary <= 0 and (
+        if not bounded_mimo and not bounded_glm and clean_boundary <= 0 and glm_native_boundary <= 0 and (
             chunk <= 0 or seq_len <= max(chunk, min_chunk_seq)
         ):
             return one_shot()
@@ -13351,6 +13457,12 @@ class MLLMBatchGenerator:
         try:
             features = get_embeds(input_ids, **kwargs)
         except Exception as exc:
+            if bounded_mimo:
+                raise
+            if bounded_glm:
+                raise PrefillAdmissionError(
+                    "Bounded GLM media prefill requires successful embedding merge"
+                ) from exc
             logger.info(
                 "media chunked prefill unavailable for %s (embedding merge "
                 "failed: %s); using the one-shot forward",
@@ -13363,6 +13475,8 @@ class MLLMBatchGenerator:
         if embeds is None:
             embeds = features if hasattr(features, "shape") else None
         if embeds is None or getattr(embeds, "ndim", 0) < 2:
+            if bounded_mimo:
+                raise PrefillAdmissionError("MiMo bounded media prefill requires merged embeddings")
             return one_shot()
 
         # Per-chunk extras that are NOT derivable from the cache offset.
@@ -13392,11 +13506,36 @@ class MLLMBatchGenerator:
         if glm_native_boundary > 0:
             bounds = sorted(set(bounds) | {glm_native_boundary})
 
+        if bounded_mimo:
+            if token_list is None or not media_ids:
+                raise PrefillAdmissionError("MiMo bounded media prefill requires protected token spans")
+            # Complete the encoder independently before measuring LM headroom.
+            mx.eval(embeds)
+            active, limit = get_effective_metal_working_set_bytes(mx)
+            chunk, bounds = _bounded_mimo_media_plan(
+                seq_len, self.prefill_step_size,
+                _infer_attention_heads_for_hybrid_oom_guard(lm),
+                int(getattr(request, "_cached_tokens", 0) or 0),
+                active, limit, runs, clean_boundaries,
+                allow_oversized_merged_runs=True,
+            )
+            logger.info(
+                "MiMo bounded media plan request=%s active_bytes=%d limit_bytes=%d "
+                "target=%d span_widths=%s", request.request_id, active, limit, chunk,
+                [end - begin for begin, end in zip([0] + bounds[:-1], bounds)],
+            )
+
         # Verify the invariant the wrapper asked for instead of trusting it.
         _split_run = None
         _prev = 0
+        # The native causal LM may cut only oversized, fully merged runs.
+        # Its planner already checked clean checkpoints against ALL runs.
+        forward_protected_runs = (
+            [(a, b) for a, b in runs if b - a <= chunk]
+            if bounded_mimo else runs
+        )
         for _end in bounds[:-1]:
-            for _rs, _re in runs:
+            for _rs, _re in forward_protected_runs:
                 if _rs < _end < _re:
                     _split_run = (_rs, _re, _end)
                     break
@@ -13404,6 +13543,10 @@ class MLLMBatchGenerator:
                 break
             _prev = _end
         if _split_run is not None:
+            if bounded_glm:
+                raise PrefillAdmissionError(
+                    "Bounded GLM media prefill checkpoint would split a protected media span"
+                )
             logger.info(
                 "media chunked prefill declined for %s: a chunk boundary at "
                 "%d would split the media run [%d, %d). Falling back to the "
@@ -13413,14 +13556,26 @@ class MLLMBatchGenerator:
             )
             return one_shot()
 
+        if bounded_glm and any(
+            end - begin > chunk
+            for begin, end in zip([0] + bounds[:-1], bounds)
+        ):
+            raise PrefillAdmissionError(
+                "Bounded GLM media prefill cannot split an oversized protected media span"
+            )
+
         logger.info(
-            "media chunked prefill for %s: %d tokens in %d chunks (step %d, "
-            "media spans kept whole%s), peak now scales with the chunk "
-            "instead of the whole prompt",
+            "media chunked prefill for %s: %d tokens in %d chunks (target step %d, "
+            "%s%s)",
             getattr(request, "request_id", "?"),
             seq_len,
             len(bounds),
             chunk,
+            (
+                "oversized merged media spans split for native causal attention"
+                if bounded_mimo and any(b - a > chunk for a, b in runs)
+                else "media spans kept whole"
+            ),
             "; wrapper requested span protection" if _protect_media_spans else "",
         )
 
@@ -13439,9 +13594,28 @@ class MLLMBatchGenerator:
                     "media-prefill-begin request=%s span=%d:%d active_bytes=%d",
                     request.request_id, start, end, int(mx.get_active_memory()),
                 )
-            if bounded_glm:
+            if bounded_glm or bounded_mimo:
                 active, limit = get_effective_metal_working_set_bytes(mx)
-                if prefill_valve_enabled():
+                if bounded_mimo:
+                    # Recheck live headroom before every actual span. The score
+                    # geometry is a conservative floor, not attribution of OOM.
+                    heads = max(1, _infer_attention_heads_for_hybrid_oom_guard(lm))
+                    ctx = int(getattr(request, "_cached_tokens", 0) or 0) + end
+                    projected = heads * (end - start) * max(1, ctx) * 4
+                    hybrid_chunk_valve_check(
+                        active, limit, projected, ctx, ctx,
+                        prefill_valve_min_margin_bytes(), chunk_start=start, chunk_end=end,
+                        model_label="MiMo media prefill",
+                    )
+                    hybrid_chunk_valve_check(
+                        active, limit, observed_transient, observed_context, ctx,
+                        prefill_valve_min_margin_bytes(), chunk_start=start, chunk_end=end,
+                        model_label="MiMo media prefill measured projection",
+                        observed_chunk_tokens=observed_width,
+                        next_chunk_tokens=max(observed_width, end - start),
+                        chunk_scaled=True,
+                    )
+                elif prefill_valve_enabled():
                     hybrid_chunk_valve_check(
                         active, limit, observed_transient, observed_context,
                         end, prefill_valve_min_margin_bytes(),
@@ -13487,20 +13661,23 @@ class MLLMBatchGenerator:
             # clean-boundary snapshot is submitted. Never interrupt Metal from
             # the HTTP thread or turn a cancellation into a full-prefill retry.
             _raise_if_prefill_cancelled(request)
-            if bounded_glm:
+            if bounded_glm or bounded_mimo:
                 peak = int(mx.get_peak_memory())
                 transient = max(0, peak - active)
-                if start > 0 and replace_chunk_transient_observation(
-                    "glm5_next", transient, end-start,
+                if (bounded_mimo or start > 0) and replace_chunk_transient_observation(
+                    "mimo_v2" if bounded_mimo else "glm5_next", transient, end-start,
                     observed_transient, observed_width,
                 ):
                     observed_transient, observed_context, observed_width = (
-                        transient, end, end-start
+                        transient,
+                        (int(getattr(request, "_cached_tokens", 0) or 0) + end) if bounded_mimo else end,
+                        end-start
                     )
                 logger.info(
-                    "GLM media prefill chunk request=%s span=%d:%d "
-                    "active_bytes=%d peak_bytes=%d transient_bytes=%d",
-                    request.request_id, start, end, active, peak, transient,
+                    "%s media prefill chunk request=%s span=%d:%d "
+                    "active_bytes=%d limit_bytes=%d peak_bytes=%d transient_bytes=%d",
+                    "MiMo" if bounded_mimo else "GLM",
+                    request.request_id, start, end, active, limit, peak, transient,
                 )
             if end == glm_native_boundary:
                 self._store_glm_native_boundary(request, cache)
@@ -17224,6 +17401,10 @@ class MLLMBatchGenerator:
         extending the draft chain is worth another forward.
         """
         sampler = self._make_request_sampler(request)
+        forward_probe = start_native_mtp_forward_probe(
+            request, "head", mx, inputs=(hidden_state, next_token),
+            model_type=getattr(self, "_model_type", None),
+        )
         try:
             mtp_output = self.language_model.mtp_forward(
                 hidden_state,
@@ -17244,6 +17425,8 @@ class MLLMBatchGenerator:
             mtp_hidden = _native_mtp_hidden_tensor(mtp_output.hidden_states)
         else:
             mtp_logits, mtp_hidden = mtp_output, None
+        if forward_probe is not None:
+            forward_probe.finish(mtp_logits, mtp_hidden)
         final_logits = mtp_logits[:, -1, :]
         draft_tok, draft_lp = _native_mtp_sample_one(final_logits, sampler)
         if return_margin:
@@ -17801,6 +17984,12 @@ class MLLMBatchGenerator:
         from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_scope
         from .metal.native_mtp_verify_pad import native_mtp_verify_pad_scope
 
+        forward_probe = start_native_mtp_forward_probe(
+            request, "verify", mx, inputs=(inputs,),
+            model_type=getattr(self, "_model_type", None),
+            verify_rows=len(verify_inputs),
+        )
+
         # Two self-contained verify-projection acceleration lanes, both default
         # off and mutually compatible (the pad dispatcher only pads small-M
         # activations that the dflash kernel's rows==4 gate would also own).
@@ -17828,6 +18017,8 @@ class MLLMBatchGenerator:
             hidden = _native_mtp_hidden_tensor(output.hidden_states)
         else:
             raise RuntimeError("native MTP verify did not return hidden states")
+        if forward_probe is not None:
+            forward_probe.finish(logits, hidden)
         _native_mtp_async_eval(logits, hidden)
         return {
             "snapshot": replay_snapshot,
@@ -17852,20 +18043,19 @@ class MLLMBatchGenerator:
         pending = getattr(state, "pending_verify", None)
         if not isinstance(pending, dict):
             return
-        state.pending_verify = None
         if cache is None:
-            return
+            raise RuntimeError("native MTP pending-verify rollback has no cache")
         try:
-            _native_mtp_restore_replay_cache(
+            restored = _native_mtp_restore_replay_cache(
                 cache,
                 pending["snapshot"],
                 pending["n_inputs"],
             )
-        except Exception:
-            logger.warning(
-                "native MTP pending-verify rollback failed; cache may hold "
-                "unverified draft positions"
-            )
+        except Exception as exc:
+            raise RuntimeError("native MTP pending-verify rollback failed") from exc
+        if not restored:
+            raise RuntimeError("native MTP pending-verify cache rejected rollback")
+        state.pending_verify = None
 
     def _rewind_native_mtp_terminal_boundary(
         self,
@@ -17992,6 +18182,10 @@ class MLLMBatchGenerator:
             except Exception:
                 pass
 
+        acceptance_rows = (
+            {} if os.environ.get("VMLX_MTP_REUSE_ACCEPTANCE_ROWS", "0") == "1"
+            else None
+        )
         if precomputed_accepted is not None:
             # Decided on device in the bundle above; no host-side comparison.
             accepted = precomputed_accepted
@@ -18008,12 +18202,16 @@ class MLLMBatchGenerator:
                 target_lps,
                 sampler,
                 telemetry=decision_telemetry,
+                filtered_rows=acceptance_rows,
             )
             state.stats.stochastic_ratio_checks += int(
                 decision_telemetry.get("ratio_checks", 0)
             )
             state.stats.stochastic_ratio_accepts += int(
                 decision_telemetry.get("ratio_accepts", 0)
+            )
+            state.stats.stochastic_packed_probability_reads += int(
+                decision_telemetry.get("packed_probability_reads", 0)
             )
 
         state.stats.cycles += 1
@@ -18194,12 +18392,16 @@ class MLLMBatchGenerator:
                 and target_lps[accepted] is not None
             ):
                 state.stats.stochastic_residual_corrections += 1
+            filtered_pair = (acceptance_rows or {}).get(accepted)
+            if filtered_pair is not None:
+                state.stats.stochastic_reused_filter_pairs += 1
             correction, correction_id = _native_mtp_rejection_correction(
                 correction,
                 correction_id,
                 target_lps[accepted],
                 state.draft_lps[accepted],
                 sampler,
+                filtered_pair=filtered_pair,
             )
         state.queue.append((correction_id, target_lps[accepted], "verify"))
         if not skipped_replay:
@@ -18489,6 +18691,16 @@ class MLLMBatchGenerator:
         # explicit positions, so keep decode absolute too instead of relying on
         # module-level rope state.
         lm_kwargs: Dict[str, Any] = {"cache": cache}
+        ar_probe_request = None
+        ar_model_probe = None
+        if getattr(self, "_ar_forward_probe", False):
+            active = self.active_batch
+            if active and len(active.requests) == 1:
+                ar_probe_request = active.requests[0]
+                ar_model_probe = start_native_mtp_forward_probe(
+                    ar_probe_request, "ar_model", mx, inputs=(input_tokens,),
+                    model_type=getattr(self, "_model_type", None),
+                )
         _posid_t0 = time.perf_counter() if trace else 0.0
         if _lm_supports_position_ids(self.language_model):
             position_ids = _absolute_text_position_ids(
@@ -18539,6 +18751,15 @@ class MLLMBatchGenerator:
 
         logits = logits[:, -1, :]
 
+        if ar_model_probe is not None:
+            ar_model_probe.finish(logits)
+        ar_sample_probe = (
+            start_native_mtp_forward_probe(
+                ar_probe_request, "ar_sample", mx, inputs=(logits,),
+                model_type=getattr(self, "_model_type", None),
+            ) if ar_probe_request is not None else None
+        )
+
         # Per-request sampling using each request's sampling parameters.
         # VLM logprobs are rejected at the API layer, so do not materialize a
         # full-vocab logsoftmax every decode token on the default fast path.
@@ -18567,6 +18788,9 @@ class MLLMBatchGenerator:
                 sampled = mx.concatenate(tokens, axis=0)
         else:
             sampled, _ = _sample_mllm_prefill_logits(logits, self.sampler)
+
+        if ar_sample_probe is not None:
+            ar_sample_probe.finish(sampled)
 
         if trace:
             mx.synchronize()
@@ -18721,6 +18945,7 @@ class MLLMBatchGenerator:
                     and not mtp_state.queue
                 ):
                     _handoff_t0 = time.perf_counter()
+                    _native_mtp_finalize_span(mtp_state, now=_handoff_t0)
                     self._abandon_pending_native_mtp_verify(mtp_state, batch.cache)
                     ready, fallback_reason = _native_mtp_ar_fallback_ready(
                         batch.cache,
@@ -18742,11 +18967,6 @@ class MLLMBatchGenerator:
                         if _native_mtp_handoff_is_calibration(mtp_state)
                         else "fallback_to_ar"
                     )
-                    _hs = mtp_state.stats
-                    _hs.configured_depth = int(
-                        mtp_state.ladder_depth or mtp_state.depth_ceiling or mtp_state.depth or 0
-                    )
-                    _hs.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
                     _native_mtp_log_stats(
                         batch.requests[0].request_id,
                         mtp_state.stats,
@@ -18788,6 +19008,7 @@ class MLLMBatchGenerator:
                         tier.last_step_t = time.perf_counter()
                         batch.requests[0]._native_mtp_ar_tier = tier
             except Exception as exc:
+                _native_mtp_finalize_span(mtp_state)
                 from .native_mtp_prompt_priming import drop_parked_context
 
                 drop_parked_context(
@@ -18960,20 +19181,39 @@ class MLLMBatchGenerator:
                 )
                 mtp_state_for_finish = getattr(req, "_native_mtp_state", None)
                 if mtp_state_for_finish is not None:
-                    self._rewind_native_mtp_terminal_boundary(
-                        req, batch.cache, mtp_state_for_finish
-                    )
-                    _fs = mtp_state_for_finish.stats
-                    _fs.configured_depth = int(
-                        mtp_state_for_finish.ladder_depth
-                        or mtp_state_for_finish.depth_ceiling
-                        or mtp_state_for_finish.depth
-                        or 0
-                    )
-                    _fs.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
-                    _span0 = float(getattr(mtp_state_for_finish, "cycle_span_start", 0.0) or 0.0)
-                    if _span0 > 0.0:
-                        _fs.span_seconds = max(0.0, time.perf_counter() - _span0)
+                    _native_mtp_finalize_span(mtp_state_for_finish)
+                    try:
+                        self._rewind_native_mtp_terminal_boundary(
+                            req, batch.cache, mtp_state_for_finish
+                        )
+                    except Exception as exc:
+                        # Never retry a streamed request or publish cache state
+                        # after its confirmed-prefix rollback failed. end_idx
+                        # already owns this row's normal batch removal below.
+                        logger.error(
+                            "MLLM native MTP terminal rollback failed for %s: %s",
+                            request_id, exc,
+                        )
+                        mtp_state_for_finish.pending_verify = None
+                        mtp_state_for_finish.terminal_snapshot = None
+                        mtp_state_for_finish.queue.clear()
+                        for name in (
+                            "_native_mtp_state", "_native_mtp_ar_tier",
+                            "_media_clean_prefix_cache", "_media_clean_prefix_len",
+                            "_mixed_swa_boundary",
+                        ):
+                            if hasattr(req, name):
+                                delattr(req, name)
+                        responses.append(MLLMBatchResponse(
+                            uid=uid,
+                            request_id=request_id,
+                            token=0,
+                            logprobs=logprobs[i],
+                            finish_reason="error",
+                            error=f"NativeMTPError: {exc}",
+                            prompt_cache=None,
+                        ))
+                        continue
                     _native_mtp_log_stats(
                         request_id,
                         mtp_state_for_finish.stats,
@@ -19260,6 +19500,55 @@ class MLLMBatchGenerator:
                 return None
         except Exception:
             return None
+        delta_position_ids = None
+        try:
+            prefix_has_media = self._tokens_contain_media_placeholders(
+                list(token_list[:ck_len])
+            )
+            # The pinned Qwen3.5 language model rebuilds zero-based positions
+            # when clean prefill clears its module state, even for a text-only
+            # gap after a nonzero checkpoint. Qwen4's pure-text fallback uses
+            # the cache offset correctly; preserve that already-qualified path.
+            needs_text_positions = str(getattr(self, "_model_type", "")) in {
+                "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+            }
+            if prefix_has_media or needs_text_positions:
+                # Reconstruct this request's compressed 3-axis positions from
+                # processed IDs/grids. Cached module attributes may be stale.
+                from copy import copy
+
+                full_ids = getattr(req, "input_ids", None)
+                # Text-only tokenization yields [tokens], while the media
+                # processor yields [batch, tokens]. Normalize a view without
+                # changing the request used by the main prefill path.
+                if getattr(full_ids, "ndim", 0) == 1:
+                    full_ids = full_ids[None, :]
+                if (
+                    full_ids is None or getattr(full_ids, "ndim", 0) != 2
+                    or int(full_ids.shape[0]) != 1
+                    or int(full_ids.shape[1]) < len(token_list)
+                    or full_ids[0, :len(token_list)].tolist() != list(token_list)
+                ):
+                    return None
+                position_request = copy(req)
+                if str(getattr(self, "_model_type", "")) not in {
+                    "qwen4_exp", "qwen4_exp_text", "qwen3_5", "qwen3_5_text",
+                    "qwen3_5_moe", "qwen3_5_moe_text",
+                } or not self._mrope_tail_position_ids(
+                    position_request, full_ids, ck_len
+                ):
+                    return None
+                positions = getattr(position_request, "_mrope_full_position_ids", None)
+                if (
+                    positions is None or positions.ndim != 3
+                    or tuple(positions.shape[:2]) != (3, 1)
+                    or int(positions.shape[-1]) != int(full_ids.shape[1])
+                ):
+                    return None
+                delta_position_ids = positions[..., ck_len:fetch_num]
+        except Exception as exc:
+            logger.info("Companion delta declined: media positions unavailable: %s", exc)
+            return None
         try:
             from .utils.cache_extent import cache_offset
         except Exception:
@@ -19284,8 +19573,43 @@ class MLLMBatchGenerator:
             # silently emptied dots3 answers.
             if int(cache_offset(layer) or 0) < ck_len:
                 return None
+            from .models.minimax_m3.cache import (
+                MiniMaxM3SparseCache, clone_minimax_m3_sparse,
+            )
+            from mlx_lm.models.cache import KVCache
+
+            if isinstance(layer, MiniMaxM3SparseCache):
+                # Capacity can exceed initialized index length. Never convert
+                # unwritten padding into a valid sparse-attention prefix.
+                index_keys = getattr(layer, "idx_keys", None)
+                if (
+                    index_keys is None
+                    or any(int(value.shape[-2]) < int(cache_offset(layer) or 0)
+                           for value in (keys, values, index_keys))
+                    or int(getattr(layer, "_idx_offset", 0) or 0) != int(cache_offset(layer) or 0)
+                    or int(layer._idx_offset) < ck_len
+                    or not _validate_prompt_cache([layer], source="companion-delta-source")
+                ):
+                    return None
+                clone = clone_minimax_m3_sparse(layer, length=ck_len)
+                if (
+                    clone is None or int(clone.offset) != ck_len
+                    or int(clone._idx_offset) != ck_len
+                    or not _validate_prompt_cache([clone], source="companion-delta-slice")
+                ):
+                    return None
+                sliced.append(clone)
+                continue
+            if type(layer) is not KVCache:
+                # Other typed/windowed caches need their own exact slice ABI.
+                return None
             seq_axis = 1 if keys.ndim == 3 else 2
-            if int(keys.shape[seq_axis]) < ck_len:
+            if (
+                int(keys.shape[seq_axis]) < ck_len
+                or values.ndim != keys.ndim
+                or int(values.shape[seq_axis]) < ck_len
+                or not _validate_prompt_cache([layer], source="companion-delta-source")
+            ):
                 return None
             try:
                 clone = type(layer)()
@@ -19300,6 +19624,8 @@ class MLLMBatchGenerator:
                 clone.keys = keys[..., :ck_len, :]
                 clone.values = values[..., :ck_len, :]
             clone.offset = ck_len
+            if not _validate_prompt_cache([clone], source="companion-delta-slice"):
+                return None
             sliced.append(clone)
 
         logger.info(
@@ -19312,11 +19638,13 @@ class MLLMBatchGenerator:
             ck_len,
         )
         try:
-            derived = self._prefill_for_clean_ssm(
+            derived = self._prefill_for_clean_path_dependent_cache(
                 list(token_list[:fetch_num]),
                 sliced,
                 ck_len,
                 cache_extra_keys=cache_extra_keys,
+                require_base=True,
+                delta_position_ids=delta_position_ids,
             )
         except Exception as exc:
             logger.info(
@@ -19348,8 +19676,6 @@ class MLLMBatchGenerator:
         # transient is the whole problem, so release it here rather than let a
         # guard decline work because of it.
         try:
-            import mlx.core as mx
-
             # Force the recurrent state to be REAL before dropping its parents.
             # These are lazy graphs until evaluated; freeing the attention
             # buffers first would only re-materialise them on the next eval.
@@ -19455,6 +19781,9 @@ class MLLMBatchGenerator:
         base_cache: Optional[List[Any]] = None,
         base_token_count: int = 0,
         cache_extra_keys: Optional[Any] = None,
+        *,
+        require_base: bool = False,
+        delta_position_ids: Optional[Any] = None,
     ) -> Optional[List[Any]]:
         """Run a clean prompt-only prefill matching a path-dependent cache key.
 
@@ -19496,6 +19825,17 @@ class MLLMBatchGenerator:
         if not tokens or self.language_model is None:
             return None
         seq_len = len(tokens)
+        if require_base and not (
+            base_cache is not None and 0 < int(base_token_count) < seq_len
+        ):
+            return None
+        if delta_position_ids is not None and (
+            not require_base
+            or getattr(delta_position_ids, "ndim", 0) != 3
+            or tuple(delta_position_ids.shape[:2]) != (3, 1)
+            or int(delta_position_ids.shape[-1]) != seq_len - int(base_token_count)
+        ):
+            return None
         try:
             resume_at = 0
             fresh_cache = None
@@ -19559,11 +19899,16 @@ class MLLMBatchGenerator:
                 else:
                     logger.info(
                         "MLLM clean prefill: reconstructed base does not match the "
-                        "hybrid layer layout; re-deriving the whole prompt instead"
-                        "%s",
+                        "hybrid layer layout; %s%s",
+                        "declining required delta" if require_base else "re-deriving the whole prompt instead",
                         " (splice declined)" if _HYBRID_BASE_SPLICE else "",
                     )
 
+            if require_base and (
+                fresh_cache is None or resume_at != int(base_token_count)
+            ):
+                logger.info("Companion delta declined: exact base splice unavailable; no full-prefix replay")
+                return None
             if fresh_cache is None:
                 cache_model = getattr(self, "_cache_model", None)
                 fresh_cache = (
@@ -19633,9 +19978,15 @@ class MLLMBatchGenerator:
             # resume_at is non-zero only when a caller-supplied base already
             # covers that prefix, so those tokens are never re-forwarded.
             for _start in range(resume_at, seq_len, chunk_size):
+                forward_kwargs = {"cache": fresh_cache}
+                if delta_position_ids is not None:
+                    local_start = _start - resume_at
+                    forward_kwargs["position_ids"] = delta_position_ids[
+                        ..., local_start:local_start + chunk_size
+                    ]
                 _ = self.language_model(
                     mx.array([tokens[_start:_start + chunk_size]]),
-                    cache=fresh_cache,
+                    **forward_kwargs,
                 )
                 materialize.clear()
                 for c in fresh_cache:

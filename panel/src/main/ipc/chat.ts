@@ -76,6 +76,7 @@ import {
 } from "../../shared/reasoningEffortPolicy";
 import {
   isMetalHeadroomBubbleContent,
+  nativeMtpChatErrorWarning,
   isPromptTooLongBubbleContent,
   projectedMetalHeadroomChatErrorContent,
   promptTooLongChatErrorContent,
@@ -2987,10 +2988,9 @@ export function registerChatHandlers(
           // Live generation TPS from rolling window (real-time speed of incoming tokens).
           // Cumulative TPS (tokenCount / generationMs) is used for final saved metrics only.
           const streamTps = liveTps;
-          // Cumulative generation time for elapsed display
-          const genSec = generationMs / 1000;
-          const wallSec = (now - (firstTokenTime || fetchStartTime)) / 1000;
-          const elapsed = genSec > 0.05 ? genSec : wallSec;
+          // Elapsed display shares the final whole-turn clock. Generation-only
+          // timing remains separate for TPS; follow-up fetches do not reset it.
+          const elapsed = Math.max(0, (now - startTime) / 1000);
           // TTFT measured from fetchStartTime (excludes health check and message building overhead)
           const ttft = Math.max(
             0,
@@ -3496,7 +3496,7 @@ export function registerChatHandlers(
                         cacheDetail,
                         tokensPerSecond: _hbTps,
                         ttft: ttft.toFixed(2),
-                        elapsed: ((now - fetchStartTime) / 1000).toFixed(1),
+                        elapsed: Math.max(0, (now - startTime) / 1000).toFixed(1),
                         ...remoteMetricFields(),
                       },
                     });
@@ -4366,7 +4366,7 @@ export function registerChatHandlers(
                     ttft: firstTokenTime
                       ? ((firstTokenTime - fetchStartTime) / 1000).toFixed(2)
                       : "0",
-                    elapsed: (generationMs / 1000).toFixed(1),
+                    elapsed: Math.max(0, (Date.now() - startTime) / 1000).toFixed(1),
                     ...remoteMetricFields(),
                   },
                 });
@@ -5033,6 +5033,13 @@ export function registerChatHandlers(
         // GH #253: honest engine 413 (prompt_too_long) must render as a
         // graceful in-chat message, not a raw IPC error dialog.
         const promptTooLongErrorContent = promptTooLongChatErrorContent(errMsg);
+        const nativeMtpErrorWarning = abortController.signal.aborted
+          ? null
+          : nativeMtpChatErrorWarning(errMsg);
+        const abortWarnings = Array.from(new Set([
+          ...(responseWarnings || []),
+          ...(nativeMtpErrorWarning ? [nativeMtpErrorWarning] : []),
+        ]));
         if (
           !projectedMetalHeadroomErrorContent &&
           !promptTooLongErrorContent &&
@@ -5114,6 +5121,7 @@ export function registerChatHandlers(
           abortReasoningContent.trim() ||
           projectedMetalHeadroomErrorContent ||
           promptTooLongErrorContent ||
+          nativeMtpErrorWarning ||
           collectedToolStatuses.length > 0 ||
           abortTotalTokens > 0;
         // True when the ONLY thing to show is the prompt-too-long bubble — no
@@ -5134,6 +5142,9 @@ export function registerChatHandlers(
               promptTooLongErrorContent ||
               "[Generation interrupted]";
           assistantMessage.tokens = abortTotalTokens;
+          if (abortWarnings.length > 0) {
+            assistantMessage.warningsJson = JSON.stringify(abortWarnings);
+          }
 
           // Calculate real metrics for the partial generation (not hardcoded zeros)
           const abortTotalTime = (Date.now() - startTime) / 1000;
@@ -5206,6 +5217,7 @@ export function registerChatHandlers(
                     ? abortReasoningSegments
                     : undefined,
                 finishReason: abortFinishReason,
+                warnings: abortWarnings.length > 0 ? abortWarnings : undefined,
                 metrics: abortMetrics,
               });
             }

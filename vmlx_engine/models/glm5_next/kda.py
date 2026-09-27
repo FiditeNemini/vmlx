@@ -33,6 +33,7 @@ import mlx.core as mx
 
 from vmlx_engine.glm5_prefill_policy import glm5_register_pairwise_sum_requested
 from vmlx_engine.metal.glm5_pairwise_sum import glm5_pairwise_sum
+from vmlx_engine.metal.glm5_kda_substitution import kda_substitution
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -393,9 +394,13 @@ def kda_chunked(
     A = mx.where(lower, -(Akk * bc[..., None]), mx.zeros_like(Akk))
 
     # forward substitution: (I - lower(A))^{-1}-style accumulation
-    for i in range(1, BT):
-        upd = mx.sum(A[..., i, :, None] * A[..., :, :i], axis=-2)
-        A[..., i, :i] = A[..., i, :i] + upd
+    solved = kda_substitution(A) if BT == 64 else None
+    if solved is not None:
+        A = solved
+    else:
+        for i in range(1, BT):
+            upd = mx.sum(A[..., i, :, None] * A[..., :, :i], axis=-2)
+            A[..., i, :i] = A[..., i, :i] + upd
     A = (A + mx.eye(BT, dtype=mx.float32)) * bc[..., None, :]
 
     w = A @ (mx.exp(gc) * kc)                               # [B,H,NT,BT,K]

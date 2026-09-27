@@ -2328,7 +2328,9 @@ def _diag_logits_fp(output: Any) -> str:
     try:
         import numpy as np
 
-        logits = getattr(output, "logits", output)
+        # Native MTP returns (target_logits, expanded_hidden); fingerprint
+        # the same target tensor as the object and plain-array contracts.
+        logits = output[0] if isinstance(output, tuple) else getattr(output, "logits", output)
         last = logits[:, -1, :] if getattr(logits, "ndim", 0) == 3 else logits
         row = np.asarray(last.astype(mx.float32)).reshape(-1)
         top = np.argsort(row)[-2:][::-1]

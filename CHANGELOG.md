@@ -4,6 +4,13 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.70] - 2026-09-27
+
+- SSD cache: avoid redundant layer-type inference when stored blocks already declare their cache types.
+- Native MTP caching: recover prompt sidecars after SSD block IDs change, validating the complete prefix identity before reuse. Sidecar persistence across application restarts is unchanged.
+- Diagnostics: count a speculative scheduler step once even when it emits multiple tokens; support bounded late-token forward attribution and targeted restore-logit probes.
+- Experimental MTP and kernel options remain disabled by default. This release does not establish universal sustained prose speedups across quantizations.
+
 ## [1.6.69] - 2026-09-27
 
 - Cache snapshots: detach mutable hybrid-cache padding so later batch advancement cannot alter stored or fetched state. Release temporary BF16 conversion references before cache cleanup.

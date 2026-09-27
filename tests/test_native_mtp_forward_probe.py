@@ -26,6 +26,36 @@ class Device:
 
 
 class ForwardProbeTests(unittest.TestCase):
+    def test_ar_and_mtp_flags_are_independent(self):
+        for ar, mtp in (("0", "1"), ("1", "0")):
+            with patch.dict(probe.os.environ, {
+                "VMLX_AR_FORWARD_PROBE": ar,
+                "VMLX_NATIVE_MTP_FORWARD_PROBE": mtp,
+            }):
+                for phase in ("ar_model", "ar_sample", "head", "verify"):
+                    request, device = SimpleNamespace(), Device()
+                    record = probe.start_native_mtp_forward_probe(request, phase, device)
+                    enabled = ar == "1" if phase.startswith("ar_") else mtp == "1"
+                    self.assertEqual(record is not None, enabled)
+                    if not enabled:
+                        self.assertEqual(device.calls, [])
+                        self.assertEqual(vars(request), {})
+
+    @patch.dict(probe.os.environ, {"VMLX_AR_FORWARD_PROBE": "1"})
+    def test_ar_phases_stop_at_eight_and_use_distinct_label(self):
+        request, device = SimpleNamespace(request_id="ar"), Device()
+        output = SimpleNamespace(shape=(1,), dtype="uint32")
+        for phase in ("ar_model", "ar_sample"):
+            for _ in range(8):
+                record = probe.start_native_mtp_forward_probe(request, phase, device)
+                with patch.object(probe.logger, "info") as log:
+                    record.finish(output)
+                    self.assertEqual(log.call_args.args[0], "MLLM AR completed forward %s")
+                    self.assertEqual(json.loads(log.call_args.args[1])["phase"], phase)
+            before = list(device.calls)
+            self.assertIsNone(probe.start_native_mtp_forward_probe(request, phase, device))
+            self.assertEqual(device.calls, before)
+
     def test_disabled_has_no_device_calls_or_request_mutation(self):
         for value in ("0", "", "false"):
             with self.subTest(value=value), patch.dict(

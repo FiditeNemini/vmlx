@@ -13,6 +13,7 @@ import time
 logger = logging.getLogger(__name__)
 _LIMIT_PER_PHASE = 8
 _PHASES = frozenset({"head", "verify"})
+_AR_PHASES = frozenset({"ar_model", "ar_sample"})
 
 
 class NativeMTPForwardProbe:
@@ -33,7 +34,8 @@ class NativeMTPForwardProbe:
         completed = time.perf_counter()
         self.finished = True
         logger.info(
-            "MLLM native MTP completed forward %s",
+            ("MLLM AR completed forward %s" if self.metadata["phase"] in _AR_PHASES
+             else "MLLM native MTP completed forward %s"),
             json.dumps({
                 **self.metadata,
                 "input_ready_ms": self.input_ready_ms,
@@ -48,9 +50,11 @@ class NativeMTPForwardProbe:
 
 
 def start_native_mtp_forward_probe(request, phase, mx, *, inputs=(), **metadata):
-    if os.environ.get("VMLX_NATIVE_MTP_FORWARD_PROBE", "0") != "1":
+    flag = ("VMLX_AR_FORWARD_PROBE" if phase in _AR_PHASES
+            else "VMLX_NATIVE_MTP_FORWARD_PROBE")
+    if os.environ.get(flag, "0") != "1":
         return None
-    if phase not in _PHASES:
+    if phase not in _PHASES | _AR_PHASES:
         raise ValueError(f"unknown native MTP forward phase: {phase}")
     counts = getattr(request, "_native_mtp_forward_probe_counts", None)
     if counts is None:

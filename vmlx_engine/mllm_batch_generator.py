@@ -8607,6 +8607,7 @@ class MLLMBatchGenerator:
         self._decode_trace_every = max(
             1, int(os.environ.get("VMLINUX_DECODE_TRACE_EVERY", "64") or "64")
         )
+        self._ar_forward_probe = os.environ.get("VMLX_AR_FORWARD_PROBE", "0") == "1"
         self._decode_trace_count = 0
         self._decode_trace_model_s = 0.0
         self._decode_trace_sample_s = 0.0
@@ -18690,6 +18691,16 @@ class MLLMBatchGenerator:
         # explicit positions, so keep decode absolute too instead of relying on
         # module-level rope state.
         lm_kwargs: Dict[str, Any] = {"cache": cache}
+        ar_probe_request = None
+        ar_model_probe = None
+        if getattr(self, "_ar_forward_probe", False):
+            active = self.active_batch
+            if active and len(active.requests) == 1:
+                ar_probe_request = active.requests[0]
+                ar_model_probe = start_native_mtp_forward_probe(
+                    ar_probe_request, "ar_model", mx, inputs=(input_tokens,),
+                    model_type=getattr(self, "_model_type", None),
+                )
         _posid_t0 = time.perf_counter() if trace else 0.0
         if _lm_supports_position_ids(self.language_model):
             position_ids = _absolute_text_position_ids(
@@ -18740,6 +18751,15 @@ class MLLMBatchGenerator:
 
         logits = logits[:, -1, :]
 
+        if ar_model_probe is not None:
+            ar_model_probe.finish(logits)
+        ar_sample_probe = (
+            start_native_mtp_forward_probe(
+                ar_probe_request, "ar_sample", mx, inputs=(logits,),
+                model_type=getattr(self, "_model_type", None),
+            ) if ar_probe_request is not None else None
+        )
+
         # Per-request sampling using each request's sampling parameters.
         # VLM logprobs are rejected at the API layer, so do not materialize a
         # full-vocab logsoftmax every decode token on the default fast path.
@@ -18768,6 +18788,9 @@ class MLLMBatchGenerator:
                 sampled = mx.concatenate(tokens, axis=0)
         else:
             sampled, _ = _sample_mllm_prefill_logits(logits, self.sampler)
+
+        if ar_sample_probe is not None:
+            ar_sample_probe.finish(sampled)
 
         if trace:
             mx.synchronize()

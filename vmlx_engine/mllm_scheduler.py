@@ -5672,8 +5672,14 @@ class MLLMScheduler:
         executor_s: float,
         dispatch_s: float,
     ) -> None:
+        # A speculative step may emit several output items for one request.
+        # Charge its shared wall time once per request, while retaining every
+        # item/token count. These are per-request inclusive step timings, not
+        # additive allocations across concurrently batched requests.
+        request_outputs = {}
         for req_output in step_output.outputs:
-            request_id = req_output.request_id
+            request_outputs.setdefault(req_output.request_id, []).append(req_output)
+        for request_id, outputs in request_outputs.items():
             timing = self._scheduler_trace_timings.setdefault(
                 request_id,
                 {
@@ -5694,8 +5700,10 @@ class MLLMScheduler:
             timing["steps"] += 1.0
             timing["executor_s"] += max(executor_s, 0.0)
             timing["dispatch_s"] += max(dispatch_s, 0.0)
-            timing["output_items"] += 1.0
-            timing["output_tokens"] += float(len(req_output.new_token_ids or []))
+            timing["output_items"] += float(len(outputs))
+            timing["output_tokens"] += float(
+                sum(len(output.new_token_ids or []) for output in outputs)
+            )
             trace_timings = step_output.trace_timings or {}
             for key in (
                 "total_s",
@@ -5708,7 +5716,7 @@ class MLLMScheduler:
             ):
                 target = "step_total_s" if key == "total_s" else key
                 timing[target] += max(float(trace_timings.get(key, 0.0) or 0.0), 0.0)
-            if req_output.finished:
+            if any(output.finished for output in outputs):
                 logger.info(
                     "VMLINUX_MLLM_SCHEDULER_TRACE request_id=%s steps=%d "
                     "output_items=%d output_tokens=%d executor_ms=%.3f "

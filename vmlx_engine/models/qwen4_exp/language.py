@@ -96,7 +96,11 @@ from vmlx_engine.metal.sparse_index_score_decode import (
 )
 
 from .ngram import NGramHasher
-from .host_profile import profile_decode_forward
+from .host_profile import (
+    SUBMISSION_PROFILE_ENABLED,
+    profile_decode_forward,
+    profile_submission,
+)
 from .projection_cache import validated_projection_group
 from .media_positions import media_rope_index
 
@@ -2489,7 +2493,10 @@ class Qwen4ExpTextModel(nn.Module):
                 if eager_dispatch:
                     # Dependencies remain on the caller's MLX stream; cache
                     # consumers and terminal durability fences stay unchanged.
-                    mx.async_eval(h)
+                    if SUBMISSION_PROFILE_ENABLED:
+                        profile_submission(mx.async_eval, h)
+                    else:
+                        mx.async_eval(h)
                 if _layer_fp:
                     _log_layer_fingerprint(layer_index, h, c)
                     if layer_index < 2:
@@ -2557,6 +2564,11 @@ def _layer_fingerprint_enabled(inputs) -> bool:
     import os
 
     if os.environ.get("VMLX_DIAG_RESTORE_FINGERPRINT") not in ("1", "true", "True", "yes", "on"):
+        return False
+    if os.environ.get("VMLX_DIAG_RESTORE_POSITION") is not None:
+        # The bounded target-position probe owns its own observation window.
+        # Layer-wide tracing here would inflate the seed AR timing and change
+        # the depth controller before that window is reached.
         return False
     try:
         if int(inputs.shape[-1]) != 1:

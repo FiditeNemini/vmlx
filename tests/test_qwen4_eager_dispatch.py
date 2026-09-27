@@ -69,6 +69,46 @@ def _assert_exact(left, right):
         assert left == right
 
 
+def test_submission_phase_diagnostic_preserves_native_verifier(monkeypatch):
+    """New diagnostic call site: same logits/state, submissions and caller stream."""
+    from vmlx_engine.models.qwen4_exp.host_profile import profile_decode_forward
+    from vmlx_engine.mllm_batch_generator import _native_mtp_rollback_to_confirmed
+
+    model = _model(monkeypatch)
+    monkeypatch.setenv("VMLX_QWEN4_HOST_PROFILE", "1")
+    monkeypatch.setenv("VMLX_QWEN4_HOST_PROFILE_ROWS", "3")
+    monkeypatch.setenv("VMLX_QWEN4_HOST_PROFILE_MODE", "phases")
+    original = language.LanguageModel.__call__
+    monkeypatch.setattr(language.LanguageModel, "__call__", profile_decode_forward(original))
+    stream = mx.new_stream(mx.gpu)
+    submit = mx.async_eval
+    submissions = []
+
+    def observed(value):
+        assert mx.default_stream(mx.gpu) == stream
+        submissions.append(mx.default_stream(mx.gpu))
+        return submit(value)
+
+    monkeypatch.setattr(mx, "async_eval", observed)
+    arms = []
+    counts = []
+    with mx.stream(stream):
+        for enabled in (False, True):
+            monkeypatch.setattr(language, "SUBMISSION_PROFILE_ENABLED", enabled)
+            cache = model.make_cache()
+            model(mx.array([[11, 17, 23, 29, 31]]), cache=cache)
+            verified = model(mx.array([[37, 41, 43]]), cache=cache,
+                             n_confirmed=1, return_hidden=True)
+            before = (_snapshot(verified), _cache_snapshot(cache))
+            assert _native_mtp_rollback_to_confirmed(cache, reject_tokens=1, accepted_drafts=1)
+            continuation = model(mx.array([[47]]), cache=cache)
+            arms.append((before, _snapshot(continuation.logits), _cache_snapshot(cache)))
+            counts.append(len(submissions))
+            submissions.clear()
+    _assert_exact(*arms)
+    assert counts == [3 * len(model.layers)] * 2
+
+
 @pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16, "mixed_quant"])
 def test_eager_dispatch_exact_connected_cache_on_caller_stream(monkeypatch, dtype):
     model = _model(monkeypatch)

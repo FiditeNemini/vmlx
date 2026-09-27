@@ -8,7 +8,7 @@ All notable changes to vMLX Engine will be documented in this file.
 
 - JANGH: load validated Hadamard/GPTQ routed-expert bundles, preserve legacy JANGTQ v2 compatibility, and reuse exact codebook fits during kernel startup. Expert-aligned prefill tiles and fused Hadamard gate/up kernels remain opt-in.
 - Qwen hybrid caching: preserve native recurrent state and text positions when replaying a partially cached prefix. SSD lookup shares prefix-hashing work; cache-write status reflects actual admission.
-- GLM-5.3: bound multimodal prefill admission, recover shorter valid native cache prefixes, preserve native thinking-off template bytes, and honor bundle-declared low/high/max reasoning efforts.
+- GLM-5.3: add opt-in bounded multimodal prefill admission, recover shorter valid native cache prefixes, preserve native thinking-off template bytes, and honor bundle-declared low/high/max reasoning efforts.
 - Responses: retain GLM media history, reject missing continuation history, preserve request instructions before chained history, and avoid copying immutable history payloads.
 - Native MTP: correct sampled acceptance and fail closed when pending verification rollback fails. New diagnostics and experimental acceptance paths remain opt-in; this release makes no universal or sustained prose speedup claim.
 - Chat and media: preserve video frame metadata and message order, retain tool policy across media continuations, keep elapsed time across tool passes, and correct cache/loading status presentation.

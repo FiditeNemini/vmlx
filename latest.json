@@ -1,21 +1,21 @@
 {
-  "version": "1.6.69",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.69/vMLX-1.6.69-tahoe-arm64.dmg",
-  "sha256": "69813008cb59fe676eb40827c0ebce4943e31ff66a548b57d42c3fd1ceb24bbc",
-  "sha512": "1uuLUu1ntWYHRAWCpidp3H/zB8EsKWyFb9OuYsNqKUs68gIPpQWLxYoXxjYj6k9KY/E+knpYjftUa2d8rqPbUA==",
+  "version": "1.6.70",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.70/vMLX-1.6.70-tahoe-arm64.dmg",
+  "sha256": "f7a4e50694124ee964cd5bb6149360fce9f8c6a684fae664321bc79a2c8dc968",
+  "sha512": "1AdluF7+BB9VVUKUcQnh7SFNnHKKQAUpj4NOHn1G6dKXjTXEf9mdgY/Rzdqj2WtacIkQGRZt4BGuNdNbFmWVBg==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.69/vMLX-1.6.69-sequoia-arm64.dmg",
-      "bytes": 573301524,
-      "sha256": "fd1628540171dd21fb4fee3caa8fe33086fcb7bbb1af6d5b4dbef305aebff863",
-      "sha512": "oxotRfKlOMirwPD7aPPGRk9ynn3smmGTjJcTYdKruLJK1PXI2Ynv9Dw4T57RbTbyTJ4yjm6dGJDnBjwdiQN9tg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.70/vMLX-1.6.70-sequoia-arm64.dmg",
+      "bytes": 573378203,
+      "sha256": "43a0f6880895bff2ca7244e4f3d5ff165e086ff5311dbbe8f20ae0b6ad68d5ba",
+      "sha512": "5HQstCrSVgVBsX7V0PXWZ+Ky83FAnnSePe8QwzkQBDUDmQYg2KIKP7xiK0zRIFKdsytr45//5nF/FnpesOGC+A=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.69/vMLX-1.6.69-tahoe-arm64.dmg",
-      "bytes": 595280836,
-      "sha256": "69813008cb59fe676eb40827c0ebce4943e31ff66a548b57d42c3fd1ceb24bbc",
-      "sha512": "1uuLUu1ntWYHRAWCpidp3H/zB8EsKWyFb9OuYsNqKUs68gIPpQWLxYoXxjYj6k9KY/E+knpYjftUa2d8rqPbUA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.70/vMLX-1.6.70-tahoe-arm64.dmg",
+      "bytes": 595297265,
+      "sha256": "f7a4e50694124ee964cd5bb6149360fce9f8c6a684fae664321bc79a2c8dc968",
+      "sha512": "1AdluF7+BB9VVUKUcQnh7SFNnHKKQAUpj4NOHn1G6dKXjTXEf9mdgY/Rzdqj2WtacIkQGRZt4BGuNdNbFmWVBg=="
     }
   },
-  "notes": "# vMLX 1.6.69\n\n- Cache snapshots: detach mutable hybrid-cache padding so later batch advancement cannot alter stored or fetched state. Release temporary BF16 conversion references before cache cleanup.\n- Chat metrics: hide the derived input-rate figure on cache hits and label cold-request input divided by TTFT explicitly, avoiding misleading prefill-throughput claims.\n- Native MTP: add an opt-in second-window confirmation for marginal D1 losses. It remains disabled by default; sustained prose gains across model families and quantizations are not established.\n- Diagnostics: distinguish forward-call wall time, completion wait and calling-thread CPU; add bounded verifier-row host profiling with isolated thread accounting.\n\nChoose the Tahoe DMG for macOS 26 or the Sequoia DMG for macOS 15.\n\nKnown limitation: Qwen Flash-Next can misdescribe video frames. This release does not resolve those video-perception errors."
+  "notes": "# vMLX 1.6.70\n\n- SSD cache lookup: avoid redundant cache-type scans when stored layer metadata already declares the cache type.\n- Native MTP cache restoration: validate the complete token-prefix identity when restoring companion state after disk refault, including when block identifiers change.\n- Diagnostics: correct scheduler timing accounting for multiple outputs in one step and add opt-in bounded verifier profiling.\n\nExperimental MTP performance options remain disabled by default. This release does not claim sustained prose speedups across all models or quantizations.\n\nChoose the Tahoe DMG for macOS 26 or the Sequoia DMG for macOS 15.\n\nKnown limitation: Qwen Flash-Next can misdescribe video frames. This release does not resolve those video-perception errors."
 }

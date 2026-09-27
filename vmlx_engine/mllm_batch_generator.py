@@ -4404,6 +4404,7 @@ class MLLMNativeMTPStats:
     configured_depth: int = 0
     depth_policy: str = ""
     span_seconds: float = 0.0
+    span_finalized: bool = False
     accepts: int = 0
     rejects: int = 0
     init_emits: int = 0
@@ -4456,6 +4457,8 @@ class MLLMNativeMTPStats:
     stochastic_ratio_checks: int = 0
     stochastic_ratio_accepts: int = 0
     stochastic_residual_corrections: int = 0
+    stochastic_packed_probability_reads: int = 0
+    stochastic_reused_filter_pairs: int = 0
 
     def to_dict(
         self,
@@ -4497,6 +4500,7 @@ class MLLMNativeMTPStats:
             )
             depth_rates[label] = _rate(accepted, drafted)
 
+        confirmed = self.init_emits + self.draft_emits + self.bonus_emits + self.verify_emits
         draft_head = dict(self.draft_head)
         if draft_head:
             draft_head["calls"] = int(self.draft_head_calls)
@@ -4537,6 +4541,14 @@ class MLLMNativeMTPStats:
             },
             "draft_head": draft_head,
             "timings_ms": timings,
+            # This is segment ownership wall, not a sum of lazy phase timers.
+            "span_seconds": self.span_seconds,
+            "span_finalized": self.span_finalized,
+            "confirmed_popped_tokens": confirmed,
+            "confirmed_popped_tok_s": (
+                confirmed / self.span_seconds if self.span_seconds > 0.0 else None
+            ),
+            "span_scope": "post_seed_to_mtp_exit_excludes_ar_handoff_and_cleanup",
             "cache_lifecycle": native_mtp_cache_lifecycle_snapshot(
                 head_cache=self.mtp_head_cache,
                 recreated_on_rejects=self.mtp_cache_recreated_on_rejects,
@@ -4556,6 +4568,8 @@ class MLLMNativeMTPStats:
                 "residual_corrections": int(
                     self.stochastic_residual_corrections
                 ),
+                "packed_probability_reads": int(self.stochastic_packed_probability_reads),
+                "reused_filter_pairs": int(self.stochastic_reused_filter_pairs),
             },
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
@@ -5192,6 +5206,7 @@ def _native_mtp_accepted_count(
     target_lps: List[Optional[mx.array]],
     sampler: Optional[Callable[[mx.array], mx.array]] = None,
     telemetry: Optional[Dict[str, int]] = None,
+    filtered_rows: Optional[dict] = None,
 ) -> int:
     """Count leading accepted drafts for one MTP verify cycle.
 
@@ -5208,6 +5223,7 @@ def _native_mtp_accepted_count(
         stochastic=_NATIVE_MTP_STOCHASTIC_ACCEPT,
         sampler=sampler,
         telemetry=telemetry,
+        filtered_rows=filtered_rows,
     )
 
 
@@ -5217,6 +5233,7 @@ def _native_mtp_rejection_correction(
     target_lp: Optional[mx.array],
     draft_lp: Optional[mx.array],
     sampler: Callable[[mx.array], mx.array],
+    *, filtered_pair=None,
 ) -> Tuple[mx.array, int]:
     """Return the verifier correction after one rejected proposal.
 
@@ -5234,8 +5251,11 @@ def _native_mtp_rejection_correction(
 
     from .native_mtp_acceptance import accept_lp_for, residual_sample
 
-    target_accept_lp = accept_lp_for(sampler, target_lp)
-    draft_accept_lp = accept_lp_for(sampler, draft_lp)
+    if filtered_pair is None:
+        target_accept_lp = accept_lp_for(sampler, target_lp)
+        draft_accept_lp = accept_lp_for(sampler, draft_lp)
+    else:
+        target_accept_lp, draft_accept_lp = filtered_pair
     correction_id, _ = residual_sample(
         target_accept_lp,
         draft_accept_lp,
@@ -5830,6 +5850,35 @@ def _native_mtp_bump_emit(state: MLLMNativeMTPState, source: str) -> None:
         state.stats.bonus_emits += 1
     elif source == "verify":
         state.stats.verify_emits += 1
+
+
+def _native_mtp_finalize_span(state: MLLMNativeMTPState, *, now=None) -> None:
+    """Freeze post-seed segment wall at ownership exit, without any GPU fence.
+
+    Keep cycle_span_start untouched: the adaptive cost guard also owns it.
+    Emission counters count queue pops, not queued drafts or client delivery.
+    Error/cancelled records remain labelled as such by their existing publisher.
+    """
+    import math
+
+    stats = state.stats
+    if stats.span_finalized:
+        return
+    stats.configured_depth = int(
+        state.ladder_depth or state.depth_ceiling or state.depth or 0
+    )
+    stats.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
+    try:
+        start = float(getattr(state, "cycle_span_start", 0.0) or 0.0)
+        end = float(time.perf_counter() if now is None else now)
+        elapsed = end - start
+        valid = start > 0.0 and math.isfinite(start) and math.isfinite(end)
+        valid = valid and math.isfinite(elapsed) and elapsed >= 0.0
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+        elapsed = 0.0
+    stats.span_seconds = elapsed if valid else 0.0
+    stats.span_finalized = True
 
 
 def _native_mtp_log_stats(
@@ -8902,6 +8951,7 @@ class MLLMBatchGenerator:
                 if mtp_state is None:
                     continue
                 try:
+                    _native_mtp_finalize_span(mtp_state)
                     self._abandon_pending_native_mtp_verify(
                         mtp_state, getattr(self.active_batch, "cache", None)
                     )
@@ -18116,6 +18166,10 @@ class MLLMBatchGenerator:
             except Exception:
                 pass
 
+        acceptance_rows = (
+            {} if os.environ.get("VMLX_MTP_REUSE_ACCEPTANCE_ROWS", "0") == "1"
+            else None
+        )
         if precomputed_accepted is not None:
             # Decided on device in the bundle above; no host-side comparison.
             accepted = precomputed_accepted
@@ -18132,12 +18186,16 @@ class MLLMBatchGenerator:
                 target_lps,
                 sampler,
                 telemetry=decision_telemetry,
+                filtered_rows=acceptance_rows,
             )
             state.stats.stochastic_ratio_checks += int(
                 decision_telemetry.get("ratio_checks", 0)
             )
             state.stats.stochastic_ratio_accepts += int(
                 decision_telemetry.get("ratio_accepts", 0)
+            )
+            state.stats.stochastic_packed_probability_reads += int(
+                decision_telemetry.get("packed_probability_reads", 0)
             )
 
         state.stats.cycles += 1
@@ -18318,12 +18376,16 @@ class MLLMBatchGenerator:
                 and target_lps[accepted] is not None
             ):
                 state.stats.stochastic_residual_corrections += 1
+            filtered_pair = (acceptance_rows or {}).get(accepted)
+            if filtered_pair is not None:
+                state.stats.stochastic_reused_filter_pairs += 1
             correction, correction_id = _native_mtp_rejection_correction(
                 correction,
                 correction_id,
                 target_lps[accepted],
                 state.draft_lps[accepted],
                 sampler,
+                filtered_pair=filtered_pair,
             )
         state.queue.append((correction_id, target_lps[accepted], "verify"))
         if not skipped_replay:
@@ -18845,6 +18907,7 @@ class MLLMBatchGenerator:
                     and not mtp_state.queue
                 ):
                     _handoff_t0 = time.perf_counter()
+                    _native_mtp_finalize_span(mtp_state, now=_handoff_t0)
                     self._abandon_pending_native_mtp_verify(mtp_state, batch.cache)
                     ready, fallback_reason = _native_mtp_ar_fallback_ready(
                         batch.cache,
@@ -18866,11 +18929,6 @@ class MLLMBatchGenerator:
                         if _native_mtp_handoff_is_calibration(mtp_state)
                         else "fallback_to_ar"
                     )
-                    _hs = mtp_state.stats
-                    _hs.configured_depth = int(
-                        mtp_state.ladder_depth or mtp_state.depth_ceiling or mtp_state.depth or 0
-                    )
-                    _hs.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
                     _native_mtp_log_stats(
                         batch.requests[0].request_id,
                         mtp_state.stats,
@@ -18912,6 +18970,7 @@ class MLLMBatchGenerator:
                         tier.last_step_t = time.perf_counter()
                         batch.requests[0]._native_mtp_ar_tier = tier
             except Exception as exc:
+                _native_mtp_finalize_span(mtp_state)
                 from .native_mtp_prompt_priming import drop_parked_context
 
                 drop_parked_context(
@@ -19084,6 +19143,7 @@ class MLLMBatchGenerator:
                 )
                 mtp_state_for_finish = getattr(req, "_native_mtp_state", None)
                 if mtp_state_for_finish is not None:
+                    _native_mtp_finalize_span(mtp_state_for_finish)
                     try:
                         self._rewind_native_mtp_terminal_boundary(
                             req, batch.cache, mtp_state_for_finish
@@ -19116,17 +19176,6 @@ class MLLMBatchGenerator:
                             prompt_cache=None,
                         ))
                         continue
-                    _fs = mtp_state_for_finish.stats
-                    _fs.configured_depth = int(
-                        mtp_state_for_finish.ladder_depth
-                        or mtp_state_for_finish.depth_ceiling
-                        or mtp_state_for_finish.depth
-                        or 0
-                    )
-                    _fs.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
-                    _span0 = float(getattr(mtp_state_for_finish, "cycle_span_start", 0.0) or 0.0)
-                    if _span0 > 0.0:
-                        _fs.span_seconds = max(0.0, time.perf_counter() - _span0)
                     _native_mtp_log_stats(
                         request_id,
                         mtp_state_for_finish.stats,

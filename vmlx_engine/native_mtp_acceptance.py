@@ -17,9 +17,15 @@ match, which is why the greedy path can skip the ratio entirely.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Callable, List, Optional, Sequence
 
 import mlx.core as mx
+
+
+# Experimental: one probability readback, with unchanged host arithmetic/RNG.
+# Component timing is not sufficient to promote a serving default.
+_PACKED_ACCEPTANCE = os.environ.get("VMLX_MTP_PACKED_ACCEPTANCE", "0") == "1"
 
 
 def accept_lp_for(sampler: Optional[Callable[[Any], Any]], lp: Any) -> Any:
@@ -78,6 +84,41 @@ def _row_width(row: Any) -> int:
         return 0
 
 
+def _packed_probability_pairs(
+    draft_ids, draft_lps, target_lps, sampler, filtered, filtered_rows=None, row_offset=0
+):
+    """Gather pure-contract probabilities without consuming any random draws.
+
+    Unknown/custom hooks and ragged/missing distributions retain the serial
+    path. Scalars are transferred separately in value, together in one read;
+    subtraction still happens in Python double precision at the visited row.
+    """
+    contract = getattr(sampler, "_vmlx_acceptance_logprobs", None)
+    if (
+        not draft_ids
+        or contract is None
+        or getattr(sampler, "_vmlx_acceptance_batch_contract", None) is not contract
+        or len(draft_lps) < len(draft_ids)
+        or len(target_lps) < len(draft_ids)
+    ):
+        return None
+    values = []
+    for index, token in enumerate(draft_ids):
+        token = int(token)
+        p, q = target_lps[index], draft_lps[index]
+        if (p is None or q is None or token < 0
+                or getattr(p, "ndim", None) != 1 or getattr(q, "ndim", None) != 1):
+            return None
+        if _row_width(p) <= token or _row_width(q) <= token:
+            return None
+        if not filtered:
+            p, q = contract(p), contract(q)
+        if filtered_rows is not None:
+            filtered_rows[index + row_offset] = (p, q)
+        values.extend((p[token], q[token]))
+    return mx.stack(values).tolist()
+
+
 def accepted_count(
     draft_ids: Sequence[int],
     target_ids: Sequence[int],
@@ -88,6 +129,7 @@ def accepted_count(
     sampler: Optional[Callable[[Any], Any]] = None,
     filtered: bool = False,
     telemetry: Optional[dict[str, int]] = None,
+    filtered_rows: Optional[dict] = None,
 ) -> int:
     """Count leading accepted drafts for one verify cycle.
 
@@ -101,8 +143,50 @@ def accepted_count(
     the rows; otherwise it is applied here so the ratio matches the sampling
     distribution.
     """
+    # Caller-owned scratch only: at most three pairs, never persisted to state.
+    if filtered_rows is not None:
+        filtered_rows.clear()
+    pure_contract = getattr(sampler, "_vmlx_acceptance_logprobs", None)
+    retain_rows = (
+        filtered_rows if pure_contract is not None
+        and getattr(sampler, "_vmlx_acceptance_batch_contract", None) is pure_contract
+        and len(draft_ids) <= 3 else None
+    )
+    pairs = None
+    if _PACKED_ACCEPTANCE and stochastic and len(draft_ids) <= 3:
+        try:
+            # Prose often rejects the first proposal. Do not eagerly filter
+            # the whole suffix just to discover that no later row is visited.
+            pairs = _packed_probability_pairs(
+                draft_ids[:1], draft_lps[:1], target_lps[:1], sampler, filtered,
+                retain_rows,
+            )
+        except Exception:
+            # Preserve the serial path's row-local error/rejection semantics.
+            # No RNG has been consumed by the attempted probability read.
+            pairs = None
+    if pairs is not None and telemetry is not None:
+        telemetry["packed_probability_reads"] = int(
+            telemetry.get("packed_probability_reads", 0)
+        ) + 1
     accepted = 0
     for idx, draft_id in enumerate(draft_ids):
+        if idx == 1 and pairs is not None:
+            try:
+                tail = _packed_probability_pairs(
+                    draft_ids[1:], draft_lps[1:], target_lps[1:], sampler, filtered,
+                    retain_rows, row_offset=1,
+                )
+            except Exception:
+                tail = None
+            if tail is None:
+                pairs = None
+            else:
+                pairs += tail
+                if telemetry is not None:
+                    telemetry["packed_probability_reads"] = int(
+                        telemetry.get("packed_probability_reads", 0)
+                    ) + 1
         draft_id = int(draft_id)
         target_lp = target_lps[idx] if idx < len(target_lps) else None
         draft_lp = draft_lps[idx] if idx < len(draft_lps) else None
@@ -113,9 +197,11 @@ def accepted_count(
                 accepted += 1
                 continue
             break
-        if not filtered:
+        if not filtered and pairs is None:
             target_lp = accept_lp_for(sampler, target_lp)
             draft_lp = accept_lp_for(sampler, draft_lp)
+        if pairs is None and retain_rows is not None:
+            retain_rows[idx] = (target_lp, draft_lp)
         if telemetry is not None:
             telemetry["ratio_checks"] = int(telemetry.get("ratio_checks", 0)) + 1
         # MLX does not raise on an out-of-range index, so a short or ragged row
@@ -128,7 +214,11 @@ def accepted_count(
         ):
             break
         try:
-            log_ratio = float(target_lp[draft_id]) - float(draft_lp[draft_id])
+            log_ratio = (
+                float(pairs[2 * idx]) - float(pairs[2 * idx + 1])
+                if pairs is not None
+                else float(target_lp[draft_id]) - float(draft_lp[draft_id])
+            )
         except Exception:
             break
         if not math.isfinite(log_ratio):

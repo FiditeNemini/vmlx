@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from types import SimpleNamespace
 import threading
+import logging
 
 import pytest
 
@@ -42,12 +43,15 @@ def _cache(chained=False):
 
 @pytest.mark.parametrize("chained", [False, True])
 @pytest.mark.parametrize("pruned", [False, True])
-def test_refaulted_partial_snapshot_requires_exact_pinned_request(chained, pruned):
+def test_refaulted_partial_snapshot_requires_exact_pinned_request(chained, pruned, caplog):
     cache, tokens, marker, _ = _cache(chained)
     if pruned:
         cache._prefix_index.clear()
     assert cache.restore_mtp_prefix_snapshot(tokens, 3) is None
-    assert cache.restore_mtp_prefix_snapshot(tokens, 3, request_id="refault") is marker
+    with caplog.at_level(logging.INFO):
+        assert cache.restore_mtp_prefix_snapshot(tokens, 3, request_id="refault") is marker
+    expected = "partial_index_missing" if pruned else "partial_chain_stale"
+    assert f"sidecar refault restored: boundary=3 index_reason={expected}" in caplog.text
 
 
 @pytest.mark.parametrize(

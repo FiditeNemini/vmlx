@@ -9179,6 +9179,7 @@ class BlockAwarePrefixCache:
         if tip is None:
             return miss("invalid_key")
         key_kind, key_value = tip
+        recovered_index_rejection = None
         if key_kind == "block_hash":
             block_map = getattr(
                 self.paged_cache, "cached_block_hash_to_block", None
@@ -9210,6 +9211,7 @@ class BlockAwarePrefixCache:
                     request_id, expected, cache_extra_keys=extra_keys
                 ):
                     return miss(rejection)
+                recovered_index_rejection = rejection
         lock = getattr(self, "_mtp_prefix_snapshot_lock", None)
         snapshots = getattr(self, "_mtp_prefix_snapshots", None)
         if lock is None or snapshots is None:
@@ -9219,6 +9221,11 @@ class BlockAwarePrefixCache:
             if entry is None or int(entry[0]) != int(boundary_tokens):
                 return miss("snapshot_missing_or_boundary_mismatch")
             snapshots.move_to_end(tip)
+            if recovered_index_rejection is not None:
+                logger.info(
+                    "Native MTP sidecar refault restored: boundary=%d index_reason=%s",
+                    boundary_tokens, recovered_index_rejection,
+                )
             return entry[1]
 
     def get_stats(self) -> Dict[str, Any]:

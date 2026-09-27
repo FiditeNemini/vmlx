@@ -96,7 +96,11 @@ from vmlx_engine.metal.sparse_index_score_decode import (
 )
 
 from .ngram import NGramHasher
-from .host_profile import profile_decode_forward
+from .host_profile import (
+    SUBMISSION_PROFILE_ENABLED,
+    profile_decode_forward,
+    profile_submission,
+)
 from .projection_cache import validated_projection_group
 from .media_positions import media_rope_index
 
@@ -2489,7 +2493,10 @@ class Qwen4ExpTextModel(nn.Module):
                 if eager_dispatch:
                     # Dependencies remain on the caller's MLX stream; cache
                     # consumers and terminal durability fences stay unchanged.
-                    mx.async_eval(h)
+                    if SUBMISSION_PROFILE_ENABLED:
+                        profile_submission(mx.async_eval, h)
+                    else:
+                        mx.async_eval(h)
                 if _layer_fp:
                     _log_layer_fingerprint(layer_index, h, c)
                     if layer_index < 2:

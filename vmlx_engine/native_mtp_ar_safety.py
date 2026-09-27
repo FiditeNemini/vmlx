@@ -54,6 +54,7 @@ start rung.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
@@ -232,6 +233,41 @@ class ArSafetyTrip:
     cur_cycle_ms: float
     anchor_context_tokens: int
     context_now: int
+
+    def marginal_loss_needs_confirmation(
+        self, ring: Sequence[Tuple[int, int, float]], ar_step_ms: float
+    ) -> bool:
+        """Whether this complete window lost less than one measured AR step.
+
+        An opt-in caller can use its existing second-window confirmation for
+        this narrow case. This budgets the *observed* excess, not future loss;
+        it is not a confidence bound or permission to ignore a second loss.
+        Missing, malformed, or non-finite evidence retains immediate fallback.
+        """
+        try:
+            if (
+                not math.isfinite(ar_step_ms) or ar_step_ms <= 0
+                or self.window <= 0 or len(ring) != self.window + 1
+                or not math.isfinite(self.mtp_ms_per_tok)
+                or self.mtp_ms_per_tok <= ar_step_ms
+            ):
+                return False
+            if any(
+                len(row) != 3 or any(not math.isfinite(value) for value in row)
+                for row in ring
+            ):
+                return False
+            if any(
+                b[0] <= a[0] or b[1] <= a[1] or b[2] <= a[2]
+                for a, b in zip(ring, ring[1:])
+            ):
+                return False
+            tokens = ring[-1][1] - ring[0][1]
+            wall_ms = (ring[-1][2] - ring[0][2]) * 1000.0
+            excess_ms = wall_ms - tokens * ar_step_ms
+            return 0.0 < excess_ms < ar_step_ms
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return False
 
     def reason(self, prior_depth: int) -> str:
         return (

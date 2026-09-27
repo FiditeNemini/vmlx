@@ -4,6 +4,13 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.69] - 2026-09-27
+
+- Cache snapshots: detach mutable hybrid-cache padding so later batch advancement cannot alter stored or fetched state. Release temporary BF16 conversion references before cache cleanup.
+- Chat metrics: hide the derived input-rate figure on cache hits and label cold-request input divided by TTFT explicitly, avoiding misleading prefill-throughput claims.
+- Native MTP: add an opt-in second-window confirmation for marginal D1 losses. It remains disabled by default; sustained prose gains across model families and quantizations are not established.
+- Diagnostics: distinguish forward-call wall time, completion wait and calling-thread CPU; add bounded verifier-row host profiling with isolated thread accounting.
+
 ## [1.6.68] - 2026-09-27
 
 - JANGH: load validated Hadamard/GPTQ routed-expert bundles, preserve legacy JANGTQ v2 compatibility, and reuse exact codebook fits during kernel startup. Expert-aligned prefill tiles and fused Hadamard gate/up kernels remain opt-in.

@@ -6,6 +6,7 @@ from collections import deque
 import logging
 from pathlib import Path
 import sys
+import time
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -39,7 +40,11 @@ def execute(nodes, namespace):
 @pytest.fixture
 def probe(monkeypatch):
     trace = []
-    namespace = {"logger": logging.getLogger(__name__), "__package__": "vmlx_engine"}
+    namespace = {
+        "logger": logging.getLogger(__name__), "__package__": "vmlx_engine",
+        "time": time,
+        "_native_mtp_finalize_span": lambda *args, **kwargs: trace.append("finalize_span"),
+    }
     priming = ModuleType("vmlx_engine.native_mtp_prompt_priming")
     priming.drop_parked_context = lambda *args: trace.append("drop_parked")
     monkeypatch.setitem(sys.modules, priming.__name__, priming)
@@ -110,7 +115,14 @@ def test_ar_handoff_does_not_step_after_failed_restore(probe, mode):
     namespace.update(self=owner, mtp_state=state, token=7,
                      batch=SimpleNamespace(cache=[SimpleNamespace()], y=Input()))
     with pytest.raises(RuntimeError, match="rollback"):
-        execute(handoff.body[1:5], namespace)
+        # Keep the real prefix through the first AR step; telemetry additions
+        # must not shift a positional slice past rollback or omit the step.
+        step_index = next(i for i, statement in enumerate(handoff.body) if any(
+            isinstance(call, ast.Call)
+            and ast.unparse(call.func) == "self._step"
+            for call in ast.walk(statement)
+        ))
+        execute(handoff.body[:step_index + 1], namespace)
     assert "AR step" not in trace
 
 

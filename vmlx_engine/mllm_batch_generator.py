@@ -7120,6 +7120,20 @@ def _native_mtp_maybe_ar_safety_fallback(
         and trip.mtp_ms_per_tok > measured_ar
         and trip.cycle_median_ms_per_tok > measured_ar
     )
+    # Default off: marginal windows can cost less than the handoff itself.
+    # Reuse the bounded confirmation path; larger losses and failed probes
+    # retain their immediate exit. No acceptance/sampling/cache math changes.
+    if (
+        fresh_measured_loss
+        and os.environ.get("VMLX_MTP_CONFIRM_MARGINAL_LOSS", "0") == "1"
+        and trip.marginal_loss_needs_confirmation(state.ar_safety.ring, measured_ar)
+    ):
+        logger.info(
+            "MLLM MTP[%s] marginal D1 window: observed excess below one "
+            "AR step (%.3fms); confirmation_pending=%d",
+            request_id, measured_ar, pending,
+        )
+        fresh_measured_loss = False
     if not fresh_measured_loss and (
         pending <= 0 or cycles - pending > _NATIVE_MTP_D1_TRIP_CONFIRM_WINDOWS * window
     ):

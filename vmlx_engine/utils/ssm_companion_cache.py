@@ -743,6 +743,12 @@ class SSMCompanionCache:
                         _mx_materialize(c.lengths)
                     except Exception:
                         pass
+                if getattr(c, "left_padding", None) is not None:
+                    # ArraysCache.advance mutates this array in place too.
+                    # Neither the live caller nor a fetched copy may change
+                    # the padding retained at the saved prompt boundary.
+                    c.left_padding = mx.array(c.left_padding)
+                    _mx_materialize(c.left_padding)
                 cloned_states.append(c)
             except Exception as err:
                 logger.debug(

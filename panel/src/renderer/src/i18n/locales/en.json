@@ -625,8 +625,6 @@
       "remoteUsageUnavailable": "Token usage is unavailable until the provider reports it for every request. Stream events are not tokens.",
       "tpsTitle": "Decode speed after first token; includes reasoning and tool-loop completion tokens",
       "ppsTitle": "Uncached prompt tokens divided by time to first token. That window includes queueing, media processing, cache restore and first-token compute, so it is not isolated prefill throughput.",
-      "ppsTailLabel": "{speed} pp/s to first token (uncached input)",
-      "ppsTailTitle": "Uncached-input rate to first token after a cache hit: only the uncached tail was processed; cached tokens were restored separately.",
       "promptLabel": "{n} prompt",
       "cachedSuffix": " ({cached} cached)",
       "promptTitleCache": "Prompt tokens — cache: {detail}",
@@ -635,7 +633,7 @@
       "elapsedTitle": "Elapsed time",
       "totalLabel": "{v}s total",
       "totalTitle": "Total request time",
-      "ppsLabel": "{speed} pp/s to first token"
+      "ppsLabel": "{speed} input tok/s (input ÷ TTFT)"
     },
     "message": {
       "tokenCount": "{n} tokens"

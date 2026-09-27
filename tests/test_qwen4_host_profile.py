@@ -82,3 +82,49 @@ def test_invalid_selection_disables_instrumentation(monkeypatch, rows):
         return inputs
 
     assert profile_decode_forward(original) is original
+
+
+def test_worker_calls_excluded_and_thread_hook_restored(monkeypatch, caplog):
+    import sys
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("VMLX_QWEN4_HOST_PROFILE", "1")
+    monkeypatch.setenv("VMLX_QWEN4_HOST_PROFILE_ROWS", "3")
+
+    def worker_only_marker():
+        time.sleep(0.001)
+        return 7
+
+    @profile_decode_forward
+    def original(self, inputs, *, return_hidden):
+        return pool.submit(worker_only_marker).result()
+
+    caplog.set_level("INFO")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for _ in range(32):
+            assert original(None, SimpleNamespace(shape=(1, 3)), return_hidden=True) == 7
+            assert sys.getprofile() is None
+    assert "worker_only_marker" not in caplog.text
+    assert "backend=thread_profile" in caplog.text
+
+
+def test_existing_thread_profiler_is_preserved(monkeypatch):
+    import sys
+
+    monkeypatch.setenv("VMLX_QWEN4_HOST_PROFILE", "1")
+    @profile_decode_forward
+    def original(self, inputs):
+        return inputs
+
+    def observer(frame, event, arg):
+        pass
+
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(observer)
+        value = SimpleNamespace(shape=(1, 1))
+        assert original(None, value) is value
+        assert sys.getprofile() is observer
+    finally:
+        sys.setprofile(previous)

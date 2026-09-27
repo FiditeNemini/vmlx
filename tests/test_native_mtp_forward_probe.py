@@ -26,6 +26,54 @@ class Device:
 
 
 class ForwardProbeTests(unittest.TestCase):
+    def setUp(self):
+        selector = patch.dict(probe.os.environ, {"VMLX_FORWARD_PROBE_TOKEN_RANGE": ""})
+        selector.start()
+        self.addCleanup(selector.stop)
+
+    @patch.dict(probe.os.environ, {
+        "VMLX_NATIVE_MTP_FORWARD_PROBE": "1",
+        "VMLX_FORWARD_PROBE_TOKEN_RANGE": "2800:3400",
+    })
+    def test_late_window_does_not_spend_budget_before_start(self):
+        request, device = SimpleNamespace(num_tokens=2799), Device()
+        self.assertIsNone(probe.start_native_mtp_forward_probe(request, "verify", device))
+        self.assertEqual(vars(request), {"num_tokens": 2799})
+        self.assertEqual(device.calls, [])
+        request.num_tokens = 2800
+        record = probe.start_native_mtp_forward_probe(request, "verify", device)
+        self.assertEqual(record.metadata["output_tokens"], 2800)
+        self.assertEqual(record.metadata["probe_token_range"], [2800, 3400])
+        self.assertEqual(record.metadata["sample"], 1)
+        request.num_tokens = 3399
+        for _ in range(7):
+            self.assertIsNotNone(probe.start_native_mtp_forward_probe(request, "verify", device))
+        before = list(device.calls)
+        self.assertIsNone(probe.start_native_mtp_forward_probe(request, "verify", device))
+        self.assertEqual(device.calls, before)
+
+    @patch.dict(probe.os.environ, {
+        "VMLX_AR_FORWARD_PROBE": "1",
+        "VMLX_FORWARD_PROBE_TOKEN_RANGE": "2800:3400",
+    })
+    def test_end_is_exclusive_and_missing_position_never_probes(self):
+        for position in (3400, 3401, None, "2800"):
+            request, device = SimpleNamespace(num_tokens=position), Device()
+            self.assertIsNone(probe.start_native_mtp_forward_probe(request, "ar_model", device))
+            self.assertEqual(device.calls, [])
+            self.assertEqual(vars(request), {"num_tokens": position})
+
+    @patch.dict(probe.os.environ, {"VMLX_NATIVE_MTP_FORWARD_PROBE": "1"})
+    def test_malformed_window_never_synchronizes_or_breaks_generation(self):
+        for value in ("bad", "1", "1:2:3", "-1:8", "8:8", "9:8", "1.5:8"):
+            with self.subTest(value=value), patch.dict(
+                probe.os.environ, {"VMLX_FORWARD_PROBE_TOKEN_RANGE": value}
+            ):
+                request, device = SimpleNamespace(num_tokens=5), Device()
+                self.assertIsNone(probe.start_native_mtp_forward_probe(request, "head", device))
+                self.assertEqual(device.calls, [])
+                self.assertEqual(vars(request), {"num_tokens": 5})
+
     def test_ar_and_mtp_flags_are_independent(self):
         for ar, mtp in (("0", "1"), ("1", "0")):
             with patch.dict(probe.os.environ, {

@@ -3,6 +3,8 @@
 This probe serializes the first few head/verifier forwards. Its intervals
 include host graph construction and GPU completion, not isolated kernel time.
 Normal serving adds no evaluation or synchronization when the probe is off.
+VMLX_FORWARD_PROBE_TOKEN_RANGE=start:end optionally selects a half-open
+generated-token interval. It does not increase the eight-call phase budget.
 """
 
 import json
@@ -67,6 +69,24 @@ def start_native_mtp_forward_probe(request, phase, mx, *, inputs=(), **metadata)
         return None
     if phase not in _PHASES | _AR_PHASES:
         raise ValueError(f"unknown native MTP forward phase: {phase}")
+    token_range = os.environ.get("VMLX_FORWARD_PROBE_TOKEN_RANGE", "").strip()
+    if token_range:
+        try:
+            start, end = (int(part) for part in token_range.split(":"))
+            if not 0 <= start < end:
+                raise ValueError
+        except ValueError:
+            # A malformed diagnostic selector must not synchronize a forward
+            # outside the requested window or interrupt normal generation.
+            return None
+        output_tokens = getattr(request, "num_tokens", None)
+        if not isinstance(output_tokens, int) or not start <= output_tokens < end:
+            return None
+        metadata = {
+            **metadata,
+            "output_tokens": output_tokens,
+            "probe_token_range": [start, end],
+        }
     counts = getattr(request, "_native_mtp_forward_probe_counts", None)
     if counts is None:
         counts = {}

@@ -110,6 +110,68 @@ def test_submission_phase_diagnostic_preserves_native_verifier(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16, "mixed_quant"])
+@pytest.mark.parametrize("accepted_drafts", [0, 1, 2])
+def test_three_row_submission_stride_exact_state(monkeypatch, dtype, accepted_drafts):
+    from vmlx_engine.mllm_batch_generator import _native_mtp_rollback_to_confirmed
+
+    monkeypatch.setenv("VMLX_QWEN4_VERIFY_SUBMISSION_STRIDE", "2")
+    model = _model(monkeypatch)
+    assert model.model._verify_submission_stride2
+    target = mx.float16 if dtype == "mixed_quant" else dtype
+    model.update(tree_map_with_path(
+        lambda path, value: value.astype(target)
+        if mx.issubdtype(value.dtype, mx.floating) and model.cast_predicate(path)
+        else value, model.parameters(),
+    ))
+    if dtype == "mixed_quant":
+        def quantize(path, module):
+            if not hasattr(module, "to_quantized") or not model.quant_predicate(path, module):
+                return False
+            width = module.weight.shape[-1]
+            if width % 32:
+                return False
+            index = int(path.split(".")[2]) if path.startswith("model.layers.") else 0
+            return {"group_size": 64 if index % 2 and width % 64 == 0 else 32,
+                    "bits": (2, 4, 6, 8)[index % 4]}
+        nn.quantize(model, class_predicate=quantize)
+    mx.eval(model.parameters())
+    stream = mx.new_stream(mx.gpu)
+    submit = mx.async_eval
+    counts = []
+
+    def observed(value):
+        assert mx.default_stream(mx.gpu) == stream
+        counts.append(1)
+        return submit(value)
+
+    monkeypatch.setattr(mx, "async_eval", observed)
+    arms = []
+    with mx.stream(stream):
+        for enabled in (False, True):
+            model.model._verify_submission_stride2 = enabled
+            cache = model.make_cache()
+            counts.clear()
+            model(mx.array([[11, 17, 23]]), cache=cache)
+            assert len(counts) == len(model.layers)  # same-width prefill excluded
+            counts.clear()
+            output = model(mx.array([[29, 31, 37]]), cache=cache,
+                           n_confirmed=1, return_hidden=True)
+            expected = len(model.model._verify_submit_layers) if enabled else len(model.layers)
+            assert len(counts) == expected
+            before = (_snapshot(output), _cache_snapshot(cache))
+            if accepted_drafts < 2:
+                assert _native_mtp_rollback_to_confirmed(
+                    cache, reject_tokens=2 - accepted_drafts, accepted_drafts=accepted_drafts,
+                )
+            counts.clear()
+            next_output = model(mx.array([[41]]), cache=cache)
+            assert len(counts) == len(model.layers)  # AR excluded
+            arms.append((before, _snapshot(next_output.logits), _cache_snapshot(cache)))
+    assert model.model._verify_submit_layers == frozenset({0, 1, 3, 5, 7})
+    _assert_exact(*arms)
+
+
+@pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16, "mixed_quant"])
 def test_eager_dispatch_exact_connected_cache_on_caller_stream(monkeypatch, dtype):
     model = _model(monkeypatch)
     mixed = dtype == "mixed_quant"

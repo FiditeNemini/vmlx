@@ -2397,6 +2397,16 @@ class Qwen4ExpTextModel(nn.Module):
         self._ple_prefetch = os.environ.get("VMLX_QWEN4_PLE_PREFETCH") == "1"
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
         self.layers = [DecoderLayer(args, i) for i in range(args.num_hidden_layers)]
+        self._verify_submission_stride2 = (
+            os.environ.get("VMLX_QWEN4_VERIFY_SUBMISSION_STRIDE") == "2"
+        )
+        # Native three-row verification only. Preserve the first/final submit
+        # and work made available before a synchronous PLE read.
+        self._verify_submit_layers = frozenset(
+            i for i in range(len(self.layers))
+            if i == 0 or i == len(self.layers) - 1 or (i + 1) % 2 == 0
+            or self.layers[i + 1].ple is not None
+        )
         self.hyper_connection_mixer = GatedResidual(args, use_combine=False)
         self.fa_idx = next(
             (i for i, layer in enumerate(self.layers) if not layer.is_linear),
@@ -2462,6 +2472,10 @@ class Qwen4ExpTextModel(nn.Module):
                 _materialize_recurrent_state(cache)
                 logger.info("QWEN4_LAYER_FP contiguous-state experiment applied before step %d", _LAYER_FP_STEPS["n"])
         prepared_reads = {}
+        paired_verify_submission = (
+            self._verify_submission_stride2
+            and tuple(inputs.shape) == (1, 3) and n_confirmed == 1
+        )
         try:
             if (self._ple_prefetch and not profile and not _layer_fp
                     and 0 < inputs.shape[0] * inputs.shape[1] <= _PLE_PREFETCH_MAX_TOKENS):
@@ -2490,7 +2504,9 @@ class Qwen4ExpTextModel(nn.Module):
                     last_token_only=last_token_only and layer_index == len(self.layers) - 1,
                     ple_prefetch=prepared_reads.get(layer_index),
                 )
-                if eager_dispatch:
+                if eager_dispatch and (
+                    not paired_verify_submission or layer_index in self._verify_submit_layers
+                ):
                     # Dependencies remain on the caller's MLX stream; cache
                     # consumers and terminal durability fences stay unchanged.
                     if SUBMISSION_PROFILE_ENABLED:

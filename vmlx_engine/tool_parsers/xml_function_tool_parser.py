@@ -41,6 +41,19 @@ class XMLFunctionToolParser(ToolParser):
     for every stamped D-series bundle.
     """
 
+    def __init__(self, tokenizer=None):
+        super().__init__(tokenizer)
+        template = getattr(tokenizer, "chat_template", None)
+        # Naive's native template explicitly declares literal parameter bodies
+        # and serializes them inline. Existing Qwen/MiMo templates frame values
+        # with newlines. Select per instance; never change shared parser state.
+        literal = (
+            isinstance(template, str)
+            and "The value enclosed between parameter tags is preserved exactly as-is, including newlines and spaces." in template
+            and "'<parameter=' + args_name + '>'" in template
+        )
+        self._parameter_parser = _LiteralXMLFunctionToolParser if literal else type(self)
+
     NATIVE_MARKERS = ("<function=", "<function_call>", "<tool_call>")
 
     SUPPORTS_NATIVE_TOOL_FORMAT = True
@@ -276,7 +289,7 @@ class XMLFunctionToolParser(ToolParser):
                 and "</tool_call>" in model_output
                 and "<function=" in model_output
             ):
-                repaired_calls = self._parse_functions(
+                repaired_calls = self._parameter_parser._parse_functions(
                     model_output, allowed_names=allowed_names, request=request
                 )
                 if repaired_calls:
@@ -295,7 +308,7 @@ class XMLFunctionToolParser(ToolParser):
         tool_calls: list[dict[str, Any]] = []
         allowed_names_for_recovery = self._request_tool_names(request)
         for block in self.TOOL_CALL_PATTERN.findall(model_output):
-            parsed = self._parse_functions(block, request=request)
+            parsed = self._parameter_parser._parse_functions(block, request=request)
             # A doubled `<function=function>` wrapper parses as one bogus call
             # named "function" with no arguments; recover the real nested call
             # when the request's tool names disambiguate it.
@@ -305,20 +318,20 @@ class XMLFunctionToolParser(ToolParser):
             ):
                 recovered = self._recover_doubled_wrapper_calls(
                     block, allowed_names=allowed_names_for_recovery,
-                    argument_parser=lambda name, body: self._extract_arguments_from_body(
+                    argument_parser=lambda name, body: self._parameter_parser._extract_arguments_from_body(
                         body, self._argument_properties(request, name)),
                 )
                 if recovered:
                     parsed = recovered
             tool_calls.extend(parsed)
             if not tool_calls:
-                tool_calls.extend(self._parse_nested_invoke_functions(block, request=request))
+                tool_calls.extend(self._parameter_parser._parse_nested_invoke_functions(block, request=request))
 
         cleaned_text = self.TOOL_CALL_PATTERN.sub("", model_output).strip()
         if not tool_calls:
             allowed_names = self._request_tool_names(request)
             if allowed_names and "<function=" in model_output:
-                repaired_calls = self._parse_functions(
+                repaired_calls = self._parameter_parser._parse_functions(
                     model_output,
                     allowed_names=allowed_names,
                     request=request,
@@ -331,7 +344,7 @@ class XMLFunctionToolParser(ToolParser):
                         content=cleaned_text if cleaned_text else None,
                     )
             if allowed_names and "<tool_name>" in model_output:
-                repaired_calls = self._parse_nested_invoke_functions(
+                repaired_calls = self._parameter_parser._parse_nested_invoke_functions(
                     model_output,
                     allowed_names=allowed_names,
                     request=request,
@@ -427,3 +440,11 @@ class XMLFunctionToolParser(ToolParser):
                     ]
                 }
         return None
+
+
+class _LiteralXMLFunctionToolParser(XMLFunctionToolParser):
+    """Native inline parameter bodies have no removable newline frame."""
+
+    @staticmethod
+    def _unframe(value: str) -> str:
+        return value

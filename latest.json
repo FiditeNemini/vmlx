@@ -1,21 +1,21 @@
 {
-  "version": "1.6.70",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.70/vMLX-1.6.70-tahoe-arm64.dmg",
-  "sha256": "f7a4e50694124ee964cd5bb6149360fce9f8c6a684fae664321bc79a2c8dc968",
-  "sha512": "1AdluF7+BB9VVUKUcQnh7SFNnHKKQAUpj4NOHn1G6dKXjTXEf9mdgY/Rzdqj2WtacIkQGRZt4BGuNdNbFmWVBg==",
+  "version": "1.6.71",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.71/vMLX-1.6.71-tahoe-arm64.dmg",
+  "sha256": "3e8d2a1ad9d5400daf8fa72ae010e87cb658cdf95ac48dd7ebef4454e9ebb21b",
+  "sha512": "q7xwcldjLWVPE70EQ+8HOAXLuOmu8bKXF1AR5OKL6i2+bnoJptlBxkt0AUpsxbjPS5gmX86QADx0+HIwysz6+w==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.70/vMLX-1.6.70-sequoia-arm64.dmg",
-      "bytes": 573378203,
-      "sha256": "43a0f6880895bff2ca7244e4f3d5ff165e086ff5311dbbe8f20ae0b6ad68d5ba",
-      "sha512": "5HQstCrSVgVBsX7V0PXWZ+Ky83FAnnSePe8QwzkQBDUDmQYg2KIKP7xiK0zRIFKdsytr45//5nF/FnpesOGC+A=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.71/vMLX-1.6.71-sequoia-arm64.dmg",
+      "bytes": 573438922,
+      "sha256": "a1c7b0e948b74783a72b81c6478ac1cc6417b644de5416576b7b91717fa49c37",
+      "sha512": "bpWiqmeg74oPv7dxEsvHcTg0WSKSnFQzDXlmpXqj3FrqQ9qzWU0wSz2xw3ArEuPUoifN5lUid0oi3cMqklhUNA=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.70/vMLX-1.6.70-tahoe-arm64.dmg",
-      "bytes": 595297265,
-      "sha256": "f7a4e50694124ee964cd5bb6149360fce9f8c6a684fae664321bc79a2c8dc968",
-      "sha512": "1AdluF7+BB9VVUKUcQnh7SFNnHKKQAUpj4NOHn1G6dKXjTXEf9mdgY/Rzdqj2WtacIkQGRZt4BGuNdNbFmWVBg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.71/vMLX-1.6.71-tahoe-arm64.dmg",
+      "bytes": 595347740,
+      "sha256": "3e8d2a1ad9d5400daf8fa72ae010e87cb658cdf95ac48dd7ebef4454e9ebb21b",
+      "sha512": "q7xwcldjLWVPE70EQ+8HOAXLuOmu8bKXF1AR5OKL6i2+bnoJptlBxkt0AUpsxbjPS5gmX86QADx0+HIwysz6+w=="
     }
   },
-  "notes": "# vMLX 1.6.70\n\n- SSD cache lookup: avoid redundant cache-type scans when stored layer metadata already declares the cache type.\n- Native MTP cache restoration: validate the complete token-prefix identity when restoring companion state after disk refault, including when block identifiers change.\n- Diagnostics: correct scheduler timing accounting for multiple outputs in one step and add opt-in bounded verifier profiling.\n\nExperimental MTP performance options remain disabled by default. This release does not claim sustained prose speedups across all models or quantizations.\n\nChoose the Tahoe DMG for macOS 26 or the Sequoia DMG for macOS 15.\n\nKnown limitation: Qwen Flash-Next can misdescribe video frames. This release does not resolve those video-perception errors."
+  "notes": "# vMLX 1.6.71\n\nvMLX 1.6.71 fixes the prefill throughput counter.\n\n- Prefill tok/s now uses engine-measured model prefill and prompt-state preparation time, rather than uncached tokens divided by time to first token. Queueing, input preprocessing and cache restoration are excluded; TTFT stays separate.\n- Preserve measured rates through local Chat Completions, Responses and tool continuations. Historical estimates and engines without a timing receipt do not display a fabricated rate.\n- Retains the SSD prefix/refault fixes from 1.6.70. No speculative-decoding or kernel defaults changed.\n\nValidated with connected Qwen 27B reasoning, tools, image/video, history and SSD reuse, plus GLM JANGH native reasoning efforts and raw Chat tool/media continuations.\n\nKnown limitation: video perception remains imperfect. Qwen Flash-Next and GLM JANGH can describe nonexistent overlapping/transition text; a GLM Max-effort UI video turn repeated that interpretation and was stopped. Correct tool-derived arithmetic does not establish exact video understanding. This update does not resolve those model-quality failures.\n\nDownloads: Tahoe uses native macOS 26 wheels; Sequoia is the compatibility build for macOS 14.5 and later."
 }

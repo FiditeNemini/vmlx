@@ -14,7 +14,9 @@ import mlx.core as mx
 import numpy as np
 
 
-GLM5_MEDIA_KEY = "glm5_native_media_input_v1"
+# Projection arithmetic is part of checkpoint identity, even with identical
+# processor pixels. Never restore media state produced before fused patch bias.
+GLM5_MEDIA_KEY = "glm5_native_media_input_v2_fused_patch"
 _PAYLOADS = (
     ("pixel_values", "image_grid_thw"),
     ("video_pixel_values", "video_grid_thw"),

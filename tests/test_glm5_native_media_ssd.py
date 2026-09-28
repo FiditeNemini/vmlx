@@ -16,6 +16,15 @@ from vmlx_engine.utils.glm5_native_media import GLM5_MEDIA_KEY, glm5_media_input
 TOKENS = [1, 999, 999, 2, 3, 4]
 
 
+def test_projection_revision_partitions_old_media_checkpoints(monkeypatch):
+    from vmlx_engine.utils import glm5_native_media
+
+    req = request()
+    current = glm5_media_input_key(req, TOKENS, {999})
+    monkeypatch.setattr(glm5_native_media, "GLM5_MEDIA_KEY", "glm5_native_media_input_v1")
+    assert glm5_media_input_key(req, TOKENS, {999}) != current
+
+
 def request(name="native-media", *, video=False):
     req = MLLMBatchRequest(uid=0, request_id=name, prompt="", input_ids=mx.array([TOKENS]))
     setattr(req, "video_pixel_values" if video else "pixel_values", mx.arange(24, dtype=mx.float32).reshape(2, 12))

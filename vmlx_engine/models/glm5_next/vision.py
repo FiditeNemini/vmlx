@@ -12,6 +12,24 @@ from mlx_vlm.models.glm_ocr.vision import (
 from .config import VisionConfig
 
 
+class Glm5NextVisionPatchEmbed(GlmOcrVisionPatchEmbed):
+    def __call__(self, hidden_states):
+        # Each processor row is one complete C,T,H,W convolution patch.
+        # Keep the checkpoint's Conv3d parameter layout, but fuse the projection
+        # and bias in addmm instead of rounding a BF16 convolution before bias.
+        weight = self.proj.weight
+        matrix = weight.transpose(0, 4, 1, 2, 3).reshape(weight.shape[0], -1)
+        patches = hidden_states.reshape(-1, matrix.shape[1]).astype(weight.dtype)
+        if patches.shape[0] == 1:
+            # The matrix-vector dispatch otherwise rounds before adding bias.
+            return mx.addmm(
+                self.proj.bias.astype(mx.float32),
+                patches.astype(mx.float32),
+                matrix.T.astype(mx.float32),
+            ).astype(weight.dtype)
+        return mx.addmm(self.proj.bias, patches, matrix.T)
+
+
 def _clamped_swiglu(gate, up, limit: float):
     gate = mx.minimum(gate, limit)
     up = mx.clip(up, -limit, limit)
@@ -81,7 +99,7 @@ class VisionModel(nn.Module):
         self.model_type = config.model_type
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
-        self.patch_embed = GlmOcrVisionPatchEmbed(config)
+        self.patch_embed = Glm5NextVisionPatchEmbed(config)
         head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = GlmOcrVisionRotaryEmbedding(head_dim // 2)
         self.blocks = [Glm5NextVisionBlock(config) for _ in range(config.depth)]

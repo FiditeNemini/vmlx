@@ -1638,13 +1638,29 @@ def _set_wired_limit_for_model(weight_files):
         logger.warning(f"  Could not set wired limit: {e}")
 
 
-def _chunked_eval_params(model, chunk_size: int = 200):
+def _chunked_eval_params(model, chunk_size: int = 200, *, pipeline_gpu: bool = False):
     """Evaluate model parameters in chunks to avoid Metal GPU timeout on large models (>200GB)."""
     import mlx.utils as _mlx_utils
 
     _flat = _mlx_utils.tree_flatten(model.parameters())
-    for _i in range(0, len(_flat), chunk_size):
-        mx.eval(*[v for _, v in _flat[_i : _i + chunk_size]])
+    markers = []
+    try:
+        for _i in range(0, len(_flat), chunk_size):
+            mx.eval(*[v for _, v in _flat[_i : _i + chunk_size]])
+            if pipeline_gpu:
+                # Weight evaluation can finish without submitting GPU work.
+                # Overlap submission with the next disk-read chunk instead of
+                # leaving the first request to pay the entire submission wait.
+                # Keep these tiny buffers alive until the load is drained.
+                marker_input = mx.zeros((2, 2))
+                marker = mx.matmul(marker_input, marker_input)
+                mx.async_eval(marker)
+                markers.append(marker)
+    finally:
+        if markers:
+            # Include the remaining wait in loading, before declaring readiness;
+            # also drain already-submitted work if a later weight read fails.
+            mx.synchronize()
 
 
 def _safe_source_model_name(jang_cfg: dict) -> str:
@@ -1842,6 +1858,15 @@ def _ensure_jang_family_runtime_supported(path: Path, config: dict | None) -> No
     from ..models.spark2_5 import ensure_spark2_5_runtime_registered
 
     ensure_spark2_5_runtime_registered(path, config=config)
+
+    if "naive_n05_flash" in model_types:
+        from ..models.naive_n05_flash.register import register_naive_n05_flash_runtime
+
+        if not register_naive_n05_flash_runtime():
+            # False can mean an existing upstream implementation was selected.
+            import importlib
+
+            importlib.import_module("mlx_lm.models.naive_n05_flash")
 
     if "openpangu_v2" in model_types:
         # vMLX-owned vendored runtime (no upstream mlx-lm/jang_tools package).
@@ -2439,7 +2464,7 @@ def is_jang_model(model_path: str | Path) -> bool:
     if fmt in JANG_CODEC_FORMATS or weight_format in JANG_CODEC_FORMATS:
         return True
     if (
-        str(fmt or "").lower() == "jangtq"
+        str(fmt or "").lower() in ("jangtq", "jangtq2")
         or str(cfg.get("profile") or "").upper().startswith("JANGTQ")
         or str(cfg.get("tq_layout") or "").lower()
     ):
@@ -2858,6 +2883,13 @@ def _load_jang_v2(
     _ensure_jang_family_runtime_supported(path, config)
     _normalize_step3p7_model_type(config)
 
+    from vmlx_engine.jangh.contract import validate_format
+
+    _text_jangh = validate_format(config)
+    _text_jangh_loaded_keys = set()
+    if _text_jangh and (filter_expert_keys or layer_range is not None):
+        raise ValueError("JANGH text loading requires the complete expert payload")
+
     from .jang_hadamard import hadamard_spec_from_config
     from .jang_ternary_packed import ternary_packed_modules
 
@@ -3239,6 +3271,12 @@ def _load_jang_v2(
         ".switch_mlp.down_proj.": ".switch_mlp.fc2.",
     }
     _model_type = config.get("model_type", "")
+    _naive_expected_names = None
+    _naive_seen_names = set()
+    if _model_type == "naive_n05_flash":
+        from mlx.utils import tree_flatten
+
+        _naive_expected_names = {name for name, _ in tree_flatten(model.parameters())}
     _openpangu_expected_names: set[str] | None = None
     _openpangu_seen_names: set[str] = set()
     if _model_type == "openpangu_v2" and layer_range is None:
@@ -3774,7 +3812,13 @@ def _load_jang_v2(
                     weights,
                     shard_name=getattr(sf, "name", str(sf)),
                 )
+            if _text_jangh:
+                from vmlx_engine.jangh.payload import validate_payload
+
+                _text_jangh_loaded_keys.update(validate_payload(model, weights.items()))
             model.load_weights(list(weights.items()), strict=False)
+            if _naive_expected_names is not None:
+                _naive_seen_names.update(weights)
         if _dsv4_ready_expert_weights:
             if layer_range is not None:
                 _dsv4_ready_expert_weights = _filter_by_layer_range(
@@ -3790,6 +3834,18 @@ def _load_jang_v2(
         del weights
         del _dsv4_ready_expert_weights
         gc.collect()
+
+    if _text_jangh:
+        from vmlx_engine.jangh.payload import validate_complete_payload
+
+        validate_complete_payload(model, _text_jangh_loaded_keys)
+    if _naive_expected_names is not None:
+        missing = _naive_expected_names - _naive_seen_names
+        extra = _naive_seen_names - _naive_expected_names
+        if missing or extra:
+            raise ValueError(
+                f"Naive weight inventory mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
+            )
 
     if _openpangu_expected_names is not None:
         _openpangu_landing = _finalize_openpangu_weight_landing(
@@ -3912,7 +3968,10 @@ def _load_jang_v2(
 
     if not skip_eval:
         _set_wired_limit_for_model(_get_v2_weight_files(path))
-        _chunked_eval_params(model)
+        if _text_jangh and _model_type == "naive_n05_flash":
+            _chunked_eval_params(model, chunk_size=25, pipeline_gpu=True)
+        else:
+            _chunked_eval_params(model)
 
     # TurboQuant: patch make_cache for JANG models with TQ enabled
     _patch_turboquant_make_cache(model, jang_cfg, _model_cfg)
@@ -5450,7 +5509,7 @@ def load_jang_model(
     if (
         fmt not in JANG_FORMAT_VALUES
         and fmt not in JANG_WEIGHT_FORMAT_VALUES
-        and str(fmt).lower() != "jangtq"
+        and str(fmt).lower() not in ("jangtq", "jangtq2")
     ):
         raise ValueError(
             f"Not a JANG model: format='{fmt}' (expected {', '.join(JANG_FORMAT_VALUES)} "

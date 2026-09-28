@@ -494,6 +494,41 @@ def gather_qmm_sorted(x, packed, scales, cb_unused, idx_sorted, bits, *, packed_
              output_shapes=[(M, N)], output_dtypes=[x.dtype])[0]
 
 
+# ------------------------------------------------------------------ activation rotation (one pass)
+@functools.lru_cache(maxsize=None)
+def _h32_kernel(xname: str, oname: str):
+    """One simdgroup per 32-wide block: lane i holds x[block*32 + i]; five butterfly stages across the lanes."""
+    src = f'''
+    uint K = meta[0];
+    uint lane = thread_index_in_simdgroup;
+    size_t off = (size_t)threadgroup_position_in_grid.z * K + (size_t)threadgroup_position_in_grid.y * 32u + lane;
+    float v = float(x[off]);
+    {UNROLL} for (uint h = 1u; h < 32u; h <<= 1) {{
+      float o = simd_shuffle_xor(v, ushort(h));
+      v = (lane & h) ? (o - v) : (v + o);
+    }}
+    out[off] = static_cast<{oname}>(v * 0.17677669529663687f);
+'''
+    return mx.fast.metal_kernel(name=f"jangh_h32_{xname}_{oname}", input_names=["x", "meta"], output_names=["out"], source=src)
+
+
+def h32_rows(x, out_dtype=None):
+    """Blockwise normalized Hadamard-32 over the last axis (== mx.hadamard_transform on (..., K/32, 32) blocks),
+    ONE kernel launch instead of cast + transform + cast. x (..., K), K % 32 == 0."""
+    out_dtype = out_dtype or x.dtype
+    if x.ndim == 0 or x.dtype not in _TNAME or out_dtype not in _TNAME:
+        raise ValueError("JANGH h32 requires floating activation rows")
+    K = x.shape[-1]
+    if K == 0 or K % 32:
+        raise ValueError("jangtq2 h32 requires K % 32 == 0")
+    M = x.size // K
+    if M == 0:
+        return x.astype(out_dtype)
+    k = _h32_kernel(_TNAME[x.dtype], _TNAME[out_dtype])
+    return k(inputs=[x.reshape(M, K), _consts(K, 0, 0, 0, 0, 0, 0, 0, dtype=mx.uint32)], grid=(32, K // 32, M), threadgroup=(32, 1, 1),
+             output_shapes=[(M, K)], output_dtypes=[out_dtype])[0].reshape(x.shape)
+
+
 # ------------------------------------------------------------------ decode (qmv)
 def _qdot(bits: int, wr: str, acc: str) -> str:
     """Metal: accumulate dot(xt[0..15], level(q)) over one row's 16-value lane chunk at byte pointer `wr`.

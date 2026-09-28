@@ -1855,17 +1855,17 @@ def serve_command(args):
                 "Nemotron-H SSM" if _mc.family_name != "lfm2" else "LFM2 hybrid SSM",
             )
         elif (
-            _mc.family_name == "mimo_v2"
-            or getattr(_mc, "cache_subtype", None) == "mimo_v2_asymmetric_swa"
+            _mc.family_name in ("mimo_v2", "naive_n05_flash")
+            or getattr(_mc, "cache_subtype", None) in ("mimo_v2_asymmetric_swa", "naive_n05_swa_dsa")
         ) and not getattr(args, "kv_cache_quantization_explicit", False):
             _old_kvq = args.kv_cache_quantization
             args.kv_cache_quantization = "none"
             logger.info(
-                "MiMo-V2 asymmetric mixed-SWA cache detected — disabling auto "
+                "Asymmetric mixed-SWA cache detected — disabling auto "
                 "stored-prefix q4/q8 quantization (was: %s). Prefix/paged/L2 "
                 "cache stays enabled with native KV/RotatingKVCache state; "
                 "explicit --kv-cache-quantization q4/q8 remains available for "
-                "diagnostics but is not release-cleared for MiMo exactness.",
+                "diagnostics but is not release-cleared for this family's exactness.",
                 _old_kvq,
             )
         elif (

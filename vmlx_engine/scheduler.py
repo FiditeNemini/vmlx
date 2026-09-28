@@ -1923,6 +1923,7 @@ class Scheduler:
                     "mixed_swa_kv",
                     "step3p7_full_sliding_kv",
                     "mimo_v2_asymmetric_swa",
+                    "naive_n05_swa_dsa",
                 }
                 or (
                     model_type == "step3p7"
@@ -9807,6 +9808,17 @@ class Scheduler:
                                             f"truncation needed."
                                         )
                                         cache_for_extract = snapshot_cache
+                                        if getattr(self.model, "model_type", None) == "naive_n05_flash":
+                                            # The existing mixed-SWA contract keeps
+                                            # the generation header and stores N-1.
+                                            # Without this explicit key, generic
+                                            # cleanup strips the header a second
+                                            # time and rejects the rotating state.
+                                            from .models.naive_n05_flash.cache_snapshot import snapshot_size
+
+                                            key_tokens = list(request.prompt_token_ids[:-1])
+                                            snapshot_size(snapshot_cache, expected_tokens=len(key_tokens))
+                                            request._extracted_cache_key_tokens = key_tokens
                                     elif self._uses_dsv4_cache:
                                         # DSV4 cache-hit kickoff responses can
                                         # arrive without a generator-captured
@@ -12812,6 +12824,9 @@ class Scheduler:
                     ),
                     "prompt_snapshot_headroom_skips": getattr(
                         self.batch_generator, "prompt_snapshot_headroom_skips", 0
+                    ),
+                    "prompt_snapshot_last_reason": getattr(
+                        self.batch_generator, "prompt_snapshot_last_reason", None
                     ),
                     "prompt_snapshot_last_headroom_bytes": getattr(
                         self.batch_generator, "prompt_snapshot_last_headroom_bytes", 0

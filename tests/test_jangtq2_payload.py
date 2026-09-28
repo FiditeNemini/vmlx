@@ -11,7 +11,8 @@ spec.loader.exec_module(module)
 
 
 def model():
-    linear = NS(tq2_packed=NS(shape=(2, 64, 4)), tq2_scales=NS(shape=(2, 64)))
+    linear = NS(num_experts=2, output_dims=64, input_dims=64, bits=2,
+                tq2_packed=NS(shape=(2, 64, 4)), tq2_scales=NS(shape=(2, 64)))
     block = NS(is_jangtq2=True, gate_proj=linear, up_proj=linear, down_proj=linear)
     return NS(named_modules=lambda: [("language_model.model.layers.0.mlp.switch_mlp", block)])
 
@@ -20,6 +21,14 @@ KEY = "language_model.model.layers.0.mlp.switch_mlp.gate_proj.tq2_packed"
 
 def test_valid_partial_shard():
     module.validate_payload(model(), [(KEY, NS(shape=(2, 64, 4), dtype="mlx.core.uint32"))])
+
+
+def test_already_bound_bad_array_cannot_redefine_expected_shape():
+    instance = model()
+    linear = instance.named_modules()[0][1].gate_proj
+    linear.tq2_packed = NS(shape=(2, 64, 5))
+    with pytest.raises(ValueError, match="shape or dtype"):
+        module.validate_payload(instance, [(KEY, NS(shape=(2, 64, 5), dtype="mlx.core.uint32"))])
 
 
 @pytest.mark.parametrize("shape,dtype", [((2, 64, 5), "mlx.core.uint32"), ((2, 64, 4), "mlx.core.float32")])

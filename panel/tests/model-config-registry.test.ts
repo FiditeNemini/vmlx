@@ -9,6 +9,21 @@ import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
 
 const createdDirs: string[] = []
 
+describe('Naive N0.5 native settings', () => {
+  it('exposes native efforts and parsers without inventing multimodal support', () => {
+    const dir = makeModelDir({ model_type: 'naive_n05_flash' })
+    const config = detectModelConfigFromDir(dir)
+    expect(config.family).toBe('naive_n05_flash')
+    expect(config.supportedReasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(config.defaultReasoningEffort).toBe('max')
+    expect(config.thinkInTemplate).toBe(false)
+    expect(config.toolParser).toBe('xml_function')
+    expect(config.reasoningParser).toBe('think_xml')
+    expect(config.cacheSubtype).toBe('naive_n05_swa_dsa')
+    expect(config.isMultimodal).toBe(false)
+  })
+})
+
 describe('Spark native defaults', () => {
   it('recognizes the native no_think mode in the bundle stamp', () => {
     const dir = makeModelDir({ model_type: 'spark2_5' }, {

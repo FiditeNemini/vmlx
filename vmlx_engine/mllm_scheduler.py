@@ -2292,6 +2292,7 @@ class MLLMScheduler:
                     "mixed_swa_kv",
                     "step3p7_full_sliding_kv",
                     "mimo_v2_asymmetric_swa",
+                    "naive_n05_swa_dsa",
                 }
                 or (
                     model_type == "step3p7"

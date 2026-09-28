@@ -164,6 +164,9 @@ class SingleBatchGenerator:
         )
         self.prompt_snapshot_oversize_skips = 0
         self.prompt_snapshot_last_estimated_bytes = 0
+        self.prompt_snapshot_headroom_skips = 0
+        self.prompt_snapshot_last_headroom_bytes = 0
+        self.prompt_snapshot_last_reason = None
         self.stop_tokens: set[Any] = set()
         stop_edges = []
         for seq in stop_tokens or []:
@@ -440,6 +443,44 @@ class SingleBatchGenerator:
                     return None
         return self._clone_prompt_cache_snapshot(cache)
 
+    def _clone_naive_prompt_snapshot(self, req):
+        # Mixed-SWA owns a full-prompt N-1 key, including the native generation
+        # header. The scheduler binds this snapshot to that exact key explicitly.
+        if getattr(self.model, "model_type", None) != "naive_n05_flash":
+            self.prompt_snapshot_last_reason = "unsupported_model"
+            return None
+        if req.gen_prompt_len < 0:
+            self.prompt_snapshot_last_reason = "invalid_generation_suffix"
+            return None
+        from ..models.naive_n05_flash.cache_snapshot import (
+            clone_prompt_cache, snapshot_size,
+        )
+        from .memory_limits import get_metal_ws_guard_threshold
+
+        try:
+            estimated = snapshot_size(req.cache)
+            self.prompt_snapshot_last_estimated_bytes = estimated
+            limit = self.prompt_snapshot_max_bytes
+            if limit is not None and estimated > limit:
+                self.prompt_snapshot_last_reason = "backend_budget"
+                self.prompt_snapshot_oversize_skips += 1
+                return None
+            active, maximum = get_effective_metal_working_set_bytes(mx)
+            headroom = max(0, int(maximum * get_metal_ws_guard_threshold() / 100) - active)
+            self.prompt_snapshot_last_headroom_bytes = headroom
+            if maximum <= 0 or estimated > headroom:
+                self.prompt_snapshot_last_reason = "metal_headroom"
+                self.prompt_snapshot_headroom_skips += 1
+                return None
+            with self._stream_context():
+                result = clone_prompt_cache(req.cache)
+            self.prompt_snapshot_last_reason = "captured"
+            return result
+        except Exception as exc:
+            self.prompt_snapshot_last_reason = "unavailable: " + str(exc)
+            logger.debug("Naive prompt snapshot unavailable; retaining clean-prefill fallback: %s", exc)
+            return None
+
     def insert(
         self,
         prompts: list[list[int]],
@@ -615,6 +656,12 @@ class SingleBatchGenerator:
                 )
             with self._stream_context():
                 self._model_call(chunk, req)
+                if getattr(self.model, "model_type", None) == "naive_n05_flash":
+                    # synchronize only waits for submitted work; it does not
+                    # evaluate the lazy cache graph. Realize native nested KV,
+                    # indexer and rotating state before admitting another chunk.
+                    # Keep this boundary on the generator's concrete stream.
+                    mx.eval([entry.state for entry in req.cache])
                 req.context_tokens.extend(chunk)
                 if req.logits_processors:
                     req.token_context.update_and_fetch(mx.array(chunk, dtype=mx.int32))
@@ -975,7 +1022,7 @@ class SingleBatchGenerator:
         # openPangu and GLM each own a path-dependent native state unit. Capture
         # the immutable N-1 boundary BEFORE the final prompt token is consumed;
         # post-decode convolution/recurrent/indexer state cannot be rewound.
-        typed_prompt_snapshot = None
+        typed_prompt_snapshot = self._clone_naive_prompt_snapshot(req)
         if uses_openpangu and any(
             int(getattr(layer, "offset", 0) or 0) > 0 for layer in req.cache
         ):
@@ -1000,7 +1047,7 @@ class SingleBatchGenerator:
         req.context_tokens.append(last_token)
         prompt_cache_snapshot = (
             typed_prompt_snapshot
-            if uses_openpangu or uses_glm5_next
+            if uses_openpangu or uses_glm5_next or typed_prompt_snapshot is not None
             else self._clone_admissible_prompt_cache_snapshot(req.cache)
         )
         req.prompt_cache_snapshot = prompt_cache_snapshot

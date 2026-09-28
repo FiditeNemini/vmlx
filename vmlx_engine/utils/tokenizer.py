@@ -1244,6 +1244,11 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
     ensure_spark2_5_runtime_registered(local_model_path)
 
+    if _get_model_type_from_config(local_model_path) == "naive_n05_flash":
+        from ..models.naive_n05_flash.register import register_naive_n05_flash_runtime
+
+        register_naive_n05_flash_runtime()
+
     def _finalize_loaded_model(model, tokenizer):
         validate_nanbeige_loop_cache_contract(model, local_model_path)
         if _generic_native_mtp_expected:

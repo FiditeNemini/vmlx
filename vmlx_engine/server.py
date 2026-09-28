@@ -12754,7 +12754,7 @@ def _native_cache_status(
     if (
         getattr(scheduler, "_mixed_attention_cache_model", False)
         or cache_subtype
-        in {"mixed_swa_kv", "step3p7_full_sliding_kv", "mimo_v2_asymmetric_swa"}
+        in {"mixed_swa_kv", "step3p7_full_sliding_kv", "mimo_v2_asymmetric_swa", "naive_n05_swa_dsa"}
     ):
         tq_objects_active = bool(getattr(scheduler, "_tq_active", False))
         tq_live_encode = (

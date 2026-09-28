@@ -75,3 +75,23 @@ def test_expert_tiles_large_extent_uses_int_before_narrowing(bits, fused):
     np.testing.assert_array_equal(expected,np.full(expected.shape,expected[0,0]))
     np.testing.assert_array_equal(result,np.full(result.shape,expected[0,0]))
     mx.clear_cache()
+
+
+@pytest.mark.parametrize("gate_bits,down_bits", [(2, 2), (2, 3), (3, 3), (3, 4)])
+def test_naive_admission_requires_matching_native_projections(monkeypatch, gate_bits, down_bits):
+    module = geometry()
+    for projection in (module.gate_proj, module.up_proj, module.down_proj):
+        projection.num_experts = 256
+    module.gate_proj.bits = module.up_proj.bits = gate_bits
+    module.down_proj.bits = down_bits
+    x = SimpleNamespace(dtype=mx.bfloat16, shape=(2048, 4096))
+    monkeypatch.setattr(kernels, "nax_available", lambda: True)
+    monkeypatch.setattr(switch, "EXPERT_TILES", "0")
+    assert not switch.TQSwitchGLU._use_expert_tiles(module, x, 8)
+    monkeypatch.setattr(switch, "EXPERT_TILES", "1")
+    assert switch.TQSwitchGLU._use_expert_tiles(module, x, 8)
+    module.down_proj.num_experts = 288
+    assert not switch.TQSwitchGLU._use_expert_tiles(module, x, 8)
+    module.down_proj.num_experts = 256
+    module.down_proj.bits = 6
+    assert not switch.TQSwitchGLU._use_expert_tiles(module, x, 8)

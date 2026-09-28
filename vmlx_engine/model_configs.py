@@ -847,6 +847,32 @@ def register_all(registry=None):
         )
     )
 
+    _register(
+        ModelConfig(
+            family_name="naive_n05_flash",
+            model_types=["naive_n05_flash"],
+            cache_type="kv",
+            cache_subtype="naive_n05_swa_dsa",
+            eos_tokens=["<|im_end|>", "<|endoftext|>"],
+            tool_parser="xml_function",
+            reasoning_parser="think_xml",
+            think_in_template=False,
+            supports_thinking=True,
+            supports_native_tools=True,
+            supported_reasoning_efforts=["low", "high", "max"],
+            architecture_hints={
+                "default_enable_thinking": True,
+                "swa_window": 128,
+                "swa_attention_sink_bias": True,
+                "full_attention_kv_heads": 4,
+                "swa_attention_kv_heads": 8,
+                "attention_value_scale": 0.707,
+                "dsa_index_top_k": 2048,
+            },
+            priority=4,
+        )
+    )
+
     # ── openPangu-2.0-Flash ──
     _register(
         ModelConfig(

@@ -3417,6 +3417,19 @@ class BlockAwarePrefixCache:
         self._allowed_n_kv_heads = allowed
         return allowed
 
+    def _get_cache_list_n_kv_heads(self, layer_idx: int, sub_idx: int) -> set:
+        """Use a runtime's slot contract without broadening other KV layers."""
+        layout = getattr(self.model, "cache_list_head_counts", None)
+        if layout is None:
+            return self._get_allowed_n_kv_heads()
+        try:
+            count = layout[layer_idx][sub_idx]
+        except (IndexError, KeyError, TypeError) as exc:
+            raise ValueError("CacheList slot absent from runtime head contract") from exc
+        if type(count) is not int or count <= 0:
+            raise ValueError("Invalid CacheList runtime head contract")
+        return {count}
+
     def _touch_disk_chain_access(
         self,
         tokens: List[int],
@@ -5935,10 +5948,20 @@ class BlockAwarePrefixCache:
                             _entry_has_native_quantized_kv(entry)
                             for entry in block_kv_data
                         )
+                        # Generic NumPy slicing deliberately skips CacheList.
+                        # Preserve the typed nested attention/indexer payload,
+                        # including child dtypes and empty indexer values. Freeze
+                        # each page through the bounded writer before proceeding.
+                        has_native_cache_list = any(
+                            isinstance(entry, (tuple, list))
+                            and entry and entry[0] == "cache_list"
+                            for entry in block_kv_data
+                        )
                         if (
                             has_minimax_m3_cache_data
                             or has_dsv4_delta_cache_data
                             or has_native_quantized
+                            or has_native_cache_list
                         ):
                             np_block = block_kv_data
                         else:
@@ -5992,7 +6015,7 @@ class BlockAwarePrefixCache:
                                 _entry_has_native_tq(_entry)
                                 for _entry in np_block
                             )
-                            if has_native_quantized or self._write_block_immediately_for_store(
+                            if has_native_quantized or has_native_cache_list or self._write_block_immediately_for_store(
                                 disk_only=_disk_only,
                                 minimax_m3=has_minimax_m3_cache_data,
                                 native_tq=_has_native_tq,
@@ -8502,7 +8525,7 @@ class BlockAwarePrefixCache:
                                 cv = cv * 1
                             deferred_tq_eval.append(ck)
                             deferred_tq_eval.append(cv)
-                            allowed_kv = self._get_allowed_n_kv_heads()
+                            allowed_kv = self._get_cache_list_n_kv_heads(layer_idx, sub_idx)
                             if allowed_kv and ck.shape[1] not in allowed_kv:
                                 logger.warning(
                                     f"CacheList TQ sub {sub_idx} head mismatch: "
@@ -8558,7 +8581,7 @@ class BlockAwarePrefixCache:
 
                             # Validate head count in sub-cache (mixed-head aware)
                             if ndim == 4:
-                                allowed_kv = self._get_allowed_n_kv_heads()
+                                allowed_kv = self._get_cache_list_n_kv_heads(layer_idx, sub_idx)
                                 if allowed_kv and ck.shape[1] not in allowed_kv:
                                     logger.warning(
                                         f"CacheList sub {sub_idx} head mismatch: "
@@ -8577,7 +8600,11 @@ class BlockAwarePrefixCache:
                                     pad_shape = list(ck.shape)
                                     pad_shape[seq_axis] = pad
                                     k_pad = mx.zeros(tuple(pad_shape), ck.dtype)
-                                    v_pad = mx.zeros(tuple(pad_shape), cv.dtype)
+                                    # Indexer caches can have zero-width values;
+                                    # attention K and V widths can also differ.
+                                    value_pad_shape = list(cv.shape)
+                                    value_pad_shape[seq_axis] = pad
+                                    v_pad = mx.zeros(tuple(value_pad_shape), cv.dtype)
                                     ck = mx.concatenate([ck, k_pad], axis=seq_axis)
                                     cv = mx.concatenate([cv, v_pad], axis=seq_axis)
                                     mx.eval(ck, cv)

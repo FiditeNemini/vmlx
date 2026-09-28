@@ -8,9 +8,16 @@ def expected_payload(model):
             continue
         for projection in ("gate_proj", "up_proj", "down_proj"):
             linear = getattr(module, projection)
+            # Generic text loaders may already have bound shard arrays. Their
+            # shapes are not an independent oracle for validating that shard.
+            shapes = {
+                "tq2_packed": (linear.num_experts, linear.output_dims,
+                               linear.input_dims * linear.bits // 32),
+                "tq2_scales": (linear.num_experts, linear.output_dims),
+            }
             for name, dtype in (("tq2_packed", "uint32"), ("tq2_scales", "float16")):
                 expected[f"{path}.{projection}.{name}"] = (
-                    tuple(getattr(linear, name).shape), dtype
+                    shapes[name], dtype
                 )
     return expected
 

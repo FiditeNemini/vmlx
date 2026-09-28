@@ -28,7 +28,7 @@ SORT_THRESHOLD = 64
 ROTATIONS = ("none", "hadamard32")
 # Where decode applies the Hadamard-32: "host" = once per activation row (x once per token, h once per expert-token)
 # then the unrotated fast kernels; "kernel" = in-register inside every threadgroup (redundant: measured 1.05-1.15x).
-from .runtime_identity import DECODE_ROT, EXPERT_TILES, GATEUP_H32
+from .runtime_identity import DECODE_ROT, EXPERT_TILES, GATEUP_H32, H32_ROWS
 
 
 class TQSwitchLinear(nn.Module):
@@ -49,11 +49,24 @@ class TQSwitchLinear(nn.Module):
     def rotated(self) -> bool:
         return self.rotation == "hadamard32"
 
+    def to_quantized(self, **kwargs):
+        """Keep packed JANGH modules intact in generic text-model loading."""
+        if (
+            kwargs.get("mode", "jangtq2") != "jangtq2"
+            or kwargs.get("bits", self.bits) != self.bits
+            or kwargs.get("rotation", self.rotation) != self.rotation
+        ):
+            raise ValueError("jangtq2: quantization entry differs from installed module")
+        return self
+
 
 def rotate_rows(x: mx.array, lin: TQSwitchLinear) -> mx.array:
     """Host-side activation rotation (prefill path): blockwise normalized Hadamard-32 in float32, back to x.dtype."""
     if not lin.rotated:
         return x
+    if H32_ROWS == "1":
+        # Preserve the existing output dtype and rounding boundary.
+        return K.h32_rows(x, x.dtype)
     shp = x.shape
     return mx.hadamard_transform(x.astype(mx.float32).reshape(*shp[:-1], shp[-1] // 32, 32)).reshape(shp).astype(x.dtype)
 
@@ -86,10 +99,12 @@ class TQSwitchGLU(nn.Module):
         g, u, d = self.gate_proj, self.up_proj, self.down_proj
         return (
             EXPERT_TILES == "1" and x.dtype == mx.bfloat16 and x.shape[-1] == 4096 and kk == 8
-            and (g.input_dims, g.output_dims, g.num_experts) == (4096, 2048, 288)
-            and (u.input_dims, u.output_dims, u.num_experts) == (4096, 2048, 288)
-            and (d.input_dims, d.output_dims, d.num_experts) == (2048, 4096, 288)
-            and g.bits == u.bits and g.bits in (2, 3) and d.bits in (2, 3)
+            and g.num_experts in (256, 288)
+            and (g.input_dims, g.output_dims) == (4096, 2048)
+            and (u.input_dims, u.output_dims, u.num_experts) == (4096, 2048, g.num_experts)
+            and (d.input_dims, d.output_dims, d.num_experts) == (2048, 4096, g.num_experts)
+            and g.bits == u.bits and g.bits in (2, 3)
+            and d.bits in ((2, 3, 4) if g.num_experts == 256 else (2, 3))
             and g.rotated and u.rotated and d.rotated and K.nax_available()
         )
 
@@ -101,7 +116,8 @@ class TQSwitchGLU(nn.Module):
         xs = rotate_rows(x, g)[order // kk]
         if self._use_expert_tiles(x, kk):
             plan = K.expert_tile_plan(idx_s, g.num_experts)
-            rotate_output = GATEUP_H32 == "1"
+            # Fused output rotation is separately qualified for GLM only.
+            rotate_output = GATEUP_H32 == "1" and g.num_experts == 288
             h = K.gather_qmm_expert_sorted(
                 xs, g.tq2_packed, g.tq2_scales, idx_s, g.bits, plan,
                 packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit,

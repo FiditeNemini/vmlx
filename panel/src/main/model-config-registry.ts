@@ -332,6 +332,15 @@ registerFamily('qwen-mamba', { cacheType: 'mamba', toolParser: 'qwen', usePagedC
 // MiMo-V2.5 JANG_2L keeps multimodal assets. Its template emits generic XML
 // function calls and <think> reasoning, not Qwen tool JSON.
 registerFamily('mimo_v2', { cacheType: 'kv', toolParser: 'xml_function', reasoningParser: 'think_xml', supportsThinking: true, thinkInTemplate: false, enableAutoToolChoice: true, isMultimodal: true, description: 'MiMo V2.5 multimodal MoE', priority: 4 })
+registerFamily('naive_n05_flash', {
+  cacheType: 'kv', cacheSubtype: 'naive_n05_swa_dsa',
+  toolParser: 'xml_function', reasoningParser: 'think_xml',
+  supportsThinking: true, thinkInTemplate: false,
+  honorsEnableThinking: true, supportsInstructMode: true,
+  defaultEnableThinking: true, supportedReasoningEfforts: ['low', 'high', 'max'],
+  defaultReasoningEffort: 'max', enableAutoToolChoice: true,
+  isMultimodal: false, description: 'Naive N0.5 Flash text MoE', priority: 4,
+})
 // Nanbeige 4.2 reuses 22 module layers for two forward loops. The Python
 // loader owns the fail-closed 44-slot cache invariant; the panel mirrors the
 // text/protocol/default truth and blocks external draft decoding below.
@@ -578,6 +587,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'qwen': 'qwen2',
   'qwen_mamba': 'qwen-mamba',
   'mimo_v2': 'mimo_v2',
+  'naive_n05_flash': 'naive_n05_flash',
   'nanbeige': 'nanbeige',
   // ── Llama family ──
   'llama': 'llama3',

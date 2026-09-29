@@ -842,6 +842,8 @@ def register_all(registry=None):
             reasoning_parser="deepseek_r1",
             think_in_template=True,
             supports_thinking=True,
+            # GLM-5.3 exposes effort levels, not a native thinking-off rail.
+            supports_instruct_mode=False,
             supported_reasoning_efforts=["low", "high", "max"],
             priority=3,
         )

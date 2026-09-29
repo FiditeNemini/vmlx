@@ -292,6 +292,8 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       toolParser: 'glm_xml_args',
       reasoningParser: 'glm_think_block',
       supportsThinking: true,
+      supportsInstructMode: false,
+      honorsEnableThinking: false,
       thinkInTemplate: true,
       supportedReasoningEfforts: ['low', 'high', 'max'],
       defaultReasoningEffort: 'max',

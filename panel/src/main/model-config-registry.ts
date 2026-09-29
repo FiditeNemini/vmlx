@@ -280,6 +280,8 @@ registerFamily('glm5-next', {
   toolParser: 'glm_xml_args',
   reasoningParser: 'glm_think_block',
   supportsThinking: true,
+  supportsInstructMode: false,
+  honorsEnableThinking: false,
   thinkInTemplate: true,
   defaultEnableThinking: true,
   supportedReasoningEfforts: ['low', 'high', 'max'],

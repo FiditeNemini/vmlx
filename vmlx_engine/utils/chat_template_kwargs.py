@@ -115,22 +115,16 @@ def ensure_thinking_off_sentinel(
     if last_open >= 0:
         after_open = prompt[last_open + len("<think>") :]
         if "</think>" not in after_open:
-            # Step-3.7's official template always opens this rail and has no
+            # These official templates always open this rail and have no
             # thinking-off branch. Preserve the native prompt; the public API
             # rejects instruct mode instead of fabricating an empty thought.
-            if is_step3p7:
+            if is_step3p7 or fam in {"glm5_next", "glm5_next_text"}:
                 return prompt
             # #199-2B: MiniMax tool requests keep the planning rail open so the
             # model can still select tools; compatible families may close an
             # already-open thought when their native contract supports it.
             if tools_present and is_minimax:
                 return prompt
-            # GLM5-next renders an empty historical rail as <think></think>.
-            # Preserve that exact form for its explicit-off adapter, including
-            # tool turns; R1-style whitespace changes the model's continuation.
-            # Other GLM families need their own template qualification.
-            if fam == "glm5_next":
-                return prompt[: last_open + len("<think>")] + "</think>"
             return prompt[: last_open + len("<think>")] + "\n</think>\n\n"
         return prompt
 

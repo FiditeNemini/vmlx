@@ -13,10 +13,29 @@ import time
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, computed_field, field_validator, model_validator
 
 from ..video_controls import VIDEO_CONTROL_FIELDS, validate_video_controls
 from ..image_controls import IMAGE_CONTROL_FIELDS, validate_image_controls
+
+
+_MEDIA_STRICT_BOOL = TypeAdapter(bool)
+
+
+def _validate_strict_media_envelopes(data):
+    """Reject foreign media controls before Pydantic discards extra fields."""
+    if isinstance(data, dict):
+        foreign = [name for name in ("media_io_kwargs", "mm_processor_kwargs")
+                   if data.get(name) is not None]
+        if foreign and _MEDIA_STRICT_BOOL.validate_python(
+            data.get("media_controls_strict", False)
+        ):
+            raise ValueError(
+                "Unsupported media controls in strict mode: " + ", ".join(foreign)
+                + ". Use native vMLX video_fps, video_max_frames, video_token_budget "
+                "and image/video pixel controls; processor kwargs are not translated."
+            )
+    return data
 
 
 _NO_REASONING_EFFORTS = {"none", "off", "false", "disabled", "disable", "0"}
@@ -267,6 +286,11 @@ class StreamOptions(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     """Request for chat completion."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_strict_media_envelopes(cls, data):
+        return _validate_strict_media_envelopes(data)
 
     @model_validator(mode="after")
     def validate_client_tools(self):
@@ -1031,6 +1055,11 @@ class ResponsesToolDefinition(BaseModel):
 
 class ResponsesRequest(BaseModel):
     """Request for OpenAI Responses API (POST /v1/responses)."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_strict_media_envelopes(cls, data):
+        return _validate_strict_media_envelopes(data)
 
     @model_validator(mode="after")
     def validate_client_tools(self):

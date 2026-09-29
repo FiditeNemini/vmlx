@@ -24,6 +24,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from vmlx_engine.utils.naive_prefill_policy import naive_padded_prefill_requested
+
 from .base import BaseModelArgs, create_attention_mask
 from .cache import CacheList, KVCache, RotatingKVCache
 from .switch_layers import SwitchGLU
@@ -161,6 +163,29 @@ class Attention(nn.Module):
         sink = a.add_swa_attention_sink_bias if is_swa else a.add_full_attention_sink_bias
         self.attention_sink_bias = mx.zeros((self.n_heads,)) if sink else None
         self.indexer = None if is_swa else Indexer(a)
+        self._padded_prefill = naive_padded_prefill_requested()
+
+    def _full_sdpa(self, q, k, v, mask, sinks):
+        # MLX's full fused kernel requires equal Q/V head widths. Native
+        # 192/128 attention otherwise materializes a history-sized score
+        # tensor. Zero-padding V preserves QK, scale, mask and softmax;
+        # discard only the added output coordinates. The fused reduction is
+        # numerically different, so this opt-in has its own cache identity.
+        if (
+            self._padded_prefill
+            and q.shape[2] > 8
+            and q.shape[-1] == k.shape[-1] == 192
+            and v.shape[-1] == 128
+            and q.dtype in (mx.bfloat16, mx.float16)
+            and sinks is None
+        ):
+            padded_v = mx.pad(v, [(0, 0), (0, 0), (0, 0), (0, 64)])
+            return mx.fast.scaled_dot_product_attention(
+                q, k, padded_v, scale=self.scale, mask=mask, force_fused=True
+            )[..., :128]
+        return mx.fast.scaled_dot_product_attention(
+            q, k, v, scale=self.scale, mask=mask, sinks=sinks
+        )
 
     def __call__(self, x, mask=None, cache=None):
         B, L, _ = x.shape
@@ -187,7 +212,7 @@ class Attention(nn.Module):
             sc = self.indexer.scores(x, self.rope, off, idx_cache)             # indexer cache always advances
             topk = self.a.index_top_k
             if Lk <= topk:
-                o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask, sinks=sinks)
+                o = self._full_sdpa(q, k, v, mask, sinks)
             elif L == 1:
                 sel = mx.argpartition(-sc, kth=topk - 1, axis=-1)[..., :topk]    # (B,1,topk)
                 gi = sel[:, :, :, None]                                         # (B,1,topk,1)
@@ -200,8 +225,7 @@ class Attention(nn.Module):
                 sc = mx.where(causal[None], sc, -mx.inf)
                 sel = mx.argpartition(-sc, kth=topk - 1, axis=-1)[..., :topk]
                 keep = mx.put_along_axis(mx.zeros(sc.shape, dtype=mx.bool_), sel, mx.array(True), axis=-1)
-                o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale,
-                                                         mask=(keep & causal[None])[:, None], sinks=sinks)
+                o = self._full_sdpa(q, k, v, (keep & causal[None])[:, None], sinks)
         return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
 
 

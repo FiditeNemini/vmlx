@@ -151,6 +151,13 @@ def _resolve_runtime_cache_fingerprint() -> str:
     except Exception:
         engine_version = "unknown"
     parts.append(f"vmlx_engine={engine_version}")
+    from .utils.naive_prefill_policy import (
+        NAIVE_PADDED_PREFILL_IDENTITY,
+        naive_padded_prefill_requested,
+    )
+
+    if naive_padded_prefill_requested():
+        parts.append(NAIVE_PADDED_PREFILL_IDENTITY)
     for package in ("jang", "mlx", "mlx-metal", "mlx-lm", "mlx-vlm"):
         try:
             version = importlib.metadata.version(package)

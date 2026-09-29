@@ -147,6 +147,11 @@ def test_scheduler_stores_snapshot_with_full_mixed_swa_key(tmp_path, monkeypatch
     tokens = list(range(1, 12))
     request = Request(request_id='snapshot-key', prompt=tokens,
                       sampling_params=SamplingParams(max_tokens=2, temperature=0))
+    # Same source weights and prefill partitions isolate storage from shape-dependent math.
+    reference = scheduler.model.make_cache()
+    for chunk in (tokens[:4], tokens[4:8], tokens[8:10]):
+        scheduler.model(mx.array([chunk]), cache=reference)
+        mx.eval(*[array for leaf in leaves(reference) for array in leaf.state])
     request.prompt_token_ids=tokens
     request.num_prompt_tokens=len(tokens)
     request._gen_prompt_len=3
@@ -158,12 +163,29 @@ def test_scheduler_stores_snapshot_with_full_mixed_swa_key(tmp_path, monkeypatch
         else:pytest.fail('request did not finish')
         assert replays == []
         assert request._extracted_cache_key_tokens == tokens[:-1]
+        disk_reads = []
+        disk = scheduler.block_aware_cache.paged_cache._disk_store
+        read = disk.read_block_for_reconstruction
+        def observed_read(*args, **kwargs):
+            disk_reads.append(args[0])
+            return read(*args, **kwargs)
+        monkeypatch.setattr(disk, 'read_block_for_reconstruction', observed_read)
         table, remainder=scheduler.block_aware_cache.fetch_cache('snapshot-refault', tokens)
         assert table is not None and table.num_tokens == len(tokens)-1
         assert remainder == tokens[-1:]
         restored=scheduler.block_aware_cache.reconstruct_cache(table)
         assert restored is not None
+        assert disk_reads, 'numerical comparison must exercise real L2 reads'
         assert [c.offset for c in leaves(restored)] == [10,10,10]
+        # Teacher-force enough suffix tokens to wrap SWA after the restored boundary.
+        for token in tokens[-1:] + [12, 13, 14, 15, 16]:
+            expected = scheduler.model(mx.array([[token]]), cache=reference)
+            actual = scheduler.model(mx.array([[token]]), cache=restored)
+            mx.eval(expected, actual)
+            assert bool(mx.array_equal(expected, actual))
+        assert [c.offset for c in leaves(restored)] == [16, 16, 16]
+        assert restored[0][1].state[0].dtype == mx.float32
+        assert restored[0][1].state[1].shape[-1] == 0
     finally:
         scheduler.shutdown()
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { ArrowDown, MessageCircle } from 'lucide-react'
 import { MessageBubble } from './MessageBubble'
 import { useTranslation } from '../../i18n'
@@ -44,6 +44,17 @@ interface MessageListProps {
 
 export function MessageList({ messages, streamingMessageId, currentMetrics, reasoningMap, reasoningSegmentMap, reasoningDoneMap, answerPassMap, toolStatusMap, hideToolStatus, sessionId, sessionEndpoint, onRegenerate, onEdit }: MessageListProps) {
   const { t } = useTranslation()
+  // Streaming changes the parent's closures on every chunk. Forward actions
+  // through stable callbacks so completed bubbles keep their memoized render,
+  // while clicks still see the latest committed conversation state.
+  const actionsRef = useRef({ onRegenerate, onEdit })
+  useLayoutEffect(() => {
+    actionsRef.current = { onRegenerate, onEdit }
+  }, [onRegenerate, onEdit])
+  const regenerate = useCallback(() => actionsRef.current.onRegenerate?.(), [])
+  const edit = useCallback((messageId: string, content: string) => {
+    actionsRef.current.onEdit?.(messageId, content)
+  }, [])
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const isNearBottomRef = useRef(true)
@@ -140,8 +151,8 @@ export function MessageList({ messages, streamingMessageId, currentMetrics, reas
               sessionId={sessionId}
               sessionEndpoint={sessionEndpoint}
               isLastAssistant={idx === lastAssistantIdx}
-              onRegenerate={onRegenerate}
-              onEdit={onEdit}
+              onRegenerate={onRegenerate ? regenerate : undefined}
+              onEdit={onEdit ? edit : undefined}
             />
           )
         })})()}

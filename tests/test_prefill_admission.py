@@ -43,7 +43,9 @@ class TestValve:
                 chunk_end=22048,
             )
         message = str(excinfo.value)
-        assert "cannot be served on this hardware" in message
+        assert "conservative admission budget" in message
+        assert "prefill step size" in message
+        assert "cannot be served on this hardware" not in message
         assert "[20000:22048)" in message
 
     def test_admits_when_the_chunk_fits(self):

@@ -635,6 +635,14 @@ class SingleBatchGenerator:
             _valve_on = _valve_max_ws > 0
             _valve_margin = _prefill_valve_min_margin_bytes()
 
+        # Naive realizes its native state at every chunk below. Measure that
+        # completed allocation window rather than leaving the valve's observed
+        # transient at zero. Other families keep their existing ownership.
+        _measure_native_peak = (
+            _valve_on
+            and getattr(self.model, "model_type", None) == "naive_n05_flash"
+        )
+
         pos = 0
         while pos < len(tokens):
             n = min(self.prefill_step_size, len(tokens) - pos)
@@ -654,6 +662,8 @@ class SingleBatchGenerator:
                     chunk_end=pos + n,
                     model_label=type(self).__name__,
                 )
+            if _measure_native_peak:
+                mx.reset_peak_memory()
             with self._stream_context():
                 self._model_call(chunk, req)
                 if getattr(self.model, "model_type", None) == "naive_n05_flash":
@@ -666,6 +676,11 @@ class SingleBatchGenerator:
                 if req.logits_processors:
                     req.token_context.update_and_fetch(mx.array(chunk, dtype=mx.int32))
             self._sync()
+            if _measure_native_peak and _active > 0:
+                _valve_transient = max(
+                    _valve_transient,
+                    max(0, int(mx.get_peak_memory()) - _active),
+                )
             if not _prefill_keep_alloc:
                 if hasattr(mx, "clear_cache"):
                     mx.clear_cache()

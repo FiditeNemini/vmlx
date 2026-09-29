@@ -176,9 +176,9 @@ def prefill_valve_check(
         f"[{chunk_start}:{chunk_end}) — active Metal working set "
         f"{active_bytes / _GIB:.2f}GB plus projected transient "
         f"{(projected - active_bytes) / _GIB:.2f}GB exceeds the device "
-        f"working-set limit {max_ws_bytes / _GIB:.2f}GB. A context of this "
-        f"length cannot be served on this hardware; reduce the prompt or "
-        f"context size." + wired_limit_advisory(max_ws_bytes)
+        f"working-set limit {max_ws_bytes / _GIB:.2f}GB. This chunk exceeds "
+        f"the conservative admission budget; reduce the prompt or prefill "
+        f"step size and retry." + wired_limit_advisory(max_ws_bytes)
     )
 
 

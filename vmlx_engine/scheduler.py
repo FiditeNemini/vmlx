@@ -2600,6 +2600,16 @@ class Scheduler:
                 # MoE: quantize each sub-cache independently
                 quantized_subs = []
                 for sc in layer_cache.caches:
+                    # Naive's key-only DSA index is not attention KV. Its
+                    # per-vector FP8 round trip already carries an FP32 scale;
+                    # quantizing it again can change sparse token selection.
+                    values_shape = getattr(getattr(sc, "values", None), "shape", ())
+                    if (
+                        getattr(self, "_model_type_for_runtime", "") == "naive_n05_flash"
+                        and values_shape and values_shape[-1] == 0
+                    ):
+                        quantized_subs.append(sc)
+                        continue
                     if (
                         isinstance(sc, KVCache)
                         and not isinstance(sc, QuantizedKVCache)

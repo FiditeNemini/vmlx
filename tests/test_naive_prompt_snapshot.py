@@ -283,3 +283,144 @@ def test_native_family_detection_preserves_explicit_config_precedence():
     assert detect(SimpleNamespace(config={"model_type": "explicit"}, model=native)) == "explicit"
     assert detect(SimpleNamespace(args=SimpleNamespace(model_type="fallback"),
                                   model=SimpleNamespace(config={"model_type": "inner"}))) == "inner"
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_storage_quantization_preserves_native_search_index(bits, tmp_path):
+    from mlx_lm.models.cache import KVCache, CacheList, QuantizedKVCache
+    from vmlx_engine.scheduler import Scheduler
+    from vmlx_engine.models.naive_n05_flash.register import register_naive_n05_flash_runtime
+    register_naive_n05_flash_runtime()
+    _fp8_round = importlib.import_module("mlx_lm.models.naive_n05_flash")._fp8_round
+
+    mx.random.seed(928)
+    attention, indexer = KVCache(), KVCache()
+    attention.update_and_fetch(
+        mx.random.normal((1, 4, 11, 192)).astype(mx.bfloat16),
+        mx.random.normal((1, 4, 11, 128)).astype(mx.bfloat16))
+    indexer.update_and_fetch(_fp8_round(mx.random.normal((1, 1, 11, 128))),
+                             mx.zeros((1, 1, 11, 0), dtype=mx.float32))
+    mx.eval(attention.state, indexer.state)
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._kv_cache_bits = bits
+    scheduler._kv_cache_group_size = 64
+    scheduler._model_type_for_runtime = "naive_n05_flash"
+    scheduler.block_aware_cache = object()
+    stored = scheduler._quantize_cache_for_storage([CacheList(attention, indexer)])
+    assert isinstance(stored[0][0], QuantizedKVCache)
+    assert stored[0][1] is indexer
+    restored = scheduler._dequantize_cache_for_use(stored)
+    mx.eval([c.state for c in restored])
+    assert restored[0][1].keys.dtype == mx.float32
+    assert restored[0][1].values.shape[-1] == 0
+    assert restored[0][1].offset == 11
+    assert bool(mx.array_equal(restored[0][1].keys, indexer.keys))
+
+    # Reopen the real SSD store: no in-memory payload can satisfy this read.
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    model = SimpleNamespace(args=SimpleNamespace(num_key_value_heads=4),
+                            cache_list_head_counts=((4, 1),))
+    tokens = list(range(11))
+    writer = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    try:
+        manager = PagedCacheManager(block_size=4, max_blocks=32,
+                                    disk_store=writer, disk_only=True)
+        prefix = BlockAwarePrefixCache(model=model, paged_cache_manager=manager)
+        state = scheduler._extract_cache_states(stored)
+        table = prefix.store_cache("quantized-writer", tokens, state)
+        assert table is not None
+        hashes = [manager.allocated_blocks[i].block_hash for i in table.block_ids]
+        assert writer.wait_for_blocks(hashes, timeout=5.0) == set(hashes)
+    finally:
+        writer.shutdown()
+    reader = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    try:
+        manager = PagedCacheManager(block_size=4, max_blocks=32,
+                                    disk_store=reader, disk_only=True)
+        prefix = BlockAwarePrefixCache(model=model, paged_cache_manager=manager)
+        table, suffix = prefix.fetch_cache("quantized-reader", tokens + [99])
+        assert table is not None and table.num_tokens == 11 and suffix == [99]
+        rebuilt = prefix.reconstruct_cache(table)
+        assert rebuilt is not None
+        assert isinstance(rebuilt[0][0], QuantizedKVCache)
+        disk_restored = scheduler._dequantize_cache_for_use(rebuilt)
+        for actual, expected in zip(disk_restored[0].caches, restored[0].caches):
+            assert actual.offset == expected.offset == 11
+            for a, b in zip(actual.state, expected.state):
+                assert a.dtype == b.dtype
+                assert bool(mx.array_equal(a, b))
+    finally:
+        reader.shutdown()
+
+
+@pytest.mark.parametrize("bits", [0, 4, 8])
+def test_naive_storage_status_reports_native_indexer_policy(bits):
+    from vmlx_engine.server import _native_cache_status
+
+    scheduler = SimpleNamespace(
+        _model_type_for_runtime="naive_n05_flash",
+        _mixed_attention_cache_model=True,
+        _kv_cache_bits=bits,
+        _kv_cache_group_size=64,
+    )
+    policy = _native_cache_status(scheduler)["storage_quantization"]
+    assert policy["enabled"] is bool(bits)
+    assert policy["applies_to"] == "full_attention_kv_only"
+    assert policy["sliding_window_policy"] == "native_rotating_kv_state"
+    assert policy["indexer_policy"] == "preserve_native_fp32_key_only_state"
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_explicit_naive_quantized_scheduler_ssd_continuation(tmp_path, monkeypatch, bits):
+    from vmlx_engine.scheduler import Scheduler, SchedulerConfig
+    from vmlx_engine.request import Request, SamplingParams
+    from vmlx_engine.utils import single_batch_generator as sbg
+
+    class Tokenizer:
+        clean_up_tokenization_spaces = False
+        def decode(self, tokens):
+            return "".join(chr(65 + int(t)) for t in tokens)
+
+    monkeypatch.setattr(sbg, "get_effective_metal_working_set_bytes",
+                        lambda mx: (0, 64 << 30))
+    scheduler = Scheduler(make_model(), Tokenizer(), SchedulerConfig(
+        max_num_seqs=1, prefill_step_size=4, enable_prefix_cache=True,
+        use_paged_cache=False, enable_block_disk_cache=True,
+        block_disk_cache_dir=str(tmp_path), paged_cache_block_size=4,
+        max_cache_blocks=32, kv_cache_quantization=f"q{bits}",
+        kv_cache_quantization_explicit=True, kv_cache_group_size=32,
+    ))
+    try:
+        assert scheduler._kv_cache_bits == bits
+        tokens = list(range(1, 12))
+        reference = scheduler.model.make_cache()
+        for chunk in (tokens[:4], tokens[4:8], tokens[8:10]):
+            scheduler.model(mx.array([chunk]), cache=reference)
+            mx.eval(*[a for leaf in leaves(reference) for a in leaf.state])
+        reference = scheduler._dequantize_cache_for_use(
+            scheduler._quantize_cache_for_storage(reference))
+        request = Request(request_id="quantized-native", prompt=tokens,
+                          sampling_params=SamplingParams(max_tokens=2, temperature=0))
+        request.prompt_token_ids = tokens
+        request.num_prompt_tokens = len(tokens)
+        scheduler.add_request(request)
+        for _ in range(5):
+            result = scheduler.step()
+            if any(o.finished for o in result.outputs):
+                break
+        else:
+            pytest.fail("request did not finish")
+        table, suffix = scheduler.block_aware_cache.fetch_cache("quantized-refault", tokens)
+        assert table is not None and table.num_tokens == 10 and suffix == tokens[-1:]
+        restored = scheduler._dequantize_cache_for_use(
+            scheduler.block_aware_cache.reconstruct_cache(table))
+        assert restored[0][1].keys.dtype == mx.float32
+        for token in tokens[-1:] + [12, 13, 14, 15, 16]:
+            expected = scheduler.model(mx.array([[token]]), cache=reference)
+            actual = scheduler.model(mx.array([[token]]), cache=restored)
+            mx.eval(expected, actual)
+            assert bool(mx.array_equal(expected, actual))
+    finally:
+        scheduler.shutdown()

@@ -12788,6 +12788,11 @@ def _native_cache_status(
         fresh_mimo_storage = bool(getattr(
             getattr(scheduler, "model", None), "_mimo_v26_runtime", False
         ))
+        naive_affine_storage = bool(
+            (scheduler_family == "naive_n05_flash" or cache_subtype == "naive_n05_swa_dsa")
+            and not native_tq_storage
+            and not tq_objects_active
+        )
         storage_quantization = {
             "enabled": storage_quantized,
             "mode": "storage_boundary",
@@ -12795,7 +12800,7 @@ def _native_cache_status(
             "group_size": stored_kv_group if storage_quantized else None,
             "applies_to": (
                 "full_attention_kv_only"
-                if native_tq_storage or fresh_mimo_storage
+                if native_tq_storage or fresh_mimo_storage or naive_affine_storage
                 else "full_and_sliding_attention_kv"
             ),
             "metadata_policy": "preserve_rotating_window_metadata",
@@ -12807,9 +12812,11 @@ def _native_cache_status(
             storage_quantization["restore_policy"] = (
                 "decode_full_attention_tq_and_restore_rotating_state"
             )
-        elif fresh_mimo_storage:
+        elif fresh_mimo_storage or naive_affine_storage:
             storage_quantization["sliding_window_policy"] = "native_rotating_kv_state"
             storage_quantization["restore_policy"] = "restore_native_dtype_and_rotating_state"
+        if naive_affine_storage:
+            storage_quantization["indexer_policy"] = "preserve_native_fp32_key_only_state"
         return _with_runtime_layout({
             "family": family_name or scheduler_family or "mixed_attention",
             "schema": "mixed_swa_kv_v1",

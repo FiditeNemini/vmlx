@@ -942,9 +942,11 @@ class Scheduler:
         # concurrent >2048-token requests at --max-num-seqs 2). It only stays
         # correct because max_num_seqs defaults to 1; pin it like the others so
         # a user-set --max-num-seqs>1 queues serially instead of DoS-ing.
+        # Naive DSA likewise constructs positions from scalar cache.offset;
+        # BatchKVCache offsets are arrays and fail mx.arange during prefill.
         _single_batch_native_family = (
             self._model_type_for_runtime
-            in {"glm5_next", "glm5_next_text", "openpangu_v2", "zaya"}
+            in {"glm5_next", "glm5_next_text", "openpangu_v2", "zaya", "naive_n05_flash"}
             or self._uses_zaya_cache
             or self._uses_m3_msa_cache
         )
@@ -966,7 +968,7 @@ class Scheduler:
             if changed:
                 logger.warning(
                     "%s cache is single-sequence native (path-dependent "
-                    "conv/CCA state); overriding %s so concurrent requests "
+                    "native state); overriding %s so concurrent requests "
                     "queue serially instead of corrupting the batch.",
                     self._model_type_for_runtime,
                     ", ".join(changed),
@@ -3169,6 +3171,13 @@ class Scheduler:
                         return mt.lower()
             elif cfg is not None:
                 mt = getattr(cfg, "model_type", None)
+                if isinstance(mt, str) and mt:
+                    return mt.lower()
+        # Native mlx-lm models commonly expose ModelArgs and model_type rather
+        # than config. Preserve explicit wrapper/config precedence above.
+        for obj in candidates:
+            for source in (getattr(obj, "args", None), obj):
+                mt = getattr(source, "model_type", None)
                 if isinstance(mt, str) and mt:
                     return mt.lower()
         names = []

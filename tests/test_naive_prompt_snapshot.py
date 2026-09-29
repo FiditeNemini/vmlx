@@ -231,3 +231,55 @@ def test_prefill_materialization_failure_stops_before_next_chunk(monkeypatch):
         generator._prefill(list(range(1, 11)), req)
     assert [c.offset for c in leaves(cache)] == [4, 4, 4]
     assert req.context_tokens == []
+
+
+def test_scheduler_serializes_concurrent_naive_requests(caplog):
+    from vmlx_engine.scheduler import Scheduler, SchedulerConfig
+    from vmlx_engine.request import Request, SamplingParams
+
+    class Tokenizer:
+        clean_up_tokenization_spaces = False
+        def decode(self, tokens):
+            return ''.join(chr(65 + int(t)) for t in tokens)
+
+    scheduler = Scheduler(make_model(), Tokenizer(), SchedulerConfig(
+        max_num_seqs=2, prefill_batch_size=2, completion_batch_size=2,
+        prefill_step_size=4, enable_prefix_cache=False,
+    ))
+    try:
+        assert (scheduler.config.max_num_seqs,
+                scheduler.config.prefill_batch_size,
+                scheduler.config.completion_batch_size) == (1, 1, 1)
+        expected = {'native-a', 'native-b'}
+        for i, request_id in enumerate(sorted(expected)):
+            tokens = list(range(1, 12 + i))
+            request = Request(request_id=request_id, prompt=tokens,
+                              sampling_params=SamplingParams(max_tokens=2, temperature=0))
+            request.prompt_token_ids = tokens
+            request.num_prompt_tokens = len(tokens)
+            scheduler.add_request(request)
+        finished = set()
+        for _ in range(12):
+            for output in scheduler.step().outputs:
+                if output.finished:
+                    assert output.finish_reason != 'error'
+                    finished.add(output.request_id)
+            if finished == expected:
+                break
+        assert finished == expected
+        assert not any('recovering with cache clear' in rec.message for rec in caplog.records)
+    finally:
+        scheduler.shutdown()
+
+
+def test_native_family_detection_preserves_explicit_config_precedence():
+    from vmlx_engine.scheduler import Scheduler
+
+    native = SimpleNamespace(args=SimpleNamespace(model_type="naive_n05_flash"))
+    detect = Scheduler._detect_model_type_for_runtime
+    assert detect(native) == "naive_n05_flash"
+    assert detect(SimpleNamespace(model=native)) == "naive_n05_flash"
+    assert detect(SimpleNamespace(model_type="naive_n05_flash")) == "naive_n05_flash"
+    assert detect(SimpleNamespace(config={"model_type": "explicit"}, model=native)) == "explicit"
+    assert detect(SimpleNamespace(args=SimpleNamespace(model_type="fallback"),
+                                  model=SimpleNamespace(config={"model_type": "inner"}))) == "inner"

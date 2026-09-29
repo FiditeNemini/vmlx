@@ -2312,12 +2312,14 @@ class TestFalconH1Bfloat16Compute:
     (proven: fp16 logits NaN, bf16 clean, argmax=<think> on H1R-7B JANG_6M).
     The loader must force bfloat16 compute like HF's reference does."""
 
-    class _StubModel:
-        def __init__(self):
-            self.dtype = None
+    @staticmethod
+    def _model():
+        import mlx.core as mx
+        import mlx.nn as nn
 
-        def set_dtype(self, dtype):
-            self.dtype = dtype
+        model = nn.Module()
+        model.weight = mx.ones((4, 4), dtype=mx.float16)
+        return model
 
     def test_falcon_h1_forces_bfloat16(self, tmp_path):
         import mlx.core as mx
@@ -2325,21 +2327,21 @@ class TestFalconH1Bfloat16Compute:
             _apply_large_expert_bfloat16_compute,
         )
 
-        model = self._StubModel()
+        model = self._model()
         applied = _apply_large_expert_bfloat16_compute(
             model, tmp_path, {"model_type": "falcon_h1", "hidden_size": 3072}
         )
         assert applied is True
-        assert model.dtype == mx.bfloat16
+        assert model.weight.dtype == mx.bfloat16
 
     def test_plain_dense_model_stays_fp16(self, tmp_path):
         from vmlx_engine.utils.jang_loader import (
             _apply_large_expert_bfloat16_compute,
         )
 
-        model = self._StubModel()
+        model = self._model()
         applied = _apply_large_expert_bfloat16_compute(
             model, tmp_path, {"model_type": "llama", "hidden_size": 4096}
         )
         assert applied is False
-        assert model.dtype is None
+        assert str(model.weight.dtype) == "mlx.core.float16"

@@ -1,7 +1,31 @@
 import { describe, expect, it } from 'vitest'
 import { replayPersistedAssistantHistory } from '../src/shared/toolHistoryReplay'
+import { REASONING_WITHOUT_ANSWER_NOTICE } from '../src/shared/responsesStreamRecovery'
 
 describe('persisted assistant tool-history replay', () => {
+  it('keeps a diagnostic reasoning-only bubble out of model history on both wires', () => {
+    const exhausted = {
+      content: REASONING_WITHOUT_ANSWER_NOTICE,
+      reasoningContent: 'unfinished planning',
+      warningsJson: JSON.stringify([
+        'This response produced reasoning only (no visible message, no tool calls). The maximum output-token limit was reached.',
+      ]),
+    }
+    expect(replayPersistedAssistantHistory(exhausted, true)).toEqual([
+      { type: 'message', role: 'assistant', content: '' },
+    ])
+    expect(replayPersistedAssistantHistory(exhausted, false)).toEqual([
+      { role: 'assistant', content: '', reasoning_content: 'unfinished planning' },
+    ])
+  })
+
+  it('preserves a literal model answer equal to the notice without a diagnostic warning', () => {
+    expect(replayPersistedAssistantHistory({
+      content: REASONING_WITHOUT_ANSWER_NOTICE,
+      reasoningContent: 'quote the requested text',
+    }, false)[0].content).toBe(REASONING_WITHOUT_ANSWER_NOTICE)
+  })
+
   const row = {
     content: 'D4-CURRENT-TO1-DONE',
     reasoningContent: 'inspect\n\nreport',

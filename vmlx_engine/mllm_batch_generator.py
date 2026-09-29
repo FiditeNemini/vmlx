@@ -2625,8 +2625,13 @@ def _sampled_video_timestamps(
         capture.release()
         if total_frames <= 0 or source_fps <= 0:
             return fallback
-        indices = np.linspace(0, total_frames - 1, frame_count).round().astype(int)
-        return [float(index) / source_fps for index in indices]
+        # Both mlx-vlm loaders report the PLANNED sample rate even when
+        # decoding stops early. Keep that original sampling grid: spreading
+        # the surviving frames across the full clip invents later timestamps.
+        planned_count = round(total_frames * fallback_rate / source_fps)
+        planned_count = max(frame_count, min(total_frames, planned_count))
+        indices = np.linspace(0, total_frames - 1, planned_count).round().astype(int)
+        return [float(index) / source_fps for index in indices[:frame_count]]
     except Exception:
         return fallback
 

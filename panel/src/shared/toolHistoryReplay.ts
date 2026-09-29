@@ -1,5 +1,8 @@
+import { REASONING_WITHOUT_ANSWER_NOTICE } from './responsesStreamRecovery'
+
 export interface PersistedAssistantToolHistory {
   content?: unknown
+  warningsJson?: unknown
   reasoningContent?: unknown
   reasoningSegmentsJson?: unknown
   toolCallsJson?: unknown
@@ -99,9 +102,21 @@ export function replayPersistedAssistantHistory(
 ): any[] {
   const calls = validCalls(message.toolCallsOaiJson)
   const results = validResults(message.toolResultsOaiJson)
-  const content = typeof message.content === 'string' ? message.content : ''
+  let content = typeof message.content === 'string' ? message.content : ''
   const persistedSegments = persistedReasoningSegments(message)
   const segments = options.includeReasoning === false ? [] : persistedSegments
+
+  // This exact app-generated notice is display metadata, not an assistant
+  // answer. Require the persisted diagnostic as well, so literal model text
+  // quoting the notice is preserved. Keep the real reasoning and turn boundary.
+  if (
+    calls.length === 0 &&
+    persistedSegments.some((segment) => segment.trim()) &&
+    content === REASONING_WITHOUT_ANSWER_NOTICE &&
+    parseArray(message.warningsJson).some((warning) =>
+      typeof warning === 'string' && warning.startsWith('This response produced reasoning only ('),
+    )
+  ) content = ''
 
   const callIterations = new Map<string, number>()
   for (const status of parseArray(message.toolCallsJson)) {

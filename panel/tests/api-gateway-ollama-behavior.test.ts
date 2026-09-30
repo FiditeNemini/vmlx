@@ -494,6 +494,50 @@ describe("Ollama gateway request translation behavior", () => {
     ]);
   });
 
+  it.each([
+    ["/api/chat", false, false], ["/api/chat", true, false],
+    ["/api/generate", false, false], ["/api/generate", true, false],
+    ["/api/generate", false, true], ["/api/generate", true, true],
+  ])("preserves backend cache and phase receipts (%s stream=%s raw=%s)", async (route, stream, raw) => {
+    // Real restart receipt: only 33 of 6250 prompt tokens were computed.
+    const usage = {
+      prompt_tokens: 6250, completion_tokens: 213, total_tokens: 6463,
+      prompt_tokens_details: {cached_tokens: 6217, cache_detail: "native-glm+disk"},
+      vmlx_prefill: {tokens: 33, seconds: 0.7449556249775924, scope: "model_prefill_and_prompt_state"},
+    };
+    const server = createServer((req, res) => {
+      expect(req.headers["x-vmlx-stream-usage"]).toBe("incremental");
+      req.resume();
+      req.on("end", () => {
+        if (stream) {
+          res.writeHead(200, {"Content-Type": "text/event-stream"});
+          res.write('data: {"choices":[{"delta":{"content":"answer"},"text":"answer","finish_reason":"stop"}]}\n\n');
+          res.write(`data: ${JSON.stringify({choices: [], usage})}\n\n`);
+          res.end('data: [DONE]\n\n');
+        } else {
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({choices: [{message: {content: "answer"}, text: "answer", finish_reason: "stop"}], usage}));
+        }
+      });
+    });
+    backend = {server, port: await listen(server), bodies: [], paths: []};
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+    const response = await fetch(`http://127.0.0.1:${started.port}${route}`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({model: "hy3-model", stream, raw, prompt: "hi", messages: [{role: "user", content: "hi"}]}),
+    });
+    expect(response.status).toBe(200);
+    const payload = await response.text();
+    const rows = stream ? payload.trim().split("\n").map(line => JSON.parse(line)) : [JSON.parse(payload)];
+    const terminals = rows.filter(row => row.done);
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({prompt_eval_count: 6250, eval_count: 213,
+      vmlx_usage: {prompt_tokens_details: usage.prompt_tokens_details, vmlx_prefill: usage.vmlx_prefill}});
+    expect(terminals[0]).not.toHaveProperty("eval_duration");
+    expect(terminals[0]).not.toHaveProperty("prompt_eval_duration");
+  });
+
   it.each([false, true])("measures chat total duration in nanoseconds (stream=%s)", async (stream) => {
     backend = stream ? await startStreamingChatBackend() : await startCaptureBackend();
     const started = await startGateway(backend.port);

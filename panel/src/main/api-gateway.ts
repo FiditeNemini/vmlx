@@ -1819,6 +1819,20 @@ export class ApiGateway extends EventEmitter {
 
   // ── /api/chat ──
 
+  private ollamaUsageDetails(usage: any): Record<string, unknown> {
+    // Keep backend phase counts and scopes together. Total prompt tokens include
+    // cached tokens; dividing that count by prefill time would inflate speed.
+    // Do not synthesize Ollama compute durations from gateway wall time.
+    if (!usage || typeof usage !== "object") return {};
+    const details: Record<string, unknown> = {};
+    for (const key of ["prompt_tokens_details", "vmlx_prefill", "vmlx_decode"]) {
+      const value = usage[key];
+      if (value && typeof value === "object" && !Array.isArray(value))
+        details[key] = value;
+    }
+    return Object.keys(details).length ? { vmlx_usage: details } : {};
+  }
+
   private async handleOllamaChat(
     req: IncomingMessage,
     res: ServerResponse,
@@ -1914,7 +1928,7 @@ export class ApiGateway extends EventEmitter {
       port: routedSession.port,
       path: "/v1/chat/completions",
       method: "POST",
-      headers: this.jsonProxyHeadersWithAuth(req),
+      headers: { ...this.jsonProxyHeadersWithAuth(req), "x-vmlx-stream-usage": "incremental" },
       timeout: this.effectiveGatewayProxyTimeoutMs(routedSession, parsed),
     };
 
@@ -1950,6 +1964,7 @@ export class ApiGateway extends EventEmitter {
               total_duration: Number(process.hrtime.bigint() - requestStartedNs),
               eval_count: openai.usage?.completion_tokens || 0,
               prompt_eval_count: openai.usage?.prompt_tokens || 0,
+              ...this.ollamaUsageDetails(openai.usage),
             };
             const reasoning =
               choice?.message?.reasoning_content || choice?.message?.reasoning;
@@ -2019,6 +2034,7 @@ export class ApiGateway extends EventEmitter {
           if (usage) {
             ollamaMsg.eval_count = usage.completion_tokens;
             ollamaMsg.prompt_eval_count = usage.prompt_tokens;
+            Object.assign(ollamaMsg, this.ollamaUsageDetails(usage));
           }
           if (!this.writeJsonLine(res, ollamaMsg)) {
             proxyRes.destroy();
@@ -2066,6 +2082,7 @@ export class ApiGateway extends EventEmitter {
                 delta?.reasoning_content || delta?.reasoning;
               if (parsed.usage) {
                 usage = {
+                  ...parsed.usage,
                   completion_tokens: parsed.usage.completion_tokens || 0,
                   prompt_tokens: parsed.usage.prompt_tokens || 0,
                 };
@@ -2282,7 +2299,7 @@ export class ApiGateway extends EventEmitter {
       port: routedSession.port,
       path: backendPath,
       method: "POST",
-      headers: this.jsonProxyHeadersWithAuth(req),
+      headers: { ...this.jsonProxyHeadersWithAuth(req), "x-vmlx-stream-usage": "incremental" },
       timeout: this.effectiveGatewayProxyTimeoutMs(routedSession, parsed),
     };
 
@@ -2321,6 +2338,7 @@ export class ApiGateway extends EventEmitter {
               done_reason: choice?.finish_reason || "stop",
               eval_count: openai.usage?.completion_tokens || 0,
               prompt_eval_count: openai.usage?.prompt_tokens || 0,
+              ...this.ollamaUsageDetails(openai.usage),
             });
           } catch (_) {
             this.sendJson(res, 502, {
@@ -2369,6 +2387,7 @@ export class ApiGateway extends EventEmitter {
           if (usage) {
             terminal.eval_count = usage.completion_tokens;
             terminal.prompt_eval_count = usage.prompt_tokens;
+            Object.assign(terminal, this.ollamaUsageDetails(usage));
           }
           if (!this.writeJsonLine(res, terminal)) {
             proxyRes.destroy();
@@ -2415,6 +2434,7 @@ export class ApiGateway extends EventEmitter {
               if (finishReason != null) doneReason = finishReason;
               if (chunk.usage) {
                 usage = {
+                  ...chunk.usage,
                   completion_tokens: chunk.usage.completion_tokens,
                   prompt_tokens: chunk.usage.prompt_tokens,
                 };

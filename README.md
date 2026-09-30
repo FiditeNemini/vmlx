@@ -372,6 +372,13 @@ The gateway supports **OpenAI**, **Anthropic**, and **Ollama** wire formats. Con
 | `POST` | `/api/show` | Model details |
 | `POST` | `/api/embeddings` | Generate embeddings |
 
+Ollama terminal responses preserve available backend cache and phase measurements
+under `vmlx_usage`: `prompt_tokens_details.cached_tokens`, `vmlx_prefill`, and
+`vmlx_decode`. Phase records retain their own token count, seconds, and scope;
+`prompt_eval_count` includes cached tokens and must not be divided by cold-prefill
+time. Missing backend timings stay absent rather than being estimated from
+request wall time.
+
 ### curl Examples
 
 **Chat completion (streaming)**

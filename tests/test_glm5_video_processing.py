@@ -161,7 +161,10 @@ def test_invalid_video_shape_is_not_silently_an_image(clip):
         processor.video_processor([clip])
 
 
-def test_video_configuration_is_loaded_without_changing_image_configuration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode,expected", [(None, "preserve_frames"), ("", "preserve_frames"),
+                                            ("preserve_frames", "preserve_frames"),
+                                            ("native_pairs", "native_pairs")])
+def test_video_configuration_is_loaded_without_changing_image_configuration(tmp_path, monkeypatch, mode, expected):
     import json
 
     (tmp_path / "processor_config.json").write_text(json.dumps({
@@ -172,7 +175,12 @@ def test_video_configuration_is_loaded_without_changing_image_configuration(tmp_
     monkeypatch.setattr(processing.AutoTokenizer, "from_pretrained", lambda *a, **k: Tokenizer())
     monkeypatch.setattr(processing, "load_chat_template", lambda *a: None)
     monkeypatch.setattr(processing.GlmOcrProcessor, "__init__", lambda self, **kw: self.__dict__.update(kw))
+    if mode is None:
+        monkeypatch.delenv("VMLX_GLM5_VIDEO_TEMPORAL_MODE", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_GLM5_VIDEO_TEMPORAL_MODE", mode)
     result = processing.Glm5NextProcessor.from_pretrained(tmp_path)
+    assert result.video_processor.temporal_mode == expected
     assert result.image_processor.max_image_tokens == 8000
     assert result.video_processor.max_image_tokens == 400
     assert result.video_processor.patch_size == 7

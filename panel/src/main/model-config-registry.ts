@@ -1754,6 +1754,8 @@ function applyJangCapabilities(
 
   const runtimeModalities = Array.isArray(caps.modalities)
     ? caps.modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
+    : next.family === 'glm5-next' && [caps.has_vision, caps.has_video].some(value => typeof value === 'boolean')
+      ? ['text', ...(caps.has_vision === true ? ['vision'] : []), ...(caps.has_video === true ? ['video'] : [])]
     : next.family === 'mimo_v2' && jangCfg.weight_format === 'mixed_affine_mxfp4'
       && caps.modalities && typeof caps.modalities === 'object'
       ? Object.keys(caps.modalities).filter(key => caps.modalities[key] === true)

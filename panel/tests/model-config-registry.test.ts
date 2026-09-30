@@ -303,6 +303,15 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detectModelConfigFromDir(dir).forceTextOnly).toBeUndefined()
   })
 
+  it.each([true, false])('reads GLM video capability booleans without a modalities array (video=%s)', (video) => {
+    const dir = makeModelDir({
+      model_type: 'glm5_next',
+      vision_config: {model_type: 'glm5_next'},
+      jang_config: {format: 'jang_v2', capabilities: {has_vision: true, has_video: video, has_audio: false}},
+    })
+    expect(detectModelConfigFromDir(dir).runtimeModalities).toEqual(video ? ['text', 'vision', 'video'] : ['text', 'vision'])
+  })
+
   it('keeps an explicit non-hermes Qwen4Exp tool_parser stamp authoritative', () => {
     const dir = makeModelDir({
       model_type: 'qwen4_exp',

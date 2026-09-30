@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from pathlib import Path
 
 import numpy as np
@@ -303,10 +302,9 @@ class Glm5NextProcessor(GlmOcrProcessor):
         if isinstance(video_config, dict):
             video_config = dict(video_config)
             video_config.pop("video_processor_type", None)
-            # Explicit, experimental serving adaptation. Do not rewrite the
-            # bundle or silently replace its native temporal-pair semantics.
-            if mode := os.environ.get("VMLX_GLM5_VIDEO_TEMPORAL_MODE"):
-                video_config["temporal_mode"] = mode
+            from vmlx_engine.utils.glm_video_policy import glm_video_temporal_mode
+            video_config["temporal_mode"] = glm_video_temporal_mode()
+            _LOG.info("GLM video serving temporal mode: %s", video_config["temporal_mode"])
             video_processor = Glm5NextVideoProcessor(**video_config)
         return cls(image_processor=image_processor, tokenizer=tokenizer, video_processor=video_processor)
 
@@ -316,7 +314,8 @@ class Glm5NextVideoProcessor(Glm5NextImageProcessor):
 
     Temporal layout and timestamp contract follow Hugging Face Transformers
     glm5_next at 5474a55e920f358d8382f3ecd3377edca979baa1 (Apache-2.0).
-    Native pairs remain the default. The opt-in preserve_frames adaptation
+    The low-level constructor retains native pairs. The serving loader selects
+    preserve_frames by default; this adaptation
     repeats each sampled moment within its temporal patch, increasing visual
     groups instead of mixing distinct moments across a sparse scene cut.
     """

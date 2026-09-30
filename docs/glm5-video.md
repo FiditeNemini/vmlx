@@ -5,14 +5,15 @@ patch. Sparse sampling across a scene cut can therefore combine different
 cards or scenes into one visual group. In a bounded two-card clip, the model
 reported a crossfade that was not present in the original video.
 
-For tasks that need each sampled frame kept separate, start the engine with:
+vMLX preserves each sampled frame separately by default. To select this mode
+explicitly, start the engine with:
 
 ```sh
 VMLX_GLM5_VIDEO_TEMPORAL_MODE=preserve_frames vmlx-engine serve /path/to/model
 ```
 
-Set the environment before starting the process. Omit it, or set
-`native_pairs`, to use the checkpoint's native temporal grouping. This is a
+Set the environment before starting the process. Set `native_pairs` to use the
+checkpoint's native temporal grouping instead. This is a
 GLM-specific serving option, not a chat-template parameter. It does not change
 model weights, reasoning effort, or output-token limits.
 
@@ -31,6 +32,5 @@ selected mode.
 
 This option corrected the tested scene-cut interpretation on the revised
 GLM-5.3-Flash-JANGH2 bundle in the app and streaming API. It is not a claim that
-all videos, motion tasks, or model-generated answers are error-free. Native
-pairs remain the default; frame preservation trades additional visual tokens
+all videos, motion tasks, or model-generated answers are error-free. Frame preservation trades additional visual tokens
 for separation of sampled moments.

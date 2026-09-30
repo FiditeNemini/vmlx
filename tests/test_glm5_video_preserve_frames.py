@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from vmlx_engine.models.glm5_next.processing import Glm5NextVideoProcessor
 from vmlx_engine.video_controls import video_token_pixels
-from test_glm5_video_processing import make_processor
+from tests.test_glm5_video_processing import make_processor
 
 
 def test_preservation_keeps_both_scene_cut_colors_in_separate_groups():
@@ -62,11 +62,11 @@ def test_invalid_temporal_mode_rejected():
 def test_mode_runtime_cache_namespace(monkeypatch):
     from vmlx_engine.prefix_cache import _resolve_runtime_cache_fingerprint
     monkeypatch.delenv('VMLX_GLM5_VIDEO_TEMPORAL_MODE', raising=False)
-    native = _resolve_runtime_cache_fingerprint()
+    default = _resolve_runtime_cache_fingerprint()
     monkeypatch.setenv('VMLX_GLM5_VIDEO_TEMPORAL_MODE', 'native_pairs')
-    assert _resolve_runtime_cache_fingerprint() == native
+    assert _resolve_runtime_cache_fingerprint() != default
     monkeypatch.setenv('VMLX_GLM5_VIDEO_TEMPORAL_MODE', 'preserve_frames')
-    assert _resolve_runtime_cache_fingerprint() != native
+    assert _resolve_runtime_cache_fingerprint() == default
 
 
 @pytest.mark.parametrize('count,budget', [(3, 12), (8, 128), (8, 512)])

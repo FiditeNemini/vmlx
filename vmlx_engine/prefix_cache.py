@@ -159,8 +159,9 @@ def _resolve_runtime_cache_fingerprint() -> str:
     tf32_policy = os.environ.get("MLX_ENABLE_TF32")
     if tf32_policy not in (None, "1"):
         parts.append(f"mlx_tf32={tf32_policy!r}")
-    glm_video_mode = os.environ.get("VMLX_GLM5_VIDEO_TEMPORAL_MODE")
-    if glm_video_mode not in (None, "", "native_pairs"):
+    from .utils.glm_video_policy import glm_video_temporal_mode
+    glm_video_mode = glm_video_temporal_mode()
+    if glm_video_mode != "native_pairs":
         parts.append(f"glm_video_temporal_v1={glm_video_mode!r}")
     from .utils.naive_prefill_policy import (
         NAIVE_PADDED_PREFILL_IDENTITY,

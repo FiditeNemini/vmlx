@@ -151,6 +151,14 @@ def _resolve_runtime_cache_fingerprint() -> str:
     except Exception:
         engine_version = "unknown"
     parts.append(f"vmlx_engine={engine_version}")
+    # FP32 storage does not imply FP32 matrix execution: MLX can use reduced
+    # precision by default. A checkpoint made with full-precision operations
+    # must not be restored into a different arithmetic policy (or vice versa).
+    # Preserve the established default namespace, including explicit default 1.
+    # Keep other explicit values distinct rather than guessing MLX's parsing.
+    tf32_policy = os.environ.get("MLX_ENABLE_TF32")
+    if tf32_policy not in (None, "1"):
+        parts.append(f"mlx_tf32={tf32_policy!r}")
     from .utils.naive_prefill_policy import (
         NAIVE_PADDED_PREFILL_IDENTITY,
         naive_padded_prefill_requested,

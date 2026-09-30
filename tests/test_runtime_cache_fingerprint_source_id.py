@@ -21,6 +21,23 @@ from types import SimpleNamespace
 from vmlx_engine import prefix_cache
 
 
+def test_full_precision_cache_identity_isolated_from_default(monkeypatch):
+    monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
+    default = prefix_cache._resolve_runtime_cache_fingerprint()
+    monkeypatch.setenv("MLX_ENABLE_TF32", "0")
+    precise = prefix_cache._resolve_runtime_cache_fingerprint()
+    assert precise != default
+    assert precise == prefix_cache._resolve_runtime_cache_fingerprint()
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    assert prefix_cache._resolve_runtime_cache_fingerprint() == default
+
+
+def test_precision_environment_does_not_rekey_running_process(monkeypatch):
+    baseline = prefix_cache.runtime_cache_fingerprint()
+    monkeypatch.setenv("MLX_ENABLE_TF32", "0")
+    assert prefix_cache.runtime_cache_fingerprint() == baseline
+
+
 def test_same_version_different_metal_wheels_have_distinct_cache_identity(monkeypatch):
     platform = {"mlx": "14", "mlx-metal": "14"}
     monkeypatch.setattr(prefix_cache.importlib.metadata, "version", lambda _: "0.32.2")

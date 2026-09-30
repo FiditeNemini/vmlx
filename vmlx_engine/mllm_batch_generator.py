@@ -75,7 +75,7 @@ computation for SSM layers even if you have the KV cache.
 
 METAL OPTIMIZATIONS
 -------------------
-- ``mx.metal.set_cache_limit()``: 25% of max working set (floor 512MB)
+- ``mx.metal.set_cache_limit()``: shared serving policy, tightened for headroom
   Bounds the Metal allocator's free-list so prefix cache and OS get memory.
 - ``mx.async_eval()``: Used in prefill loop for GPU/CPU overlap.
   Submits sampled token + cache states to GPU without blocking.
@@ -885,7 +885,7 @@ def _vlm_image_request_cache_limit_bytes(
     return max(floor, min(max_limit, fractional))
 
 
-def _apply_vlm_image_request_cache_limit() -> bool:
+def _apply_vlm_image_request_cache_limit(steady_limit: int | None = None) -> bool:
     """Tighten the Metal reusable cache before VLM media work.
 
     This is a preflight memory-safety control, not a model behavior change. It
@@ -899,6 +899,10 @@ def _apply_vlm_image_request_cache_limit() -> bool:
     (A/B measured this restore as hygiene, not a decode-speed lever: decode
     throughput was unchanged with the limit still tightened.)
     """
+    from .mlx_memory import configured_serving_cache_limit_bytes
+
+    if configured_serving_cache_limit_bytes(0) is None:
+        return False
     if os.environ.get("VMLX_VLM_IMAGE_CACHE_LIMIT", "1") == "0":
         return False
     if not mx.metal.is_available():
@@ -935,6 +939,8 @@ def _apply_vlm_image_request_cache_limit() -> bool:
             free_fraction=free_fraction,
             floor_bytes=floor,
         )
+        if steady_limit is not None:
+            limit = min(limit, steady_limit)
         if limit <= 0:
             return False
         set_cache = getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit
@@ -8469,7 +8475,7 @@ class MLLMBatchGenerator:
 
     **Metal memory:**
 
-    Sets ``mx.metal.set_cache_limit()`` at 25% of max working set,
+    Sets ``mx.metal.set_cache_limit()`` with the shared serving policy,
     uses ``mx.async_eval()`` in prefill, ``mx.contiguous()`` on extracted
     cache. Restores old limits in ``close()``.
 
@@ -8795,19 +8801,12 @@ class MLLMBatchGenerator:
             if True:  # Always set Metal limits (smelt mode doesn't need special limits)
                 active_mem, max_ws = get_effective_metal_working_set_bytes(mx)
                 self._old_wired_limit = mx.set_wired_limit(max_ws) if max_ws > 0 else None
-                # Set Metal allocator cache limit.
-                # mlxstudio#78: previously was a hard `max_ws * 0.25`, which
-                # on a 64GB M4 Max loading Gemma-4-31B (~41GB active) would
-                # reserve 12GB for cache on top of 41GB model → 53GB required
-                # vs 48GB max working set → Metal command buffer OOM on the
-                # FIRST request before a single token is generated.
-                #
-                # New policy: cap at min(25% of max_ws, 50% of FREE memory
-                # after model load). Floor at 512MB. This keeps the original
-                # behavior on machines with plenty of headroom (bounds the
-                # free-list so the OS can reclaim memory when pressured)
-                # while adapting on tight-memory systems where the model
-                # already consumed most of the budget.
+                # The server bounds the allocator after model load. This
+                # generator is created lazily on the first request, so it must
+                # preserve that shared policy rather than widen its ceiling.
+                # Standalone generators use the same policy; tight headroom
+                # may further reduce only the default, never an explicit MB
+                # override. This does not change request admission.
                 try:
                     active = active_mem
                     if active <= 0:
@@ -8823,13 +8822,29 @@ class MLLMBatchGenerator:
                     # the other half to live in without forcing the
                     # allocator to release pooled blocks back to Metal.
                     safety_limit = int(free * 0.5)
-                    cache_limit = max(
-                        512 * 1024 * 1024, min(base_limit, safety_limit)
+                    from .mlx_memory import configured_serving_cache_limit_bytes
+                    cache_limit = configured_serving_cache_limit_bytes(
+                        active,
+                        max_default_bytes=max(
+                            512 * 1024 * 1024, min(base_limit, safety_limit)
+                        ),
                     )
-                    if max_ws > 0:
+                    self._tight_memory_prefill_drain = safety_limit < base_limit
+                    if max_ws > 0 and cache_limit is not None:
                         self._old_cache_limit = _set_cache(cache_limit)
+                        # MLX returns the previous ceiling. Preserve a stricter
+                        # serving/embedding default even if active residency
+                        # grew since load. No GPU allocation occurs between
+                        # these setters. Explicit positive overrides still win.
+                        if isinstance(self._old_cache_limit, int) and self._old_cache_limit >= 0:
+                            retained_limit = configured_serving_cache_limit_bytes(
+                                active,
+                                max_default_bytes=min(cache_limit, self._old_cache_limit),
+                            )
+                            if retained_limit != cache_limit:
+                                _set_cache(retained_limit)
+                                cache_limit = retained_limit
                         self._steady_cache_limit = cache_limit
-                        self._tight_memory_prefill_drain = safety_limit < base_limit
                         logger.info(
                             f"Metal cache limit set to {cache_limit / (1024**3):.2f}GB "
                             f"(max_ws={max_ws / (1024**3):.1f}GB, "
@@ -8843,7 +8858,7 @@ class MLLMBatchGenerator:
                         logger.warning(
                             "Tight-memory configuration detected: model is "
                             "using a large fraction of max working set. "
-                            "Cache limit adjusted downward. If requests OOM, "
+                            "Allocator policy resolved for limited headroom. If requests OOM, "
                             "try a more aggressively quantized model or "
                             "reduce prompt length. (mlxstudio#78)"
                         )
@@ -9253,7 +9268,7 @@ class MLLMBatchGenerator:
                 raise ValueError("All audio inputs failed to process")
 
         if all_images or video_inputs or all_audio:
-            if _apply_vlm_image_request_cache_limit():
+            if _apply_vlm_image_request_cache_limit(self._steady_cache_limit):
                 self._vlm_cache_limit_tightened = True
             mx.clear_cache()
 
@@ -13205,7 +13220,7 @@ class MLLMBatchGenerator:
             # Media-expanded prompts must use the one-shot VLM wrapper path.
             # Drop allocator free-list memory and reject impossible requests
             # before Metal executes a command buffer that can kill the server.
-            if _apply_vlm_image_request_cache_limit():
+            if _apply_vlm_image_request_cache_limit(self._steady_cache_limit):
                 self._vlm_cache_limit_tightened = True
             mx.clear_cache()
         _raise_if_image_prefill_exceeds_budget(

@@ -104,6 +104,28 @@ def resolve_serving_cache_limit_bytes(
     return int(max(floor_bytes, min(ceil_bytes, scaled)))
 
 
+def configured_serving_cache_limit_bytes(
+    model_resident_bytes: int, *, max_default_bytes: int | None = None,
+) -> int | None:
+    """Resolve the shared allocator policy, including explicit operator choice.
+
+    A caller may further tighten the default for measured headroom. Positive
+    overrides remain exact; zero means leave the allocator policy untouched.
+    """
+    try:
+        override = int(os.environ.get("VMLX_MLX_CACHE_LIMIT_MB", "-1"))
+    except (TypeError, ValueError):
+        override = -1
+    if override == 0:
+        return None
+    if override > 0:
+        return override * 1024 * 1024
+    limit = resolve_serving_cache_limit_bytes(model_resident_bytes)
+    if max_default_bytes is not None:
+        limit = min(limit, max(0, int(max_default_bytes)))
+    return limit
+
+
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
@@ -395,24 +417,13 @@ def apply_serving_cache_limit(
             active_log.warning("Unable to import MLX to bound allocator cache: %s", exc)
             return None
 
-    override = os.environ.get("VMLX_MLX_CACHE_LIMIT_MB")
-    if override is not None:
-        try:
-            mb = int(override)
-        except (TypeError, ValueError):
-            mb = -1
-        if mb == 0:
-            active_log.info(
-                "MLX allocator cache left at the MLX default "
-                "(VMLX_MLX_CACHE_LIMIT_MB=0)"
-            )
-            return None
-        if mb > 0:
-            limit = mb * 1024 * 1024
-        else:
-            limit = resolve_serving_cache_limit_bytes(model_resident_bytes)
-    else:
-        limit = resolve_serving_cache_limit_bytes(model_resident_bytes)
+    limit = configured_serving_cache_limit_bytes(model_resident_bytes)
+    if limit is None:
+        active_log.info(
+            "MLX allocator cache left at the MLX default "
+            "(VMLX_MLX_CACHE_LIMIT_MB=0)"
+        )
+        return None
 
     setter = getattr(mx, "set_cache_limit", None)
     if setter is None:

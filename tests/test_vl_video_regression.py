@@ -1335,7 +1335,7 @@ class TestIssueGuards:
         import vmlx_engine.mllm_batch_generator as _m
 
         src = inspect.getsource(_m.MLLMBatchGenerator._preprocess_request)
-        apply_idx = src.index("_apply_vlm_image_request_cache_limit()")
+        apply_idx = src.index("_apply_vlm_image_request_cache_limit(self._steady_cache_limit)")
         prepare_idx = src.index("prepare_inputs(")
         direct_idx = src.index("_call_processor_direct(")
 
@@ -1402,7 +1402,7 @@ class TestIssueGuards:
             _m.MLLMBatchGenerator._run_vision_encoding_inner
         )
         for src in (pre_src, enc_src):
-            idx = src.index("_apply_vlm_image_request_cache_limit()")
+            idx = src.index("_apply_vlm_image_request_cache_limit(self._steady_cache_limit)")
             assert "_vlm_cache_limit_tightened = True" in src[idx : idx + 200]
 
     def test_apply_vlm_cache_limit_env_kill_switch_returns_false(self, monkeypatch):
@@ -3597,12 +3597,10 @@ class TestSSMCompanionIsCompleteFlag:
 
 
 class TestMlxstudio78AdaptiveCacheLimit:
-    """mlxstudio#78: Metal cache limit was hardcoded to 25% of max_ws,
-    which on tight-memory systems (M4 Max 64GB loading Gemma-4-31B at
-    ~41GB active) reserved 12GB for cache leaving only 7GB for model
-    forward pass → Metal OOM on first request.
+    """Preserve measured-headroom tightening within the shared serving policy.
 
-    Fix: cap cache limit at min(25% max_ws, 50% of FREE memory).
+    The historical 25%-of-working-set limit must not widen the post-load
+    model-proportional ceiling when a generator is created lazily.
     """
 
     def test_cache_limit_adaptive_source_pin(self):
@@ -3610,50 +3608,38 @@ class TestMlxstudio78AdaptiveCacheLimit:
         assert "mlxstudio#78" in src
         assert "safety_limit = int(free * 0.5)" in src
         assert "min(base_limit, safety_limit)" in src
-        # Old hardcoded 25% path must be gone
-        # (except inside 'base_limit' which is still 25% of max_ws as the
-        # upper bound — that's intentional)
+        assert "configured_serving_cache_limit_bytes" in src
         assert "Tight-memory configuration detected" in src
 
-    def test_cache_limit_tight_memory_scenario(self):
-        """Simulate reporter's scenario: 48GB max_ws, 41GB active → free 7GB.
-        Expected cache limit = min(12GB, 3.5GB) = 3.5GB (safety cap wins)."""
-        max_ws = 48 * 1024 ** 3
-        active = 41 * 1024 ** 3
-        free = max_ws - active
-        base_limit = int(max_ws * 0.25)       # 12 GB
-        safety_limit = int(free * 0.5)        # 3.5 GB
-        cache_limit = max(512 * 1024 ** 2, min(base_limit, safety_limit))
-        # On reporter's rig, should be ~3.5 GB, NOT 12 GB
-        assert cache_limit == safety_limit, (
-            f"tight-memory path: expected safety cap to win, got base={base_limit} "
-            f"safety={safety_limit} chosen={cache_limit}"
-        )
-        assert cache_limit < base_limit, "safety cap must bite"
+    @staticmethod
+    def _resolved_default(monkeypatch, active, max_ws):
+        from vmlx_engine.mlx_memory import configured_serving_cache_limit_bytes
 
-    def test_cache_limit_big_headroom_scenario(self):
-        """On a machine with plenty of headroom, old 25% behavior preserved."""
-        max_ws = 100 * 1024 ** 3       # 100 GB
-        active = 10 * 1024 ** 3        # 10 GB active (mostly free)
-        free = max_ws - active
-        base_limit = int(max_ws * 0.25)   # 25 GB
-        safety_limit = int(free * 0.5)    # 45 GB
-        cache_limit = max(512 * 1024 ** 2, min(base_limit, safety_limit))
-        # Big headroom: base_limit wins, unchanged behavior
-        assert cache_limit == base_limit, (
-            f"big-headroom path: expected base to win, got {cache_limit}"
+        monkeypatch.delenv("VMLX_MLX_CACHE_LIMIT_MB", raising=False)
+        headroom_ceiling = max(
+            512 * 1024**2,
+            min(int(max_ws * 0.25), int(max(0, max_ws - active) * 0.5)),
+        )
+        return configured_serving_cache_limit_bytes(
+            active, max_default_bytes=headroom_ceiling,
         )
 
-    def test_cache_limit_floor(self):
-        """Degenerate case: tiny machine — floor at 512MB."""
-        max_ws = 2 * 1024 ** 3         # 2 GB
-        active = int(1.9 * 1024 ** 3)  # almost full
-        free = max_ws - active
-        base_limit = int(max_ws * 0.25)
-        safety_limit = int(free * 0.5)
-        cache_limit = max(512 * 1024 ** 2, min(base_limit, safety_limit))
-        # Floor must kick in
-        assert cache_limit == 512 * 1024 ** 2
+    def test_cache_limit_tight_memory_scenario(self, monkeypatch):
+        """41 GiB resident / 48 GiB working set: 5% resident beats old 3.5 GiB."""
+        active, max_ws = 41 * 1024**3, 48 * 1024**3
+        limit = self._resolved_default(monkeypatch, active, max_ws)
+        assert limit == int(active * 0.05)
+        assert limit < int((max_ws - active) * 0.5)
+
+    def test_cache_limit_big_headroom_scenario(self, monkeypatch):
+        """10 GiB resident / 100 GiB working set keeps 512 MiB, not old 25 GiB."""
+        limit = self._resolved_default(monkeypatch, 10 * 1024**3, 100 * 1024**3)
+        assert limit == 512 * 1024**2
+
+    def test_cache_limit_floor(self, monkeypatch):
+        """Tiny working set retains the existing 512 MiB allocator floor."""
+        limit = self._resolved_default(monkeypatch, int(1.9 * 1024**3), 2 * 1024**3)
+        assert limit == 512 * 1024**2
 
 
 class TestMlxstudio63MemoryPressureGuard:

@@ -208,6 +208,11 @@ def _resolve_runtime_cache_fingerprint() -> str:
     )
     if glm5_kda_substitution_requested():
         parts.append("glm5_kda_substitution=" + glm5_kda_substitution_identity())
+    from .glm5_dsa_query_tile import (
+        glm5_dsa_query_tile_requested, glm5_dsa_query_tile_identity,
+    )
+    if glm5_dsa_query_tile_requested():
+        parts.append("glm5_dsa_query_tile=" + glm5_dsa_query_tile_identity())
     source_id = _resolve_source_checkout_id()
     if source_id:
         parts.append(f"src={source_id}")
@@ -694,6 +699,11 @@ def compute_model_cache_key(
             glm5_prefill_layer_fence_enabled,
             glm5_register_pairwise_sum_requested,
         )
+        from vmlx_engine.glm5_dsa_query_tile import (
+            glm5_dsa_query_tile_requested, glm5_dsa_query_tile_identity,
+        )
+        if glm5_dsa_query_tile_requested():
+            parts.append("glm5_dsa_query_tile=" + glm5_dsa_query_tile_identity())
         from vmlx_engine.metal.glm5_kda_row_block import MATH_ABI, requested
         if requested():
             parts.append("glm5_kda_row_block=" + MATH_ABI)

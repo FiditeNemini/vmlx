@@ -50,6 +50,9 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
+from vmlx_engine.glm5_dsa_query_tile import (
+    glm5_dsa_query_tile_requested, try_glm5_dsa_query_tiles,
+)
 from vmlx_engine.glm5_decode_policy import (
     glm5_compiled_dsa_requested, glm5_exact_moe_requested,
     glm5_kda_lowrank_requested, glm5_router_matvec_requested,
@@ -1463,6 +1466,11 @@ class Glm5NextIndexer(nn.Module):
                 head_weights=head_w,
                 enabled=self._fused_score_decode,
             )
+            if pool_scores is None:
+                pool_scores = try_glm5_dsa_query_tiles(
+                    q, pool_keys, head_w, self.scale,
+                    enabled=glm5_dsa_query_tile_requested(),
+                )
             if pool_scores is None:
                 scores = mx.einsum("bshd,bpd->bshp", q, pool_keys)
                 scores = mx.maximum(scores * self.scale, 0.0)

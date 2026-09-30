@@ -3149,6 +3149,12 @@ def _apply_stamped_effort_policy(
         return
     raw = requested.strip().lower()
     if raw in levels:
+        # Templates compare literal tier names. Preserve this policy's nested
+        # kwarg precedence and prevent the engine's top-level forwarding from
+        # replacing the selected tier with a conflicting or unnormalized one.
+        ct_kwargs["reasoning_effort"] = raw
+        if "reasoning_effort" in chat_kwargs:
+            chat_kwargs["reasoning_effort"] = raw
         return
     coerced = None
     if raw in _EFFORT_LADDER:

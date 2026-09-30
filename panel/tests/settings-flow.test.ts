@@ -812,11 +812,20 @@ describe('Prefix Cache', () => {
         expect(getFlagValue(out, '--block-disk-cache-max-gb')).toBe('10')
     })
 
-    it('cache memory mb has one shared call site consumed by preview and spawn', () => {
+    it('cache memory mb uses one shared builder consumed by preview and spawn', () => {
         const shared = readFileSync('src/shared/cacheLaunchArgs.ts', 'utf-8')
         const launcher = readFileSync('src/main/sessions.ts', 'utf-8')
         const renderer = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf-8')
-        expect(shared.match(/args\.push\('--cache-memory-mb'/g) ?? []).toHaveLength(1)
+        expect(shared).toContain('export function buildCacheLaunchArgs(')
+        for (const enableDiskCache of [false, true]) {
+            const { args } = buildCacheLaunchArgs({
+                continuousBatching: true, enablePrefixCache: true,
+                usePagedCache: false, enableBlockDiskCache: false,
+                enableDiskCache, cacheMemoryMb: 4096,
+            })
+            expect(args.filter(arg => arg === '--cache-memory-mb')).toHaveLength(1)
+            expect(args[args.indexOf('--cache-memory-mb') + 1]).toBe(enableDiskCache ? '0' : '4096')
+        }
         expect(launcher).toContain("import { buildCacheLaunchArgs }")
         expect(renderer).toContain("import { buildCacheLaunchArgs }")
         expect(launcher).not.toContain("args.push('--cache-memory-mb'")
@@ -4739,7 +4748,7 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(source).toContain('const detectedRuntimeVideoCapable = isRuntimeVideoCapable({')
         expect(source).toContain('runtimeModalities: detectedRuntimeModalities')
         expect(source).toContain('detectedRuntimeVideoCapable ||')
-        expect(source).toContain('!detectedForceTextOnly && multimodalActive')
+        expect(source).toContain('const showVideoControls = !dsv4Active && !detectedForceTextOnly && !effectiveSmeltActive && config.isMultimodal !== false && multimodalActive && (')
     })
 
     it('Max Context Tokens can be manually typed while Auto is active', () => {

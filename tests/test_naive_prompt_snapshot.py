@@ -162,7 +162,9 @@ def test_scheduler_stores_snapshot_with_full_mixed_swa_key(tmp_path, monkeypatch
             if any(o.finished for o in result.outputs):break
         else:pytest.fail('request did not finish')
         assert replays == []
-        assert request._extracted_cache_key_tokens == tokens[:-1]
+        # Terminal storage now retains all consumed output tokens, while the
+        # separate N-1 checkpoint still serves an exact prompt repeat below.
+        assert request._extracted_cache_key_tokens == tokens + request.output_token_ids[:-1]
         disk_reads = []
         disk = scheduler.block_aware_cache.paged_cache._disk_store
         read = disk.read_block_for_reconstruction

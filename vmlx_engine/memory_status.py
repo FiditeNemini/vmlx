@@ -18,6 +18,44 @@ from .utils.memory_limits import resolve_working_set_override
 logger = logging.getLogger(__name__)
 
 
+def log_system_memory(stage: str, *, log=logger, reader=None) -> None:
+    """Log optional host diagnostics without interpreting impossible counters.
+
+    Some Darwin hosts report free + inactive pages above physical memory.
+    Preserve that raw reading as invalid; do not clamp it into usable capacity
+    or use an invented percentage to emit a pressure warning.
+    """
+    try:
+        if reader is None:
+            import psutil
+            reader = psutil.virtual_memory
+        mem = reader()
+        total, available, percent = mem.total, mem.available, mem.percent
+        valid = all(
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) for v in (total, available, percent)
+        ) and total > 0 and 0 <= available <= total and 0 <= percent <= 100
+        if not valid:
+            log.warning(
+                "System memory %s: availability unknown (invalid psutil counters: "
+                "total=%r, available=%r, percent=%r)",
+                stage, total, available, percent,
+            )
+            return
+        log.info(
+            "System memory %s: %.1fGB available / %.1fGB total (%.1f%% used)",
+            stage, available / 1024**3, total / 1024**3, percent,
+        )
+        threshold = 90 if stage == "before load" else 95
+        if percent > threshold:
+            log.warning(
+                "High system memory pressure %s: %.1f%% used, %.1fGB available.",
+                stage, percent, available / 1024**3,
+            )
+    except Exception as exc:
+        log.debug("System memory %s unavailable: %s", stage, exc)
+
+
 def snapshot(mx_module=None) -> dict:
     result = {
         "version": 1,

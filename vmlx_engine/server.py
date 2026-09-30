@@ -9379,26 +9379,9 @@ def load_model(
     if _served_model_name:
         logger.info(f"Serving model as: {_served_model_name} (actual: {_model_name})")
 
-    # Log system memory before model load for diagnostics
-    try:
-        import psutil
-
-        mem = psutil.virtual_memory()
-        available_gb = mem.available / (1024**3)
-        total_gb = mem.total / (1024**3)
-        logger.info(
-            f"System memory before load: {available_gb:.1f}GB available / "
-            f"{total_gb:.1f}GB total ({mem.percent}% used)"
-        )
-        if mem.percent > 90:
-            logger.warning(
-                f"HIGH MEMORY PRESSURE: {mem.percent}% RAM used. "
-                f"Only {available_gb:.1f}GB available. Model load may cause system instability."
-            )
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Memory check failed: {e}")
+    # Host counters are optional diagnostics, separate from Metal admission.
+    from .memory_status import log_system_memory
+    log_system_memory("before load", log=logger)
 
     if force_mllm:
         logger.info("Force MLLM mode enabled via --mllm flag")
@@ -9724,23 +9707,7 @@ def load_model(
         pass
 
 
-    # Log system memory after model load
-    try:
-        import psutil
-
-        mem = psutil.virtual_memory()
-        available_gb = mem.available / (1024**3)
-        logger.info(
-            f"System memory after load: {available_gb:.1f}GB available ({mem.percent}% used)"
-        )
-        if mem.percent > 95:
-            logger.warning(
-                f"CRITICAL: System memory at {mem.percent}%. "
-                f"Only {available_gb:.1f}GB free. Risk of OOM under load. "
-                "Consider a smaller model or quantized variant."
-            )
-    except Exception:
-        pass
+    log_system_memory("after load", log=logger)
 
     # Set native tool format support on the engine (thread-safe via instance property)
     _engine.preserve_native_tool_format = _detect_native_tool_support()

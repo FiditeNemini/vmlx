@@ -4,6 +4,16 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.72] - 2026-09-30
+
+- Add Naive N0.5 Flash loading, native reasoning/tool templates and JANGH execution. Improve decode overlap and account for native cache memory when admitting output budgets.
+- Preserve Naive rotating-cache physical state across SSD restoration; retain native tool-turn and terminal prefixes without rewriting template separators.
+- Preserve GLM 5.3 Flash native FP32 tensors and reuse MLA/DSA cache blocks with KDA checkpoints across tool and media continuations.
+- Preserve GLM video frames by default and expose supported frame, sampling and visual-token controls. Repair Qwen4 video timestamps and temporal prompt groups.
+- Preserve literal tool arguments and reasoning history; deliver logprob metadata for parser-hidden tokens and clean up pending streams after cancellation.
+- Expose backend cache/prefill metrics through the Ollama gateway and report unknown host-memory capacity accurately.
+- Experimental kernels remain opt-in. This release does not claim universal prose or MTP speedups, arbitrary long-context cache equivalence, or elimination of model-generated arithmetic and scene-timing errors.
+
 ## [1.6.70] - 2026-09-27
 
 - SSD cache: avoid redundant layer-type inference when stored blocks already declare their cache types.

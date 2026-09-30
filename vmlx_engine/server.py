@@ -12328,13 +12328,18 @@ def _native_cache_status(
                 "cache_subtype": native_schema, "components": native_components,
                 "reason": None, "experimental": True,
                 "cache_store_policy": {
-                    "prompt_boundary": "full_effective_n_minus_one",
-                    "native_checkpoint_ssd": "typed_full_state",
+                    "prompt_boundary": "exact_chunk_n_minus_one_and_consumed_terminal",
+                    "native_checkpoint_ssd": (
+                        "typed_sequence_blocks_and_recurrent_checkpoint"
+                        if getattr(native_glm_ssd, "sequence_block_size", 0)
+                        else "typed_full_state"
+                    ),
+                    "native_sequence_block_size": getattr(native_glm_ssd, "sequence_block_size", 0),
                     "generic_prefix_restore": "unsupported",
                     "generic_paged_blocks": "unsupported",
                     "prompt_disk_l2": "disabled_native_pool_instead",
                     "media": "image_video_exact_input_checkpoint" if native_media else "unsupported",
-                    "media_identity": "processed_pixels_and_grids_v1" if native_media else None,
+                    "media_identity": "causal_item_pixels_and_grids_v3" if native_media else None,
                     "media_partial_item_restore": False,
                     "every_request_recomputes_full_prefix": False,
                 },

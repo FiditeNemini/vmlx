@@ -66,3 +66,102 @@ def glm5_media_input_key(request, tokens, media_ids):
     # Unknown/non-JSON control values decline caching instead of using repr().
     digest.update(json.dumps(controls, sort_keys=True, allow_nan=False, separators=(",", ":")).encode())
     return digest.hexdigest()
+
+
+def glm5_media_item_keys(request, tokens, config):
+    """Bind each complete native media item to its own causal token span.
+
+    GLM videos contain timestamped image runs, so generic run/source matching
+    cannot identify clips. Parse native outer delimiters and validate every
+    grid/patch/placeholder count before permitting partial restoration.
+    """
+    from types import SimpleNamespace
+    from ..cache_key import scope_cache_extra_key
+
+    def get(name):
+        return config.get(name) if isinstance(config, dict) else getattr(config, name, None)
+
+    image_id = get("image_token_id")
+    starts = {get("image_start_token_id"): "image", get("video_start_token_id"): "video"}
+    ends = {"image": get("image_end_token_id"), "video": get("video_end_token_id")}
+    if image_id is None or None in starts or None in ends.values() or len(starts) != 2:
+        raise ValueError("GLM media delimiters unavailable")
+    vision = get("vision_config")
+    merge = vision.get("spatial_merge_size") if isinstance(vision, dict) else getattr(vision, "spatial_merge_size", None)
+    if not isinstance(merge, int) or merge <= 0:
+        raise ValueError("GLM spatial merge unavailable")
+    spans = []
+    cursor = 0
+    while cursor < len(tokens):
+        modality = starts.get(tokens[cursor])
+        if modality is None:
+            if tokens[cursor] == image_id:
+                raise ValueError("unwrapped GLM media placeholder")
+            cursor += 1
+            continue
+        begin = cursor
+        cursor += 1
+        while cursor < len(tokens) and tokens[cursor] != ends[modality]:
+            if tokens[cursor] == get("video_start_token_id"):
+                raise ValueError("nested GLM video")
+            cursor += 1
+        if cursor == len(tokens):
+            raise ValueError("unclosed GLM media item")
+        spans.append((modality, begin, cursor + 1))
+        cursor += 1
+    if not spans:
+        raise ValueError("no complete GLM media items")
+    payloads = {}
+    for modality, (pixel_name, grid_name) in zip(("image", "video"), _PAYLOADS):
+        pixels, grid = getattr(request, pixel_name, None), getattr(request, grid_name, None)
+        count = sum(m == modality for m, _, _ in spans)
+        if not count:
+            if pixels is not None or grid is not None:
+                raise ValueError("unmapped GLM processor payload")
+            continue
+        if not isinstance(pixels, mx.array) or pixels.ndim != 2 or not isinstance(grid, mx.array) or grid.shape != (count, 3):
+            raise ValueError("GLM processor item layout mismatch")
+        rows = grid.tolist()
+        sizes = [int(t) * int(h) * int(w) for t, h, w in rows]
+        if any(n <= 0 or n % (merge * merge) for n in sizes) or sum(sizes) != pixels.shape[0]:
+            raise ValueError("GLM processor patch count mismatch")
+        payloads[modality] = (pixels, grid, sizes)
+    keys, items = {}, []
+    indices, offsets = {"image": 0, "video": 0}, {"image": 0, "video": 0}
+    for index, (modality, start, end) in enumerate(spans):
+        pixels, grid, sizes = payloads[modality]
+        i, offset = indices[modality], offsets[modality]
+        size = sizes[i]
+        if sum(t == image_id for t in tokens[start:end]) != size // (merge * merge):
+            raise ValueError("GLM item placeholder count mismatch")
+        pixel_name, grid_name = _PAYLOADS[modality == "video"]
+        controls = {name: getattr(request, name, None) for name in _CONTROLS if name.startswith(modality + "_")}
+        item = SimpleNamespace(**controls, **{pixel_name: pixels[offset:offset + size], grid_name: grid[i:i + 1]})
+        key = f"glm5_native_media_item_v3_{index:04d}"
+        keys[key] = glm5_media_input_key(item, tokens[start:end], {image_id})
+        keys = scope_cache_extra_key(keys, key, start)
+        items.append({"modality": modality, "start": start, "end": end, "rows": size})
+        indices[modality] += 1
+        offsets[modality] += size
+    return keys, items
+
+
+def trim_glm5_cached_media(request, boundary):
+    """Remove only whole processor items already represented by native state."""
+    items = getattr(request, "_glm_native_media_items", None)
+    if not items or any(item["start"] < boundary < item["end"] for item in items):
+        return False
+    updates = {}
+    for modality, (pixel_name, grid_name) in zip(("image", "video"), _PAYLOADS):
+        covered = [item for item in items if item["modality"] == modality and item["end"] <= boundary]
+        if not covered:
+            continue
+        pixels, grid = getattr(request, pixel_name, None), getattr(request, grid_name, None)
+        rows = sum(item["rows"] for item in covered)
+        if pixels is None or grid is None or rows > pixels.shape[0] or len(covered) > grid.shape[0]:
+            return False
+        updates[pixel_name] = pixels[rows:] if rows < pixels.shape[0] else None
+        updates[grid_name] = grid[len(covered):] if len(covered) < grid.shape[0] else None
+    for name, value in updates.items():
+        setattr(request, name, value)
+    return True

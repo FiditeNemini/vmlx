@@ -283,3 +283,109 @@ def test_startup_log_matches_effective_native_media_policy(tmp_path, monkeypatch
         assert policy == ("image_video_exact_input_checkpoint" if enabled else "unsupported")
     finally:
         asyncio.run(scheduler.stop())
+
+
+def item_request(*, video=False):
+    config = SimpleNamespace(image_token_id=999, image_start_token_id=10,
+        image_end_token_id=11, video_start_token_id=12, video_end_token_id=13,
+        vision_config=SimpleNamespace(spatial_merge_size=2))
+    tokens = [1, 2, 10, 999, 999, 11, 3, 4]
+    req = request()
+    req.pixel_values = mx.arange(96, dtype=mx.float32).reshape(8, 12)
+    req.image_grid_thw = mx.array([[1, 2, 4]])
+    if video:
+        tokens += [12, 10, 999, 999, 11, 14, 10, 999, 999, 11, 13, 5, 6]
+        req.video_pixel_values = mx.arange(192, dtype=mx.float32).reshape(16, 12)
+        req.video_grid_thw = mx.array([[2, 2, 4]])
+        req.videos = ["new-video"]
+    req.input_ids = mx.array([tokens])
+    req._glm_native_full_token_ids = tokens
+    return req, config
+
+
+def test_new_video_does_not_rekey_previous_image_or_text():
+    from vmlx_engine.utils.glm5_native_media import glm5_media_item_keys
+    from vmlx_engine.cache_key import cache_extra_keys_for_token_range
+    image, config = item_request()
+    video, _ = item_request(video=True)
+    image_keys, _ = glm5_media_item_keys(image, image._glm_native_full_token_ids, config)
+    video_keys, _ = glm5_media_item_keys(video, video._glm_native_full_token_ids, config)
+    assert cache_extra_keys_for_token_range(video_keys, 0, 2) is None
+    assert cache_extra_keys_for_token_range(image_keys, 0, 7) == cache_extra_keys_for_token_range(video_keys, 0, 7)
+    video.video_pixel_values = video.video_pixel_values + 1
+    changed, _ = glm5_media_item_keys(video, video._glm_native_full_token_ids, config)
+    assert cache_extra_keys_for_token_range(changed, 0, 7) == cache_extra_keys_for_token_range(video_keys, 0, 7)
+    assert cache_extra_keys_for_token_range(changed, 0, 20) != cache_extra_keys_for_token_range(video_keys, 0, 20)
+
+
+def test_native_disk_restores_image_history_before_new_video(tmp_path):
+    native = native_facade(tmp_path)
+    gen = generator(native)
+    first, config = item_request()
+    gen.model = SimpleNamespace(config=config)
+    gen._prepare_glm_native_media_identity(first, first._glm_native_full_token_ids)
+    try:
+        gen._store_glm_native_boundary(first, native_state(7))
+        assert LEDGER.take(first.request_id)["durable"]
+        second, _ = item_request(video=True)
+        gen._prepare_glm_native_media_identity(second, second._glm_native_full_token_ids)
+        gen._restore_glm_native_prefix(second)
+        assert second._cached_tokens == 7
+        assert second.input_ids.tolist() == [second._glm_native_full_token_ids[7:]]
+        assert second.pixel_values is second.image_grid_thw is None
+        assert second.video_pixel_values.shape == (16, 12)
+        assert second.video_grid_thw.tolist() == [[2, 2, 4]]
+        assert second.prompt_cache[1].offset == 7
+        changed, _ = item_request(video=True)
+        changed.pixel_values = changed.pixel_values + 1
+        gen._prepare_glm_native_media_identity(changed, changed._glm_native_full_token_ids)
+        gen._restore_glm_native_prefix(changed)
+        assert changed.prompt_cache is None
+    finally:
+        native.close()
+
+
+def test_item_trim_rejects_mid_video_without_mutating_payload():
+    from vmlx_engine.utils.glm5_native_media import glm5_media_item_keys, trim_glm5_cached_media
+    req, config = item_request(video=True)
+    _, req._glm_native_media_items = glm5_media_item_keys(req, req._glm_native_full_token_ids, config)
+    original = req.pixel_values
+    assert not trim_glm5_cached_media(req, 14)
+    assert req.pixel_values is original
+    assert trim_glm5_cached_media(req, 2)
+    assert req.pixel_values is original
+
+
+def test_ambiguous_patch_count_cannot_enable_partial_media_restore():
+    from vmlx_engine.utils.glm5_native_media import glm5_media_item_keys
+    req, config = item_request(video=True)
+    req.video_pixel_values = req.video_pixel_values[:-1]
+    with pytest.raises(ValueError, match="patch count"):
+        glm5_media_item_keys(req, req._glm_native_full_token_ids, config)
+
+
+def test_restored_image_prefix_forwards_only_video_tail_and_publishes(tmp_path):
+    native = native_facade(tmp_path)
+    first, config = item_request()
+    model = MediaModel()
+    model.config = config
+    gen = MLLMBatchGenerator(model=model, processor=tiny_processor(), native_glm_cache=native,
+                            prefill_step_size=2048, enable_prefix_cache=True, ssm_state_cache_size=0)
+    gen._media_placeholder_token_ids = lambda: {999}
+    try:
+        gen._prepare_glm_native_media_identity(first, first._glm_native_full_token_ids)
+        gen._store_glm_native_boundary(first, native_state(7))
+        req, _ = item_request(video=True)
+        gen._prepare_glm_native_media_identity(req, req._glm_native_full_token_ids)
+        gen._restore_glm_native_prefix(req)
+        assert req._cached_tokens == 7
+        tail = req.input_ids.shape[1]
+        output = gen._media_forward(req, req.input_ids, tail, req.prompt_cache, {"cache": req.prompt_cache})
+        mx.eval(output)
+        assert model.one_shot == 0
+        assert model.language_model.calls == [(tail - 1, True), (1, True)]
+        assert req.prompt_cache[1].offset == len(req._glm_native_full_token_ids)
+        assert native.last_store["durable"]
+        assert native.last_store["retained_tokens"] == len(req._glm_native_full_token_ids) - 1
+    finally:
+        native.close()

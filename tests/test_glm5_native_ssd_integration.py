@@ -195,6 +195,73 @@ def test_cleanup_keeps_prefill_receipt_without_post_decode_rederive(tmp_path, mo
         asyncio.run(scheduler.stop())
 
 
+def test_block_native_prefill_keeps_intermediate_and_terminal_raw_boundaries(tmp_path):
+    from vmlx_engine.utils.glm5_native_prefix_cache import glm5_native_layout
+    native = Glm5NativePrefixCache(root=tmp_path, max_size_bytes=20 * 1024**2,
+        model_key="chunk-terminal", layout=glm5_native_layout(native_state(13)),
+        sequence_block_size=4)
+    model = tiny_model()
+    gen = MLLMBatchGenerator(model=model, processor=tiny_processor(),
+        prefill_step_size=4, native_glm_cache=native,
+        enable_prefix_cache=True, ssm_state_cache_size=0)
+    tokens = list(range(13))
+    req = MLLMBatchRequest(uid=0, request_id="chunk-terminal", prompt="",
+        input_ids=mx.array([tokens]), temperature=0)
+    req._glm_native_full_token_ids = tokens
+    try:
+        state = model.language_model.make_cache()
+        mx.eval(gen._run_vision_encoding_inner(req, state))
+        n, _ = native.fetch(tokens[:5])
+        assert n == 4
+        n, _ = native.fetch(tokens[:9])
+        assert n == 8
+        req.output_tokens = [91, 92, 93]
+        # Pipeline consumes emitted token 93; pending sample 94 is not consumed.
+        terminal = native_state(16)
+        gen._store_glm_native_terminal(req, terminal)
+        n, _ = native.fetch(tokens + [91, 92, 93, 94])
+        assert n == 16
+        assert native.fetch(tokens + [19, 92, 93, 94])[0] == 12
+        # Never stamp a wrong offset as an exact terminal.
+        req.output_tokens = [91, 92, 93, 94]
+        gen._store_glm_native_terminal(req, terminal)
+        assert native.fetch(tokens + [91, 92, 93, 94, 95])[0] == 16
+    finally:
+        LEDGER.take(req.request_id)
+        native.close()
+
+
+@pytest.mark.parametrize("graceful", [False, True])
+def test_block_native_real_decode_loop_owns_consumed_terminal(graceful, tmp_path):
+    from vmlx_engine.mllm_batch_generator import MLLMBatch
+    from vmlx_engine.utils.glm5_native_prefix_cache import glm5_native_layout
+    native = Glm5NativePrefixCache(root=tmp_path, max_size_bytes=20 * 1024**2,
+        model_key="decode-boundary", layout=glm5_native_layout(native_state(15)),
+        sequence_block_size=4)
+    gen = MLLMBatchGenerator(model=tiny_model(), processor=tiny_processor(),
+        native_glm_cache=native, enable_prefix_cache=True, ssm_state_cache_size=0)
+    tokens = list(range(13))
+    req = MLLMBatchRequest(uid=0, request_id="decode-boundary", prompt="",
+        input_ids=mx.array([tokens]), temperature=0)
+    req._glm_native_full_token_ids = tokens
+    req.output_tokens = [1, 2]
+    req._vmlx_graceful_stop_requested = graceful
+    gen.stop_tokens = {3}
+    gen.active_batch = MLLMBatch(uids=[0], request_ids=[req.request_id],
+        y=mx.array([3]), logprobs=[mx.zeros((8,))], max_tokens=[100],
+        num_tokens=[2], cache=native_state(15), requests=[req])
+    try:
+        responses = gen.next()
+        assert responses[0].finish_reason == "stop"
+        consumed = tokens + ([1, 2] if graceful else [1, 2, 3])
+        n, _ = native.fetch(consumed + [7])
+        assert n == len(consumed)
+    finally:
+        LEDGER.take(req.request_id)
+        gen.close()
+        native.close()
+
+
 @pytest.mark.parametrize("length,step", [(6, 2048), (13, 2)])
 def test_prefill_publishes_exact_full_boundary_before_final_forward(tmp_path, length, step):
     native = native_facade(tmp_path)

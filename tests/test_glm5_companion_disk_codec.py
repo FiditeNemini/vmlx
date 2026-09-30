@@ -4,6 +4,7 @@ These are codec/ownership tests, not proof of MLLM scheduler admission.
 """
 
 import json
+from dataclasses import replace
 
 import mlx.core as mx
 import pytest
@@ -11,6 +12,197 @@ import pytest
 from vmlx_engine.models.glm5_next.glm5_next import Glm5KDACache, Glm5MLACache
 from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
 from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
+from vmlx_engine.utils.glm5_native_blocks import split_native_sequence, restore_native_sequence
+
+
+@pytest.mark.parametrize("length", [1, 4, 9, 17])
+@pytest.mark.parametrize("absorbed", [False, True])
+@pytest.mark.parametrize("pooled", [False, True])
+def test_native_sequence_blocks_preserve_exact_typed_state(length, absorbed, pooled):
+    original = native_state(length, absorbed=absorbed, pooled=pooled)
+    boundary, blocks = split_native_sequence(original, 4)
+    assert len(blocks) == (length + 3) // 4
+    assert all(block.layers[0] is None for block in blocks)
+    same_state(original, restore_native_sequence(boundary, blocks))
+
+
+@pytest.mark.parametrize("damage", ["missing", "reverse", "duplicate", "length", "dtype", "pool", "kda"])
+def test_native_sequence_blocks_reject_incomplete_or_mixed_state(damage):
+    boundary, blocks = split_native_sequence(native_state(9), 4)
+    if damage == "missing": blocks.pop(1)
+    elif damage == "reverse": blocks.reverse()
+    elif damage == "duplicate": blocks.insert(1, blocks[0])
+    elif damage == "kda": boundary = replace(boundary, recurrent=(None, None))
+    else:
+        arrays = list(blocks[1].layers[1])
+        if damage == "length": arrays[0] = arrays[0][:, :, :3]
+        elif damage == "dtype": arrays[0] = arrays[0].astype(mx.float32)
+        else: arrays[2] = arrays[2][:, :0]
+        blocks[1] = replace(blocks[1], layers=(None, tuple(arrays)))
+    with pytest.raises(ValueError):
+        restore_native_sequence(boundary, blocks)
+
+
+def test_native_sequence_blocks_keep_stable_full_blocks_and_partial_tail():
+    _, old = split_native_sequence(native_state(9), 4)
+    _, new = split_native_sequence(native_state(13), 4)
+    for a, b in zip(old[:2], new[:2]):
+        for x, y in zip(a.layers[1], b.layers[1]):
+            assert mx.array_equal(x, y).item()
+    assert (old[-1].start, old[-1].end) == (8, 9)
+    assert (new[-1].start, new[-1].end) == (12, 13)
+
+
+def test_native_sequence_blocks_refuse_unaligned_pool_slicing():
+    with pytest.raises(ValueError, match="align"):
+        split_native_sequence(native_state(9), 3)
+
+
+def native_block_store(path):
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.utils.glm5_native_block_store import Glm5NativeBlockStore
+    blocks = BlockDiskStore(str(path / "model"), max_size_gb=0.02,
+                            global_cache_root=str(path), expected_num_layers=2)
+    checkpoints = SSMCompanionDiskStore(
+        directory=path / "model" / "ssm_companion", budget_bytes=20 * 1024**2,
+        global_budget=blocks.global_budget,
+    )
+    return Glm5NativeBlockStore(checkpoints, blocks, block_size=4)
+
+
+@pytest.mark.parametrize("absorbed", [False, True])
+def test_native_block_ssd_extension_reuses_full_blocks_and_survives_restart(tmp_path, absorbed):
+    store = native_block_store(tmp_path)
+    try:
+        first = native_state(9, absorbed=absorbed)
+        assert store.store("a" * 64, first, True, list(range(9)), 9)
+        assert store.wait_for_write("a" * 64)
+        same_state(first, store.fetch("a" * 64)[0])
+        extended = native_state(13, absorbed=absorbed)
+        assert store.store("b" * 64, extended, True, list(range(13)), 13)
+        assert store.wait_for_write("b" * 64)
+        assert store.last_block_write["reused_blocks"] == 2
+        assert store.last_block_write["new_blocks"] == 2
+        same_state(extended, store.fetch("b" * 64)[0])
+        same_state(first, store.fetch("a" * 64)[0])
+    finally:
+        store.shutdown()
+    restored = native_block_store(tmp_path)
+    try:
+        same_state(first, restored.fetch("a" * 64)[0])
+        same_state(extended, restored.fetch("b" * 64)[0])
+    finally:
+        restored.shutdown()
+
+
+def test_native_block_ssd_missing_dependency_is_a_miss(tmp_path):
+    store = native_block_store(tmp_path)
+    try:
+        assert store.store("c" * 64, native_state(9), True, list(range(9)), 9)
+        assert store.wait_for_write("c" * 64)
+        payload = next((tmp_path / "model" / "blocks").rglob("*.safetensors"))
+        payload.unlink()
+        assert store.fetch("c" * 64) is None
+        assert not store.has_complete("c" * 64)
+    finally:
+        store.shutdown()
+
+
+def test_native_block_ssd_aggregate_eviction_is_safe_and_recoverable(tmp_path):
+    from vmlx_engine.global_disk_cache_budget import get_global_disk_cache_budget
+
+    store = native_block_store(tmp_path)
+    pressure = None
+    key = "e" * 64
+    original = native_state(13)
+    try:
+        assert store.store(key, original, True, list(range(13)), 13)
+        assert store.wait_for_write(key)
+        same_state(original, store.fetch(key)[0])
+        # A second root lease imposes genuine aggregate pressure on both
+        # transports; do not simulate eviction by unlinking a payload.
+        pressure = get_global_disk_cache_budget(tmp_path, 1)
+        result = pressure.enforce(force=True)
+        assert result.evicted_entries > 0
+        assert store.fetch(key) is None
+        assert not store.has_complete(key)
+        pressure.close()
+        pressure = None
+        # Capacity is available again: publish a complete dependency chain,
+        # then verify exact native reconstruction rather than stale metadata.
+        assert store.store(key, original, True, list(range(13)), 13)
+        assert store.wait_for_write(key)
+        same_state(original, store.fetch(key)[0])
+    finally:
+        if pressure is not None:
+            pressure.close()
+        store.shutdown()
+
+
+def test_native_block_facade_restores_contiguous_prefix_after_restart(tmp_path):
+    from vmlx_engine.utils.glm5_native_prefix_cache import Glm5NativePrefixCache, glm5_native_layout
+    def open_cache():
+        return Glm5NativePrefixCache(root=tmp_path, max_size_bytes=20 * 1024**2,
+            model_key="block-facade", layout=glm5_native_layout(native_state(9)),
+            sequence_block_size=4)
+    cache = open_cache()
+    try:
+        assert cache.store(list(range(10)), 9, native_state(9))["durable"]
+        assert cache.store(list(range(14)), 13, native_state(13))["durable"]
+        assert cache.disk.last_block_write["reused_blocks"] == 2
+    finally:
+        cache.close()
+
+    cache = open_cache()
+    try:
+        n, state = cache.fetch(list(range(15)))
+        assert n == 13
+        same_state(native_state(13), state)
+        n, state = cache.fetch(list(range(10)))
+        assert n == 9
+        same_state(native_state(9), state)
+        assert cache.fetch([99] + list(range(1, 15))) is None
+    finally:
+        cache.close()
+
+
+def test_native_block_ssd_clear_owns_manifest_and_blocks(tmp_path):
+    store = native_block_store(tmp_path)
+    try:
+        assert store.store("d" * 64, native_state(9), True, list(range(9)), 9)
+        assert store.wait_for_write("d" * 64)
+        stats = store.stats()
+        assert stats["bytes"] > stats["checkpoint_bytes"] > 0
+        assert stats["sequence_blocks"]["blocks_on_disk"] == 3
+        store.clear()
+        assert store.fetch("d" * 64) is None
+        assert store.stats()["bytes"] == 0
+        assert store.stats()["sequence_blocks"]["blocks_on_disk"] == 0
+    finally:
+        store.shutdown()
+    assert not store.store("e" * 64, native_state(9), True, list(range(9)), 9)
+
+
+def test_native_block_ssd_rejects_and_repairs_changed_payload(tmp_path):
+    store = native_block_store(tmp_path)
+    key = "f" * 64
+    original = native_state(9)
+    try:
+        assert store.store(key, original, True, list(range(9)), 9)
+        assert store.wait_for_write(key)
+        path = next((tmp_path / "model" / "blocks").rglob("*.safetensors"))
+        data, meta = mx.load(str(path), return_metadata=True)
+        name = next(k for k in data if k.endswith("cumulative_1"))
+        data[name] = data[name] + 1
+        replacement = path.with_suffix(".replacement.safetensors")
+        mx.save_safetensors(str(replacement), data, meta)
+        replacement.replace(path)
+        assert store.fetch(key) is None
+        assert store.store(key, original, True, list(range(9)), 9)
+        assert store.wait_for_write(key)
+        same_state(original, store.fetch(key)[0])
+    finally:
+        store.shutdown()
 
 
 def native_state(length, *, absorbed=True, pooled=True):

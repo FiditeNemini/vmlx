@@ -788,6 +788,7 @@ class MLLMScheduler:
                             root=root,
                             max_size_bytes=int(self.config.block_disk_cache_max_gb * 1024**3),
                             model_key=model_key, layout=native_layout,
+                            sequence_block_size=1024,
                             allow_legacy_hashed_namespaces=self.config.block_disk_cache_dir is None,
                             allow_legacy_direct_namespace=self.config.block_disk_cache_dir is not None,
                             activity_probe=lambda: bool(

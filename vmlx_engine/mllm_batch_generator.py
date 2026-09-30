@@ -12072,6 +12072,7 @@ class MLLMBatchGenerator:
                                     _lm_kwargs_for(processed, prefix_end),
                                 )
                                 _materialize_prefill_cache_state(cache)
+                                self._store_glm_native_chunk(request, cache, prefix_end)
                                 processed = prefix_end
                                 if (
                                     _tight_text_prefill_step_size
@@ -12101,6 +12102,7 @@ class MLLMBatchGenerator:
                                 _lm_kwargs_for(_processed_prefix, _prefix_end),
                             )
                             _materialize_prefill_cache_state(cache)
+                            self._store_glm_native_chunk(request, cache, _prefix_end)
                             _processed_prefix = _prefix_end
                             if (
                                 _tight_text_prefill_step_size < self.prefill_step_size
@@ -12726,6 +12728,7 @@ class MLLMBatchGenerator:
                         except Exception:  # noqa: BLE001
                             pass
                     processed += chunk_size
+                    self._store_glm_native_chunk(request, cache, processed)
                     chunk_num += 1
                     # Advancing prefill progress for the liveness probes.
                     # `num_prompt_tokens` is set only when the FIRST output
@@ -13493,8 +13496,8 @@ class MLLMBatchGenerator:
         if (
             getattr(self, "native_glm_cache", None) is not None
             and getattr(request, "_glm_native_media_key", None)
-            and int(getattr(request, "_cached_tokens", 0) or 0) == 0
-            and len(getattr(request, "_glm_native_full_token_ids", None) or []) == seq_len
+            and len(getattr(request, "_glm_native_full_token_ids", None) or [])
+            == seq_len + int(getattr(request, "_cached_tokens", 0) or 0)
             and seq_len > 1
         ):
             # This exact main-pass state is durable before the final prompt
@@ -13721,6 +13724,7 @@ class MLLMBatchGenerator:
             # clean-boundary snapshot is submitted. Never interrupt Metal from
             # the HTTP thread or turn a cancellation into a full-prefill retry.
             _raise_if_prefill_cancelled(request)
+            self._store_glm_native_chunk(request, cache, end)
             if bounded_glm or bounded_mimo:
                 peak = int(mx.get_peak_memory())
                 transient = max(0, peak - active)
@@ -14191,9 +14195,16 @@ class MLLMBatchGenerator:
             request._glm_native_media_key = glm5_media_input_key(
                 request, tokens, self._media_placeholder_token_ids(),
             )
+            from .utils.glm5_native_media import glm5_media_item_keys
+            request._glm_native_media_items = None
+            try:
+                keys, items = glm5_media_item_keys(request, tokens, self.model.config)
+                request._glm_native_media_items = items
+            except (ValueError, AttributeError):
+                # Unrecognized layouts retain the exact whole-payload policy.
+                keys = {GLM5_MEDIA_KEY: request._glm_native_media_key}
             request._cache_extra_keys = _merge_mllm_cache_extra_keys(
-                getattr(request, "_cache_extra_keys", None),
-                {GLM5_MEDIA_KEY: request._glm_native_media_key},
+                getattr(request, "_cache_extra_keys", None), keys,
             )
         except Exception as exc:
             request._glm_native_media_key = None
@@ -14226,8 +14237,10 @@ class MLLMBatchGenerator:
             if found is not None:
                 boundary, state = found
                 if media and self._tokens_contain_media_placeholders(tokens[boundary:]):
-                    logger.info("GLM native SSD media hit declined for %s: unconsumed media in tail", request.request_id)
-                    return
+                    from .utils.glm5_native_media import trim_glm5_cached_media
+                    if not trim_glm5_cached_media(request, boundary):
+                        logger.info("GLM native SSD media hit declined for %s: unsupported item boundary", request.request_id)
+                        return
                 tail = mx.array([tokens[boundary:]])
                 execution = dict(getattr(request, "_cache_execution", None) or {})
                 execution.update({
@@ -14245,16 +14258,17 @@ class MLLMBatchGenerator:
                 request.attention_mask = None
                 request._cache_execution = execution
                 if media:
-                    _clear_mllm_request_media_payloads(request)
+                    if not self._tokens_contain_media_placeholders(tokens[boundary:]):
+                        _clear_mllm_request_media_payloads(request)
                     logger.info("GLM native SSD media restore for %s: N=%d identity=%s", request.request_id, boundary, media_key)
         except Exception as exc:
             logger.warning("GLM native SSD fetch refused for %s: %s", request.request_id, exc)
 
-    def _store_glm_native_boundary(self, request, cache) -> None:
+    def _store_glm_native_boundary(self, request, cache, *, boundary=None, tokens=None) -> None:
         native = getattr(self, "native_glm_cache", None)
         if native is None or getattr(request, "_bypass_prefix_cache", False):
             return
-        tokens = getattr(request, "_glm_native_full_token_ids", None) or []
+        tokens = tokens if tokens is not None else (getattr(request, "_glm_native_full_token_ids", None) or [])
         if len(tokens) < 2 or (
             self._request_has_media_cache_context(request, tokens)
             and not getattr(request, "_glm_native_media_key", None)
@@ -14263,7 +14277,7 @@ class MLLMBatchGenerator:
         from .persistence_outcome import LEDGER
         try:
             receipt = native.store(
-                tokens, len(tokens) - 1, cache,
+                tokens, len(tokens) - 1 if boundary is None else boundary, cache,
                 extra_keys=getattr(request, "_cache_extra_keys", None),
                 request_id=request.request_id,
             )
@@ -14276,6 +14290,38 @@ class MLLMBatchGenerator:
             request.request_id, receipt["outcome"], receipt["detail"],
             retained_tokens=receipt["retained_tokens"], durable=receipt["durable"],
         )
+
+    def _store_glm_native_terminal(self, request, cache) -> None:
+        native = getattr(self, "native_glm_cache", None)
+        if native is None or not getattr(native, "sequence_block_size", 0):
+            return
+        prompt = getattr(request, "_glm_native_full_token_ids", None) or []
+        generated = getattr(request, "output_tokens", None) or []
+        if not prompt or not generated:
+            return
+        # _next forwards y before emitting it and leaves the *next* sample
+        # pending in batch.y. Thus every token in output_tokens is consumed.
+        # Bind raw tokens, never rendered/trimmed reasoning or tool JSON.
+        # A later template change simply fails the causal-prefix lookup.
+        tokens = list(prompt) + list(generated)
+        if not native._valid_boundary(cache, len(tokens)):
+            return  # speculative/unknown offset cannot become a checkpoint
+        self._store_glm_native_boundary(request, cache, boundary=len(tokens), tokens=tokens)
+
+    def _store_glm_native_chunk(self, request, cache, local_end) -> None:
+        native = getattr(self, "native_glm_cache", None)
+        if native is None or not getattr(native, "sequence_block_size", 0):
+            return
+        tokens = getattr(request, "_glm_native_full_token_ids", None) or []
+        boundary = int(getattr(request, "_cached_tokens", 0) or 0) + local_end
+        # N-1 has its own publication site; intermediate media spans are not
+        # resumable until the complete native item has been consumed.
+        if not 0 < boundary < len(tokens) - 1:
+            return
+        items = getattr(request, "_glm_native_media_items", None) or []
+        if any(item["start"] < boundary < item["end"] for item in items):
+            return
+        self._store_glm_native_boundary(request, cache, boundary=boundary)
 
     def _process_prompts(
         self, requests: List[MLLMBatchRequest], force_batch_cache: bool = False
@@ -14400,8 +14446,9 @@ class MLLMBatchGenerator:
             # Scope exact item digests to their own causal placeholder runs so
             # an image->video chain reuses the unchanged image-conditioned
             # history and partitions only when the new video begins.
-            _media_extra_keys = self._media_scoped_cache_extra_keys(
-                req, _all_tokens
+            _media_extra_keys = (
+                None if getattr(self, "native_glm_cache", None) is not None
+                else self._media_scoped_cache_extra_keys(req, _all_tokens)
             )
             req._cache_extra_keys = _merge_mllm_cache_extra_keys(
                 getattr(req, "_cache_extra_keys", None),
@@ -19026,6 +19073,14 @@ class MLLMBatchGenerator:
         if batch is None:
             return prefill_errors
 
+        if getattr(self, "native_glm_cache", None) is not None:
+            for index, request in enumerate(batch.requests):
+                if getattr(request, "_vmlx_graceful_stop_requested", False):
+                    # The parser has accepted the previously emitted native
+                    # tool call. Preserve that consumed boundary before the
+                    # pending, unexposed next token advances recurrent state.
+                    self._store_glm_native_terminal(request, batch.extract_cache(index))
+
         mtp_state = None
         if len(batch.requests) == 1:
             mtp_state = getattr(batch.requests[0], "_native_mtp_state", None)
@@ -19383,6 +19438,9 @@ class MLLMBatchGenerator:
                 # Extract cache NOW before batch.filter() invalidates indices.
                 # Do NOT TQ-compress here — the scheduler needs original float16
                 # for block extraction. TQ recompress happens on the fetch path.
+                if (getattr(self, "native_glm_cache", None) is not None
+                        and not getattr(req, "_vmlx_graceful_stop_requested", False)):
+                    self._store_glm_native_terminal(req, batch.extract_cache(i))
                 captured_cache = getattr(req, "_media_clean_prefix_cache", None)
                 if captured_cache is None:
                     finish_cache = batch.extract_cache(i)

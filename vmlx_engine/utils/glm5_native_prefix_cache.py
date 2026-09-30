@@ -36,7 +36,8 @@ def glm5_native_layout(layers):
 class Glm5NativePrefixCache:
     def __init__(self, *, root, max_size_bytes, model_key, layout,
                  allow_legacy_hashed_namespaces=False,
-                 allow_legacy_direct_namespace=False, activity_probe=None):
+                 allow_legacy_direct_namespace=False, activity_probe=None,
+                 sequence_block_size=0):
         if not model_key or not layout or any(
             kind not in (Glm5KDACache, Glm5MLACache) for kind, _ in layout
         ):
@@ -45,6 +46,10 @@ class Glm5NativePrefixCache:
         self._activity_probe = activity_probe
         self._last_activity = time.monotonic()
         self.model_key = f"{model_key}:{NATIVE_GLM_SSD_SCHEMA}"
+        self.sequence_block_size = int(sequence_block_size)
+        if self.sequence_block_size:
+            from .glm5_native_block_store import SCHEMA
+            self.model_key += f":{SCHEMA}:{self.sequence_block_size}"
         cache_root = Path(root).expanduser().resolve()
         namespace = hashlib.sha256(self.model_key.encode()).hexdigest()[:16]
         directory = ensure_managed_block_cache_namespace(cache_root / namespace)
@@ -55,13 +60,28 @@ class Glm5NativePrefixCache:
             allow_legacy_hashed_namespaces=allow_legacy_hashed_namespaces,
             allow_legacy_direct_namespace=allow_legacy_direct_namespace,
         )
+        block_transport = None
         try:
+            if self.sequence_block_size:
+                from ..block_disk_store import BlockDiskStore
+                block_transport = BlockDiskStore(
+                    str(directory), max_size_gb=int(max_size_bytes) / 1024**3,
+                    global_cache_root=str(cache_root), expected_num_layers=len(layout),
+                    allow_tq_native=False, activity_probe=activity_probe,
+                )
             self.disk = SSMCompanionDiskStore(
                 directory=directory / "ssm_companion",
                 budget_bytes=int(max_size_bytes), global_budget=self.budget,
                 idle_maintenance=self._idle_maintenance,
             )
+            if block_transport is not None:
+                from .glm5_native_block_store import Glm5NativeBlockStore
+                self.disk = Glm5NativeBlockStore(
+                    self.disk, block_transport, block_size=self.sequence_block_size,
+                )
         except Exception:
+            if block_transport is not None:
+                block_transport.shutdown()
             self.budget.close()
             raise
         self.lookup = SSMCompanionCache(

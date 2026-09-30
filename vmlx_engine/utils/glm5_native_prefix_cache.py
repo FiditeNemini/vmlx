@@ -148,12 +148,16 @@ class Glm5NativePrefixCache:
         if admissible:
             key = self.lookup._key(tokens, boundary, cache_extra_keys=extra_keys)
             try:
-                if self.disk.has_complete(key):
-                    # Validate the typed record, not merely file presence,
-                    # before claiming that a duplicate is already durable.
+                from .glm5_native_block_store import Glm5NativeBlockStore
+
+                # Block has_complete already performs a full typed restore.
+                # Keep the plain companion backend's stricter metadata probe.
+                if isinstance(self.disk, Glm5NativeBlockStore):
                     found = self.disk.fetch(key)
-                    if found and found[1] and self._valid_boundary(found[0], boundary):
-                        outcome, detail, durable = "already_durable", "existing typed checkpoint", True
+                else:
+                    found = self.disk.fetch(key) if self.disk.has_complete(key) else None
+                if found and found[1] and self._valid_boundary(found[0], boundary):
+                    outcome, detail, durable = "already_durable", "existing typed checkpoint", True
                 if not durable:
                     admitted = self.disk.store(key, layers, True, tokens, boundary)
                     if admitted:

@@ -1,21 +1,21 @@
 {
-  "version": "1.6.71",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.71/vMLX-1.6.71-tahoe-arm64.dmg",
-  "sha256": "3e8d2a1ad9d5400daf8fa72ae010e87cb658cdf95ac48dd7ebef4454e9ebb21b",
-  "sha512": "q7xwcldjLWVPE70EQ+8HOAXLuOmu8bKXF1AR5OKL6i2+bnoJptlBxkt0AUpsxbjPS5gmX86QADx0+HIwysz6+w==",
+  "version": "1.6.72",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.72/vMLX-1.6.72-tahoe-arm64.dmg",
+  "sha256": "630cba1d1125ad7c599437713b6d5e00ad8e6ffe4862895481426554ea2690ed",
+  "sha512": "vQ99YxGKIITG7EpQZa/NqVdk23eZbx33prybhkJrQSGIT2e0m13Z8LrU4nbJuNzR7TfuB0ci65b4l5zavtDImQ==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.71/vMLX-1.6.71-sequoia-arm64.dmg",
-      "bytes": 573438922,
-      "sha256": "a1c7b0e948b74783a72b81c6478ac1cc6417b644de5416576b7b91717fa49c37",
-      "sha512": "bpWiqmeg74oPv7dxEsvHcTg0WSKSnFQzDXlmpXqj3FrqQ9qzWU0wSz2xw3ArEuPUoifN5lUid0oi3cMqklhUNA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.72/vMLX-1.6.72-sequoia-arm64.dmg",
+      "bytes": 573381730,
+      "sha256": "46168db1b4885de8666a7a0b44fb4146c217666f21223adcc322a0110677f80a",
+      "sha512": "P7bGGUOEn4wNN2wKB1Ar3lXDL8it1B3eiiwdIUNVTqRPALm/nDZ5ECxWt1YfywUw+D+aa4KZJrw4luvHdRG7MQ=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.71/vMLX-1.6.71-tahoe-arm64.dmg",
-      "bytes": 595347740,
-      "sha256": "3e8d2a1ad9d5400daf8fa72ae010e87cb658cdf95ac48dd7ebef4454e9ebb21b",
-      "sha512": "q7xwcldjLWVPE70EQ+8HOAXLuOmu8bKXF1AR5OKL6i2+bnoJptlBxkt0AUpsxbjPS5gmX86QADx0+HIwysz6+w=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.72/vMLX-1.6.72-tahoe-arm64.dmg",
+      "bytes": 595386711,
+      "sha256": "630cba1d1125ad7c599437713b6d5e00ad8e6ffe4862895481426554ea2690ed",
+      "sha512": "vQ99YxGKIITG7EpQZa/NqVdk23eZbx33prybhkJrQSGIT2e0m13Z8LrU4nbJuNzR7TfuB0ci65b4l5zavtDImQ=="
     }
   },
-  "notes": "# vMLX 1.6.71\n\nvMLX 1.6.71 fixes the prefill throughput counter.\n\n- Prefill tok/s now uses engine-measured model prefill and prompt-state preparation time, rather than uncached tokens divided by time to first token. Queueing, input preprocessing and cache restoration are excluded; TTFT stays separate.\n- Preserve measured rates through local Chat Completions, Responses and tool continuations. Historical estimates and engines without a timing receipt do not display a fabricated rate.\n- Retains the SSD prefix/refault fixes from 1.6.70. No speculative-decoding or kernel defaults changed.\n\nValidated with connected Qwen 27B reasoning, tools, image/video, history and SSD reuse, plus GLM JANGH native reasoning efforts and raw Chat tool/media continuations.\n\nKnown limitation: video perception remains imperfect. Qwen Flash-Next and GLM JANGH can describe nonexistent overlapping/transition text; a GLM Max-effort UI video turn repeated that interpretation and was stopped. Correct tool-derived arithmetic does not establish exact video understanding. This update does not resolve those model-quality failures.\n\nDownloads: Tahoe uses native macOS 26 wheels; Sequoia is the compatibility build for macOS 14.5 and later."
+  "notes": "# vMLX 1.6.72\n\nNaive N0.5 and GLM 5.3 Flash runtime and caching update.\n\n- Naive N0.5: native reasoning/tool templates, JANGH loading, faster decode overlap, corrected output-memory accounting, and exact rotating-state SSD restoration.\n- GLM 5.3 Flash: preserve native FP32 parameters; reuse MLA/DSA blocks with KDA checkpoints through tool and media turns; preserve sampled video frames by default with supported sampling and visual-token controls.\n- API and chat: preserve tool arguments and reasoning history, retain logprob metadata for hidden parser markers, clean up canceled streams, and expose backend cache/prefill metrics through Ollama.\n- Translate the measured-prefill counter consistently across supported UI languages.\n\nExperimental kernel options remain opt-in. Performance depends on model, quantization, context and workload. This release does not claim universal MTP/prose speedups or elimination of model-generated arithmetic and scene-timing errors."
 }

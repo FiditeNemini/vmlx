@@ -255,3 +255,59 @@ async def test_real_progress_refills_the_ambiguity_budget():
         )
     )
     assert items == ["done"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [StopAsyncIteration, RuntimeError])
+async def test_close_after_heartbeat_retrieves_completed_pending_failure(failure):
+    import gc
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    unhandled = []
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    ready = asyncio.Event()
+    finished = asyncio.Event()
+
+    class Iterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                await ready.wait()
+                raise failure()
+            finally:
+                finished.set()
+
+    stream = _stream_with_keepalive(Iterator(), interval=0.001)
+    try:
+        assert await anext(stream) is None
+        ready.set()
+        await finished.wait()
+        # Consumer disconnects while suspended at its heartbeat; the producer
+        # has ended, so merely cancelling an unfinished task cannot clean up.
+        await stream.aclose()
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not unhandled
+    finally:
+        await stream.aclose()
+        loop.set_exception_handler(previous)
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_pending_generator_cleanup():
+    cleaned = asyncio.Event()
+
+    async def source():
+        try:
+            await asyncio.Event().wait()
+            yield 'unreachable'
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    stream = _stream_with_keepalive(source(), interval=0.001)
+    assert await anext(stream) is None
+    await stream.aclose()
+    assert cleaned.is_set()

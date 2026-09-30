@@ -25410,6 +25410,10 @@ async def _stream_with_keepalive(
     finally:
         if not pending.done():
             pending.cancel()
+        # A disconnect may arrive while a heartbeat is yielded, after the
+        # producer already ended. Retrieve completed exceptions too, and wait
+        # for cancellation cleanup before abandoning the owned next-item task.
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 async def _terminal_finish_guard(

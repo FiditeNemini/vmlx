@@ -4069,7 +4069,7 @@ describe('JIT Toggle', () => {
         expect(enLocale).toContain("MiniMax-M3's retained RAM tier is disabled")
         expect(form).toContain("t('sessions.config.m3SsdOnlyNote')")
         expect(enLocale).toContain('MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets')
-        expect(form).toContain('architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked')
+        expect(form).toContain('architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !nativeOmniStage1 && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked')
         expect(enLocale).toContain('Enable Block Disk Cache for persistent typed MSA prefix reuse')
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}')

@@ -18239,6 +18239,7 @@ class TestStreamUsagePropagatesCacheDetail:
             def lookup(self, _key):
                 return SimpleNamespace(
                     family_name="minimax_m3",
+                    architecture_hints={"native_thinking_modes": ["enabled", "disabled", "adaptive"]},
                     think_in_template=False,
                     reasoning_parser="minimax_m3",
                     tool_parser="minimax_m3",
@@ -18361,6 +18362,7 @@ class TestStreamUsagePropagatesCacheDetail:
             def lookup(self, _key):
                 return SimpleNamespace(
                     family_name="minimax_m3",
+                    architecture_hints={"native_thinking_modes": ["enabled", "disabled", "adaptive"]},
                     think_in_template=False,
                     reasoning_parser="minimax_m3",
                     tool_parser="minimax_m3",
@@ -18385,7 +18387,7 @@ class TestStreamUsagePropagatesCacheDetail:
                 )
             ],
             stream=True,
-            enable_thinking=True,
+            enable_thinking=None,
             max_thinking_tokens=120,
             chat_template_kwargs={"thinking_mode": "adaptive"},
             stream_options=StreamOptions(include_usage=True),

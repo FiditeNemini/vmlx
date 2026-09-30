@@ -932,11 +932,13 @@ class TestJangDetection:
         import mlx.core as mx
         from vmlx_engine.utils.jang_loader import _apply_large_expert_bfloat16_compute
 
-        class _Model:
-            dtype = None
+        import mlx.nn as nn
 
-            def set_dtype(self, dtype):
-                self.dtype = dtype
+        class _Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = mx.ones((2, 2), dtype=mx.float16)
+                self.packed = mx.array([1, 2], dtype=mx.uint32)
 
         model = _Model()
 
@@ -952,7 +954,9 @@ class TestJangDetection:
                 },
             },
         ) is True
-        assert model.dtype == mx.bfloat16
+        assert model.weight.dtype == mx.bfloat16
+        assert model.packed.dtype == mx.uint32
+        assert model.packed.tolist() == [1, 2]
 
     def test_jangtq_fast_paths_apply_large_expert_bfloat16_before_return(self):
         source = Path("vmlx_engine/utils/jang_loader.py").read_text()

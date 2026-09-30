@@ -121,3 +121,107 @@ def test_decode_step_uses_the_same_normalizing_helper_as_prefill():
     assert source.count("_sample_mllm_prefill_logits(") == 3
     assert "sampled = shared_sampler(logits)" not in source
     assert "req_sampler(logits[i:i+1])" not in source
+
+
+def _pending_decode_generator(requests, logits):
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "glm5_next"
+    generator._decode_trace = False
+    generator.language_model = lambda tokens, **kwargs: mx.array(logits)[:, None, :]
+    generator.active_batch = SimpleNamespace(requests=requests)
+    return generator
+
+
+def _pending_decode_request(**kwargs):
+    from vmlx_engine.mllm_batch_generator import MLLMBatchRequest
+
+    request = MLLMBatchRequest(
+        uid=0, request_id="pending", prompt="", temperature=0.0, top_p=1.0,
+        **kwargs,
+    )
+    request._original_token_ids = [0]
+    return request
+
+
+def test_decode_repetition_penalty_includes_consumed_pending_token():
+    request = _pending_decode_request(repetition_penalty=2.0)
+    generator = _pending_decode_generator([request], [[1.0, 3.0, 4.0]])
+
+    token, _ = generator._step(mx.array([[2]]), [])
+    mx.eval(token)
+
+    # Token 2 is already in the model context, although _next has not emitted
+    # it into output_tokens yet. Its score must be 4/2, so token 1 wins.
+    assert int(token.item()) == 1
+    assert request.output_tokens == []
+    assert not hasattr(request, "_sampler_pending_token_ids")
+    # A subsequent non-decode caller must not inherit the pending token.
+    token, _ = _sample_mllm_prefill_logits(
+        mx.array([[1.0, 3.0, 4.0]]), request._cached_sampler
+    )
+    mx.eval(token)
+    assert int(token.item()) == 2
+
+
+def test_decode_frequency_penalty_counts_identical_pending_token_again():
+    request = _pending_decode_request(frequency_penalty=1.0)
+    request.output_tokens = [2]
+    generator = _pending_decode_generator([request], [[0.0, 2.5, 4.0]])
+
+    token, _ = generator._step(mx.array([[2]]), [])
+    mx.eval(token)
+
+    # The last emitted token and the pending token both happen to be 2.
+    # Deduplicating them leaves score 3 and picks the wrong next token.
+    assert int(token.item()) == 1
+    assert request.output_tokens == [2]
+
+
+def test_decode_pending_penalty_context_is_per_request():
+    requests = [_pending_decode_request(repetition_penalty=2.0) for _ in range(2)]
+    generator = _pending_decode_generator(requests, [[1.0, 3.0, 4.0]] * 2)
+
+    tokens, _ = generator._step(mx.array([[2], [1]]), [])
+    mx.eval(tokens)
+
+    assert tokens.tolist() == [1, 2]
+    assert all(not hasattr(r, "_sampler_pending_token_ids") for r in requests)
+
+
+def test_decode_pending_context_is_cleared_when_sampling_raises(monkeypatch):
+    request = _pending_decode_request(repetition_penalty=2.0)
+    generator = _pending_decode_generator([request], [[1.0, 3.0, 4.0]])
+
+    def fail(_request):
+        raise RuntimeError("sampling failed")
+
+    monkeypatch.setattr(generator, "_make_request_sampler", fail)
+    with pytest.raises(RuntimeError, match="sampling failed"):
+        generator._step(mx.array([[2]]), [])
+    assert not hasattr(request, "_sampler_pending_token_ids")
+    assert request.output_tokens == []
+
+
+@pytest.mark.parametrize("control", ["frequency_penalty", "presence_penalty", "logit_bias"])
+def test_decode_token_controls_do_not_share_the_first_request_history(control):
+    options = [{control: 1.0}, {control: 1.0}]
+    if control == "logit_bias":
+        options = [{"logit_bias": {"2": -2.0}}, {"logit_bias": {"1": -2.0}}]
+    requests = [_pending_decode_request(**option) for option in options]
+    generator = _pending_decode_generator(requests, [[0.0, 2.5, 3.0]] * 2)
+
+    tokens, _ = generator._step(mx.array([[2], [1]]), [])
+    mx.eval(tokens)
+
+    # Each row has its own consumed token and controls. Sharing row zero's
+    # processor penalizes token 2 in BOTH rows, incorrectly returning [1, 1].
+    assert tokens.tolist() == [1, 2]
+    assert all(not hasattr(r, "_sampler_pending_token_ids") for r in requests)
+
+
+def test_decode_second_request_token_control_is_not_dropped():
+    requests = [_pending_decode_request(), _pending_decode_request(frequency_penalty=1.0)]
+    generator = _pending_decode_generator(requests, [[0.0, 2.5, 3.0]] * 2)
+    tokens, _ = generator._step(mx.array([[2], [2]]), [])
+    mx.eval(tokens)
+    assert tokens.tolist() == [2, 1]

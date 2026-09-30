@@ -1664,6 +1664,15 @@ def _batch_shares_sampler_params(requests: List[Any]) -> bool:
     """Return True when requests can share one request-scoped sampler call."""
     if not requests:
         return False
+    # These processors capture a request's history or bias map. Even equal
+    # penalty strengths cannot share the first request's consumed-token state.
+    if any(
+        getattr(req, "frequency_penalty", 0.0) not in (None, 0.0)
+        or getattr(req, "presence_penalty", 0.0) not in (None, 0.0)
+        or bool(getattr(req, "logit_bias", None))
+        for req in requests
+    ):
+        return False
     first_req = requests[0]
     # A seeded sampler owns mutable request-local PRNG state.  Sharing the first
     # request's sampler across a batch would make every other request consume
@@ -17236,7 +17245,11 @@ class MLLMBatchGenerator:
                 # Build full token sequence (prompt + generated) so penalty
                 # applies to already-generated tokens, not just the prompt,
                 # and MiMo can distinguish first-token EOS from natural stop.
-                all_tokens = mx.array(_prompt_list + _req.output_tokens)
+                # Productive AR samples the next token before emitting the
+                # token just consumed by the model. Include that pending input
+                # exactly once, even when it equals the previous output token.
+                pending_tokens = list(getattr(_req, "_sampler_pending_token_ids", ()))
+                all_tokens = mx.array(_prompt_list + _req.output_tokens + pending_tokens)
                 processed = logits
                 for proc in logits_processors:
                     processed = proc(all_tokens, processed)
@@ -18923,20 +18936,29 @@ class MLLMBatchGenerator:
             for req, token_id in zip(batch.requests, current_input_tokens):
                 try:
                     req._sampler_current_input_token = int(token_id)
+                    req._sampler_pending_token_ids = (int(token_id),)
                 except Exception:
                     pass
-            if _batch_shares_sampler_params(batch.requests):
-                shared_sampler = self._make_request_sampler(batch.requests[0])
-                sampled, _ = _sample_mllm_prefill_logits(logits, shared_sampler)
-            else:
-                tokens = []
-                for i, req in enumerate(batch.requests):
-                    req_sampler = self._make_request_sampler(req)
-                    token, _ = _sample_mllm_prefill_logits(
-                        logits[i:i+1], req_sampler
-                    )
-                    tokens.append(token)
-                sampled = mx.concatenate(tokens, axis=0)
+            try:
+                if _batch_shares_sampler_params(batch.requests):
+                    shared_sampler = self._make_request_sampler(batch.requests[0])
+                    sampled, _ = _sample_mllm_prefill_logits(logits, shared_sampler)
+                else:
+                    tokens = []
+                    for i, req in enumerate(batch.requests):
+                        req_sampler = self._make_request_sampler(req)
+                        token, _ = _sample_mllm_prefill_logits(
+                            logits[i:i+1], req_sampler
+                        )
+                        tokens.append(token)
+                    sampled = mx.concatenate(tokens, axis=0)
+            finally:
+                # Cached samplers are also used by prefill/MTP owners. Do not
+                # leak a decode-only pending token into those calls.
+                for req in batch.requests:
+                    if hasattr(req, "_sampler_pending_token_ids"):
+                        del req._sampler_pending_token_ids
+
         else:
             sampled, _ = _sample_mllm_prefill_logits(logits, self.sampler)
 

@@ -65,15 +65,18 @@ DEFAULT_VIDEO_TOKEN_PIXELS = VIDEO_TOKEN_IMAGE_FACTOR * VIDEO_TOKEN_IMAGE_FACTOR
 
 def video_token_pixels(processor: Any = None) -> int:
     """Pixels of the sampled clip that one merged video token covers:
-    ``temporal_patch_size * (patch_size * merge_size) ** 2`` from the loaded
-    video processor, else the legacy 28x28."""
+    ``sampled_frames_per_group * (patch_size * merge_size) ** 2`` from the
+    loaded video processor (normally temporal_patch_size). A processor that
+    repeats each sampled moment has only one source frame per group, despite
+    keeping the checkpoint's temporal patch width. Else the legacy 28x28."""
     vp = getattr(processor, "video_processor", None) if processor is not None else None
     if vp is None:
         vp = processor
     try:
         patch = int(getattr(vp, "patch_size", 0) or 0)
         merge = int(getattr(vp, "merge_size", 0) or 0)
-        temporal = int(getattr(vp, "temporal_patch_size", 0) or 0)
+        temporal = int(getattr(vp, "sampled_frames_per_group",
+                               getattr(vp, "temporal_patch_size", 0)) or 0)
     except (TypeError, ValueError):
         return DEFAULT_VIDEO_TOKEN_PIXELS
     if patch > 0 and merge > 0 and temporal > 0:
@@ -703,7 +706,10 @@ def clip_budget_factor(processor: Any = None) -> tuple[int, int]:
     if vp is None:
         vp = processor
     try:
-        patch = int(getattr(vp, "patch_size", 0) or 0); merge = int(getattr(vp, "merge_size", 0) or 0); temporal = int(getattr(vp, "temporal_patch_size", 0) or 0)
+        patch = int(getattr(vp, "patch_size", 0) or 0)
+        merge = int(getattr(vp, "merge_size", 0) or 0)
+        temporal = int(getattr(vp, "sampled_frames_per_group",
+                               getattr(vp, "temporal_patch_size", 0)) or 0)
     except (TypeError, ValueError):
         return VIDEO_TOKEN_IMAGE_FACTOR, 2
     if patch > 0 and merge > 0 and temporal > 0:

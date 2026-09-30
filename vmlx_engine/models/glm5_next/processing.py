@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -255,10 +256,10 @@ class Glm5NextProcessor(GlmOcrProcessor):
                     rate = float(rate if rate is not None else self.video_processor.fps)
                     if not math.isfinite(rate) or rate <= 0:
                         raise ValueError("GLM sampled video fps must be finite and positive")
-                    times = [j / rate for j in range(grid_t * self.video_processor.temporal_patch_size)]
+                    times = [j / rate for j in range(grid_t * self.video_processor.sampled_frames_per_group)]
                 if not times or any(not math.isfinite(float(t)) or float(t) < 0 for t in times):
                     raise ValueError("GLM video timestamps must be finite and nonnegative")
-                selected = times[::self.video_processor.temporal_patch_size][:grid_t]
+                selected = times[::self.video_processor.sampled_frames_per_group][:grid_t]
                 selected += [selected[-1]] * (grid_t - len(selected))
                 for stamp in selected:
                     expanded += f"<|begin_of_image|>{self.image_token * count}<|end_of_image|>{stamp:.1f} seconds"
@@ -302,6 +303,10 @@ class Glm5NextProcessor(GlmOcrProcessor):
         if isinstance(video_config, dict):
             video_config = dict(video_config)
             video_config.pop("video_processor_type", None)
+            # Explicit, experimental serving adaptation. Do not rewrite the
+            # bundle or silently replace its native temporal-pair semantics.
+            if mode := os.environ.get("VMLX_GLM5_VIDEO_TEMPORAL_MODE"):
+                video_config["temporal_mode"] = mode
             video_processor = Glm5NextVideoProcessor(**video_config)
         return cls(image_processor=image_processor, tokenizer=tokenizer, video_processor=video_processor)
 
@@ -311,17 +316,28 @@ class Glm5NextVideoProcessor(Glm5NextImageProcessor):
 
     Temporal layout and timestamp contract follow Hugging Face Transformers
     glm5_next at 5474a55e920f358d8382f3ecd3377edca979baa1 (Apache-2.0).
-    No torchvision dependency or image-per-frame temporal approximation.
+    Native pairs remain the default. The opt-in preserve_frames adaptation
+    repeats each sampled moment within its temporal patch, increasing visual
+    groups instead of mixing distinct moments across a sparse scene cut.
     """
 
     model_input_names = ["pixel_values_videos", "video_grid_thw"]
 
-    def __init__(self, max_image_tokens=240000, fps=2, patch_expand_factor=1, **kwargs):
+    def __init__(self, max_image_tokens=240000, fps=2, patch_expand_factor=1,
+                 temporal_mode="native_pairs", **kwargs):
         super().__init__(max_image_tokens=max_image_tokens, **kwargs)
+        if temporal_mode not in ("native_pairs", "preserve_frames"):
+            raise ValueError("GLM video temporal_mode must be native_pairs or preserve_frames")
+        self.temporal_mode = temporal_mode
         self.fps = float(fps)
         self.patch_expand_factor = int(patch_expand_factor)
         if min(self.patch_size, self.temporal_patch_size, self.merge_size, self.patch_expand_factor) <= 0:
             raise ValueError("GLM video patch geometry must be positive")
+
+    @property
+    def sampled_frames_per_group(self):
+        """Source moments represented by one temporal group, for budgets/times."""
+        return 1 if self.temporal_mode == "preserve_frames" else self.temporal_patch_size
 
     def __call__(self, videos, **kwargs):
         # Decoded frames have already been sampled/resized by the request's
@@ -341,6 +357,12 @@ class Glm5NextVideoProcessor(Glm5NextImageProcessor):
             height, width = frames[0].shape[:2]
             if any(frame.shape != frames[0].shape for frame in frames):
                 raise ValueError("GLM frames in one clip must share their dimensions")
+            sampled_count = len(frames)
+            if self.temporal_mode == "preserve_frames":
+                minimum_tokens = sampled_count * self.patch_expand_factor**2
+                if minimum_tokens > self.max_image_tokens:
+                    raise ValueError("GLM video token budget cannot preserve every sampled frame")
+                frames = [frame for frame in frames for _ in range(self.temporal_patch_size)]
             factor = self.patch_size * self.merge_size * self.patch_expand_factor
             target_h, target_w = _aligned_canvas(
                 height, width, factor=factor, temporal_factor=self.temporal_patch_size,
@@ -373,8 +395,8 @@ class Glm5NextVideoProcessor(Glm5NextImageProcessor):
                 grid_t * grid_h * grid_w, 3 * self.temporal_patch_size * self.patch_size**2)
             outputs.append(patches)
             grids.append([grid_t, grid_h, grid_w])
-            _LOG.info("GLM video processed: frames=%d padded=%d input=%dx%d canvas=%dx%d grid=%dx%dx%d tokens=%d",
-                      len(frames), len(pixels), height, width, target_h, target_w,
+            _LOG.info("GLM video processed: mode=%s frames=%d encoded=%d padded=%d input=%dx%d canvas=%dx%d grid=%dx%dx%d tokens=%d",
+                      self.temporal_mode, sampled_count, len(frames), len(pixels), height, width, target_h, target_w,
                       grid_t, grid_h, grid_w, grid_t * grid_h * grid_w // self.merge_size**2)
         return {"pixel_values_videos": np.concatenate(outputs, axis=0),
                 "video_grid_thw": np.asarray(grids, dtype=np.int64)}

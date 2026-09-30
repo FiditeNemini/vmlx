@@ -1956,12 +1956,13 @@ export function registerChatHandlers(
             { ...(m as any), content: msgContent },
             useResponsesApi,
             {
-              // A current explicit no-tool instruction owns authorization for
-              // this turn. Preserve visible history and real call/result
-              // records, but do not feed the model older private reasoning
-              // that may discuss a now-forbidden tool contract as if it were
-              // still current system authority.
-              includeReasoning: !currentPromptAlreadyForbidsTools,
+              // Naive's native template retains prior reasoning. A no-tool
+              // directive changes this turn's authorization (tool_choice=none),
+              // not its historical assistant tokens. Keep the legacy replay
+              // policy for other families.
+              includeReasoning:
+                chatDetectedFamily === "naive_n05_flash" ||
+                !currentPromptAlreadyForbidsTools,
             },
           );
           if (replay.length > 0) {

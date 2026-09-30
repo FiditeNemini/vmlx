@@ -304,17 +304,25 @@ def _prepare_runtime_weight_quantization(
     return config, bits, group_size
 
 
-def _set_jang_compute_dtype(model: Any, dtype: Any) -> None:
-    """Cast compute parameters without rounding typed JANGH scale payloads."""
+def _set_jang_compute_dtype(
+    model: Any, dtype: Any, config: dict | None = None
+) -> None:
+    """Cast compute weights while preserving format and native FP32 state parameters."""
     import mlx.nn as nn
     from vmlx_engine.jangh.switch import TQSwitchLinear
 
+    glm_fp32 = (
+        {"A_log", "dt_bias", "e_score_correction_bias", "hc_base", "hc_scale"}
+        if _config_model_types(config).intersection({"glm5_next", "glm5_next_text"})
+        else set()
+    )
     model.apply(
         lambda value: value.astype(dtype)
         if mx.issubdtype(value.dtype, mx.floating) else value,
         filter_fn=lambda module, key, value: (
             nn.Module.valid_parameter_filter(module, key, value)
             and not (isinstance(module, TQSwitchLinear) and key == "tq2_scales")
+            and not (key in glm_fp32 and value.dtype == mx.float32)
         ),
     )
 
@@ -359,7 +367,7 @@ def _apply_large_expert_bfloat16_compute(
             or is_mla
             or is_mup_residual
         ):
-            _set_jang_compute_dtype(model, mx.bfloat16)
+            _set_jang_compute_dtype(model, mx.bfloat16, model_cfg)
             if is_mup_residual:
                 reason = "muP-scaled residual (falcon_h1)"
             else:
@@ -5068,7 +5076,7 @@ def _load_jang_v2_vlm(
     _text_mt = _text_cfg.get("model_type", _model_cfg.get("model_type", ""))
     _is_mla = (_text_cfg.get("kv_lora_rank") or 0) > 0
     if (_n_experts >= 512 and _hidden >= 4096) or _text_mt == "mistral4" or _is_mla:
-        _set_jang_compute_dtype(model, mx.bfloat16)
+        _set_jang_compute_dtype(model, mx.bfloat16, _model_cfg)
         _reason = "MLA" if _is_mla else f"{_n_experts} experts"
         logger.info(f"  bfloat16 enabled: {_reason}, hidden={_hidden}")
 

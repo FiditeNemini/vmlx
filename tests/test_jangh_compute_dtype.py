@@ -36,3 +36,26 @@ def test_mla_compute_cast_preserves_jangh_payload_and_kernels(rows):
     actual = model.experts.routed(x, indices, scores)
     mx.eval(actual)
     assert mx.array_equal(actual, expected).item()
+
+
+@pytest.mark.parametrize("family", ["glm5_next", "glm5_next_text", "other_mla"])
+def test_compute_cast_preserves_glm_native_fp32_parameters(family):
+    model = nn.Module()
+    model.layer = nn.Module()
+    names = ("A_log", "dt_bias", "e_score_correction_bias", "hc_base", "hc_scale")
+    original = mx.array([0.123456789, 1.00390625], dtype=mx.float32)
+    for name in names:
+        setattr(model.layer, name, original)
+    model.layer.weight = original
+    assert _apply_large_expert_bfloat16_compute(
+        model, Path("unused"),
+        {"text_config": {"model_type": family, "kv_lora_rank": 64}},
+    )
+    assert model.layer.weight.dtype == mx.bfloat16
+    for name in names:
+        value = getattr(model.layer, name)
+        if family.startswith("glm5_next"):
+            assert value.dtype == mx.float32
+            assert mx.array_equal(value, original).item()
+        else:
+            assert value.dtype == mx.bfloat16

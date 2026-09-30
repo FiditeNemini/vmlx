@@ -1271,7 +1271,7 @@ class TestServerSamplingResolution:
         monkeypatch.setattr(
             omni_multimodal,
             "_extract_omni_video_frames",
-            lambda path, scratch: [frame],
+            lambda path, scratch, *, video_controls=None: [frame],
         )
 
         text, images, audio, native_video = omni_multimodal._extract_parts(

@@ -625,9 +625,11 @@ def test_cli_minimax_m3_vl_autoroutes_to_text_msa_runtime() -> None:
     utils = (ROOT / "vmlx_engine" / "api" / "utils.py").read_text(encoding="utf-8")
 
     assert '_m3_mt == "minimax_m3_vl"' in source
-    assert 'os.environ["VMLX_M3_VL"] = "1"' in source
+    assert "_m3_vl_active = configure_m3_vl_environment(" in source
+    assert "has_vision=_m3_has_vl" in source
+    assert 'force_text_only=bool(getattr(args, "force_text_only", False))' in source
     assert "ignoring --is-mllm" in source
-    assert source.index('os.environ["VMLX_M3_VL"] = "1"') < source.index(
+    assert source.index("_m3_vl_active = configure_m3_vl_environment(") < source.index(
         "MiniMax-M3 AUTODETECTED"
     )
     assert "MiniMax-M3 overrides force_mllm" in utils

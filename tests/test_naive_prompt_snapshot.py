@@ -557,3 +557,58 @@ def test_terminal_ring_preserves_physical_state_and_next_logits(numpy_path):
         actual = model(mx.array([[token]]), cache=restored)
         mx.eval(expected, actual)
         assert bool(mx.array_equal(expected, actual))
+
+def test_native_mixed_state_size_eviction_and_republication(tmp_path):
+    """Real aggregate budget eviction cannot leave a restorable stale chain."""
+    from vmlx_engine.scheduler import Scheduler
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    from vmlx_engine.global_disk_cache_budget import get_global_disk_cache_budget
+
+    model = make_model()
+    cache = model.make_cache()
+    tokens = list(range(1, 12))
+    for part in (tokens[:4], tokens[4:8], tokens[8:10], tokens[10:]):
+        mx.eval(model(mx.array([part]), cache=cache))
+    extractor = Scheduler.__new__(Scheduler)
+    payload = extractor._extract_cache_states(cache)
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    manager = PagedCacheManager(block_size=4, max_blocks=32, disk_store=store, disk_only=True)
+    prefix = BlockAwarePrefixCache(model=model, paged_cache_manager=manager)
+    pressure = None
+    try:
+        def publish(request_id):
+            table = prefix.store_cache(request_id, tokens, payload)
+            assert table is not None
+            hashes = [manager.allocated_blocks[i].block_hash for i in table.block_ids]
+            assert store.wait_for_blocks(hashes, timeout=5.0) == set(hashes)
+            prefix.release_cache(request_id)
+
+        publish('before-pressure')
+        pressure = get_global_disk_cache_budget(store.global_cache_root, 1)
+        result = pressure.enforce(force=True)
+        assert result.evicted_entries > 0
+        table, remaining = prefix.fetch_cache('evicted-read', tokens + [12])
+        assert table is None or prefix.reconstruct_cache(table) is None
+        prefix.release_cache('evicted-read')
+        pressure.close()
+        pressure = None
+        publish('after-pressure')
+        table, remaining = prefix.fetch_cache('recovered-read', tokens + [12])
+        assert table is not None and table.num_tokens == len(tokens)
+        assert remaining == [12]
+        restored = prefix.reconstruct_cache(table)
+        assert restored is not None
+        for actual, expected in zip(leaves(restored), leaves(cache)):
+            assert actual.meta_state == expected.meta_state
+            assert all(bool(mx.array_equal(a, b)) for a, b in zip(actual.state, expected.state))
+        expected = model(mx.array([[12]]), cache=cache)
+        actual = model(mx.array([[12]]), cache=restored)
+        mx.eval(expected, actual)
+        assert bool(mx.array_equal(expected, actual))
+        prefix.release_cache('recovered-read')
+    finally:
+        if pressure is not None:
+            pressure.close()
+        store.shutdown()

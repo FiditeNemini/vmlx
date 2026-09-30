@@ -224,6 +224,60 @@ def estimate_glm5_cache_memory_from_config(
     return None
 
 
+
+@dataclass(frozen=True)
+class NaiveDecodeCacheMemoryEstimate:
+    """Decode growth only; prefill's chunk-sized SWA/score workspace is separate."""
+
+    growth_bytes_per_token: int
+    output_reserve_bytes: int
+    dsa_layers: int
+    swa_layers: int
+
+
+def estimate_naive_decode_cache_memory_from_config(
+    config,
+) -> Optional[NaiveDecodeCacheMemoryEstimate]:
+    """Native Naive output projection without changing prompt admission.
+
+    DSA retains unequal-width K/V plus one FP32 index key per token (not
+    index_n_heads keys). SWA stops growing at its window. Reserve its entire
+    ring and a full 256-row allocation step for both growing caches, even if
+    some of that storage is already included in the measured active bytes.
+    Unknown geometry keeps the existing conservative generic projection.
+    """
+    text = _cfg_get(config, "text_config")
+    for cfg in ([text, config] if text is not None else [config]):
+        if _cfg_get(cfg, "model_type") != "naive_n05_flash":
+            continue
+        pattern = _cfg_get(cfg, "hybrid_layer_pattern")
+        layers = _positive_int(_cfg_get(cfg, "num_hidden_layers"))
+        if (not isinstance(pattern, (list, tuple)) or len(pattern) != layers
+                or not layers or any(p not in (0, 1) for p in pattern)
+                or 0 not in pattern or 1 not in pattern):
+            continue
+        fields = ["num_key_value_heads", "head_dim", "v_head_dim",
+                  "swa_num_key_value_heads", "swa_head_dim", "swa_v_head_dim",
+                  "sliding_window", "index_head_dim"]
+        dims = [_positive_int(_cfg_get(cfg, name)) for name in fields]
+        if not all(dims):
+            continue
+        heads, key, value, swa_heads, swa_key, swa_value, window, index = dims
+        dtype = (_cfg_get(cfg, "torch_dtype") or _cfg_get(cfg, "dtype")
+                 or _cfg_get(cfg, "mlx_dtype"))
+        scalar = max(2, _dtype_scalar_bytes(dtype)) if dtype else 4
+        dsa = pattern.count(0)
+        swa = layers - dsa
+        growth = dsa * (heads * (key + value) * scalar + index * 4)
+        fixed = swa * window * swa_heads * (swa_key + swa_value) * scalar
+        return NaiveDecodeCacheMemoryEstimate(
+            growth_bytes_per_token=growth,
+            output_reserve_bytes=fixed + 256 * growth,
+            dsa_layers=dsa, swa_layers=swa,
+        )
+    return None
+
+
 def _dsv4_config(config):
     """Return the text config when it owns a native DeepSeek-V4 topology."""
 

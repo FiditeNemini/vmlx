@@ -942,6 +942,7 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
     try:
         from vmlx_engine.utils.memory_limits import (
             estimate_glm5_cache_memory_from_config,
+            estimate_naive_decode_cache_memory_from_config,
             estimate_kv_bytes_per_token_from_config,
             metal_resource_limit,
             projected_output_token_cap,
@@ -973,6 +974,21 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
                     glm5_cache.absorbed, glm5_cache.kda_layers,
                     glm5_cache.mla_layers, bytes_per_token, cache_reserve,
                     glm5_cache.dsa_scalar_bytes,
+                )
+        naive_cache = estimate_naive_decode_cache_memory_from_config(config)
+        if naive_cache is not None:
+            bytes_per_token = naive_cache.growth_bytes_per_token
+            cache_reserve = naive_cache.output_reserve_bytes
+            projection_key = (_model_path or model_name, "naive-decode",
+                              bytes_per_token, cache_reserve)
+            if projection_key not in _native_cache_projection_logged:
+                _native_cache_projection_logged.add(projection_key)
+                logger.info(
+                    "Native Naive decode cache projection: dsa_layers=%d swa_layers=%d "
+                    "growth_bytes_per_token=%d reserve_bytes=%d; "
+                    "prefill/workspace/buffer policies unchanged",
+                    naive_cache.dsa_layers, naive_cache.swa_layers,
+                    bytes_per_token, cache_reserve,
                 )
         if bytes_per_token > 0 and max_ws > 0:
             budget_fraction = float(

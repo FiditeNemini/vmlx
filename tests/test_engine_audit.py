@@ -17525,8 +17525,30 @@ class TestStreamUsagePropagatesCacheDetail:
     def test_responses_stream_tracks_cache_detail_alongside_cached(self):
         from pathlib import Path
         source = Path("./vmlx_engine/server.py").read_text()
-        assert "_cached = 0\n    _cache_detail" in source
-        assert '_detail_chunk = getattr(output, "cache_detail", "") or None' in source
+        import ast
+
+        # These counters share a stream scope, but unrelated telemetry may be
+        # initialized between them. Do not require adjacent source lines.
+        tree = ast.parse(source)
+        streams = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and any(
+                isinstance(stmt, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "_cached"
+                        for target in stmt.targets)
+                and isinstance(stmt.value, ast.Constant) and stmt.value.value == 0
+                for stmt in node.body
+            )
+        ]
+        assert len(streams) == 1
+        assert any(
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name) and stmt.target.id == "_cache_detail"
+            and isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+            for stmt in streams[0].body
+        )
+        assert '_detail_chunk = getattr(output, "cache_detail", "") or None' in ast.get_source_segment(source, streams[0])
 
     def test_responses_stream_finish_emits_cache_detail(self):
         from pathlib import Path

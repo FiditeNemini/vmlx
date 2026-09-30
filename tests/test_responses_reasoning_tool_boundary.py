@@ -210,14 +210,19 @@ async def test_responses_tool_finalization_keeps_streamed_content(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire", ["chat", "responses"])
 @pytest.mark.parametrize("split", [False, True])
-async def test_naive_tool_boundary_preserves_reasoning_tail_and_native_separator(monkeypatch, wire, split):
+@pytest.mark.parametrize("output_kind", ["tool", "answer"])
+async def test_naive_tool_boundary_preserves_reasoning_tail_and_native_separator(monkeypatch, wire, split, output_kind):
     import vmlx_engine.server as server
     from vmlx_engine.api.models import ResponsesRequest, ChatCompletionRequest
     from vmlx_engine.engine.base import GenerationOutput
     from vmlx_engine.reasoning.think_xml_parser import ThinkXmlReasoningParser
     import vmlx_engine.model_config_registry as registry
     block = '<tool_call>\n<function=read_file>\n<parameter=path>a.txt</parameter>\n</function>\n</tool_call>'
+    if output_kind == 'answer':
+        block = 'The balance is 33.'
     chunks = ['<think>\nRead', ' the file.\n</think>\n\n' + block]
+    if output_kind == 'answer':
+        chunks = ['<think>\nRead', ' the file.\n</think>\n\n', block]
     if split:
         chunks = ['<think>\nRead the file.\n', '</think>', '\n\n', block]
     class Engine:
@@ -256,11 +261,11 @@ async def test_naive_tool_boundary_preserves_reasoning_tail_and_native_separator
         content=''.join(e.get('delta','') for e in events if e.get('type')=='response.output_text.delta')
         terminal=next(e['response'] for e in events if e.get('type')=='response.completed')
         history=server._responses_output_to_assistant_messages(terminal['output'])
-        assert history[0]['content']=='\n\n'
+        assert history[0]['content']=='\n\n' + (block if output_kind == 'answer' else '')
     else:
         ds=[c.get('delta',{}) for e in events for c in e.get('choices',[])]
         reasoning=''.join(d.get('reasoning_content') or d.get('reasoning') or '' for d in ds)
         content=''.join(d.get('content') or '' for d in ds)
-        assert any(d.get('tool_calls') for d in ds)
+        assert any(d.get('tool_calls') for d in ds) == (output_kind == 'tool')
     assert reasoning=='\nRead the file.\n'
-    assert content=='\n\n'
+    assert content=='\n\n' + (block if output_kind == 'answer' else '')

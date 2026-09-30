@@ -26569,6 +26569,7 @@ async def stream_chat_completion(
                 # assistant message before the structured tool_calls delta.
                 if (
                     tool_call_active
+                    and not getattr(request_parser, "preserve_native_whitespace", False)
                     and not content_was_emitted
                     and emit_content
                     and not emit_content.strip()

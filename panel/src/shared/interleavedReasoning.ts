@@ -16,7 +16,16 @@ export function appendReasoningDelta(
 
 export function markReasoningToolBoundary(
   segments: ReasoningSegments,
+  completedToolIterations?: number,
 ): ReasoningSegments {
+  if (completedToolIterations !== undefined) {
+    // Empty reasoning is still a real assistant pass. Keep its slot so replay
+    // cannot move final reasoning ahead of an earlier tool call. An explicit
+    // iteration count also makes repeated status updates idempotent.
+    const next = [...segments]
+    while (next.length <= completedToolIterations) next.push('')
+    return next
+  }
   if (segments.length === 0) return segments
   const next = [...segments]
   const last = next[next.length - 1]

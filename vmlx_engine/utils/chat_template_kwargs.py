@@ -67,12 +67,14 @@ def build_chat_template_kwargs(
     ):
         kwargs["thinking"] = bool(kwargs["enable_thinking"])
 
-    # GLM-style templates define ``clear_thinking`` and default it to FALSE,
-    # which replays every prior assistant turn's full reasoning into the
-    # rendered prompt while keeping the current tool-chain's reasoning either
-    # way. Serve the flat-history contract by default; the setdefault runs
-    # after the ``extra`` merge, so an explicit caller value always wins.
-    if model_type and model_type.lower().startswith("glm5"):
+    # GLM-5.3 owns its native history default. Forcing clear_thinking=True
+    # rewrites prior turns on every new user message and invalidates their
+    # otherwise reusable causal cache prefix. Explicit caller values survive.
+    if (
+        model_type
+        and model_type.lower().startswith("glm5")
+        and model_type.lower() not in {"glm5_next", "glm5_next_text"}
+    ):
         kwargs.setdefault("clear_thinking", True)
 
     return kwargs

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { appendReasoningDelta, markReasoningToolBoundary } from '../src/shared/interleavedReasoning'
 import { replayPersistedAssistantHistory } from '../src/shared/toolHistoryReplay'
 import { REASONING_WITHOUT_ANSWER_NOTICE } from '../src/shared/responsesStreamRecovery'
 
@@ -52,6 +53,23 @@ describe('persisted assistant tool-history replay', () => {
       { tool_call_id: 'call_1', content: 'Size: 5.2 KB' },
     ]),
   }
+
+  it('keeps zero-reasoning tool passes ahead of final reasoning on both wires', () => {
+    let segments = markReasoningToolBoundary([], 1)
+    segments = markReasoningToolBoundary(segments, 1)
+    segments = appendReasoningDelta(segments, 'Reason after real result.')
+    expect(segments).toEqual(['', 'Reason after real result.'])
+    const saved = { ...row, reasoningSegmentsJson: JSON.stringify(segments) }
+    const responses = replayPersistedAssistantHistory(saved, true)
+    expect(responses.map(item => item.type)).toEqual([
+      'function_call', 'function_call_output', 'reasoning', 'output_text',
+    ])
+    const chat = replayPersistedAssistantHistory(saved, false)
+    expect(chat[0].reasoning_content).toBeUndefined()
+    expect(chat[2].reasoning_content).toBe('Reason after real result.')
+    expect(markReasoningToolBoundary(markReasoningToolBoundary([], 1), 2))
+      .toEqual(['', '', ''])
+  })
 
   it('replays Responses reasoning around the real call and result', () => {
     expect(replayPersistedAssistantHistory(row, true)).toEqual([

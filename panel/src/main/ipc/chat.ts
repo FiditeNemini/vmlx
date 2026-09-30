@@ -4436,7 +4436,7 @@ export function registerChatHandlers(
             }
             // chat:reasoningDone emitted above before resetting for the next segment.
             isReasoning = false; // Reset reasoning state for new iteration
-            reasoningSegments = markReasoningToolBoundary(reasoningSegments);
+            reasoningSegments = markReasoningToolBoundary(reasoningSegments, toolIteration);
             reasoningContent = ""; // Start a fresh reasoning segment for the next iteration
             // (thinking indicator removed)
             if (finishAfterNativeToolResult) {

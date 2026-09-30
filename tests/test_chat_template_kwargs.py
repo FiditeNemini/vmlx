@@ -37,38 +37,21 @@ def test_processor_path_can_skip_thinking_alias():
     assert "thinking" not in kwargs
 
 
-def test_glm5_defaults_clear_thinking_true_with_caller_override():
-    """GLM templates default clear_thinking=false, which replays every prior
-    turn's reasoning into the prompt (measured live: ~3k tokens/turn until the
-    prefill admission guard rejected the conversation). The kwargs layer pins
-    the flat-history default for glm5 families only; an explicit caller value
-    and non-GLM families are untouched."""
-    from vmlx_engine.utils.chat_template_kwargs import build_chat_template_kwargs
-
-    glm = build_chat_template_kwargs(
-        enable_thinking=None, model_type="glm5_next"
-    )
-    assert glm["clear_thinking"] is True
-
-    glm_text = build_chat_template_kwargs(
-        enable_thinking=None, model_type="glm5_next_text"
-    )
-    assert glm_text["clear_thinking"] is True
-
-    caller = build_chat_template_kwargs(
-        enable_thinking=None,
-        model_type="glm5_next",
-        extra={"clear_thinking": False},
-    )
-    assert caller["clear_thinking"] is False
-
-    other = build_chat_template_kwargs(
-        enable_thinking=None, model_type="qwen4_exp"
-    )
-    assert "clear_thinking" not in other
-
-    untyped = build_chat_template_kwargs(enable_thinking=None)
-    assert "clear_thinking" not in untyped
+def test_glm53_preserves_native_history_default_and_explicit_override():
+    for family in ("glm5_next", "glm5_next_text"):
+        kwargs = build_chat_template_kwargs(enable_thinking=None, model_type=family)
+        assert "clear_thinking" not in kwargs
+        for choice in (False, True):
+            kwargs = build_chat_template_kwargs(
+                enable_thinking=None, model_type=family,
+                extra={"clear_thinking": choice},
+            )
+            assert kwargs["clear_thinking"] is choice
+    # The unrelated legacy serving policy is unchanged.
+    assert build_chat_template_kwargs(
+        enable_thinking=None, model_type="glm5"
+    )["clear_thinking"] is True
+    assert "clear_thinking" not in build_chat_template_kwargs(enable_thinking=None)
 
 
 def test_model_type_of_reads_dict_and_object_configs():

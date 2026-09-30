@@ -26220,6 +26220,22 @@ async def stream_chat_completion(
                     delta_logprobs,
                     engine.tokenizer,
                 )
+                # Token metadata is independent of display parsing. A reasoning
+                # delimiter or buffered tool token may produce no visible delta;
+                # advancing the cursor and then skipping that chunk loses its
+                # logprobs permanently. Publish metadata once before those paths.
+                if chunk_logprobs:
+                    metadata_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(),
+                            logprobs=chunk_logprobs,
+                        )],
+                    )
+                    yield f"data: {_dump_chat_chunk(metadata_chunk)}\n\n"
+                    chunk_logprobs = None
 
             # Always accumulate full text (needed for both reasoning and tool call parsing)
             accumulated_text += delta_text if delta_text else ""

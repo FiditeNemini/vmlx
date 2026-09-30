@@ -265,18 +265,32 @@ class SingleBatchGenerator:
                 mx.synchronize()
 
     def _can_overlap_decode(self, req: _Request) -> bool:
-        """Overlap only established plain KV state after initial materialization.
+        """Overlap qualified native layouts after initial materialization.
 
         The first step still resolves restored graphs on the concrete worker
-        stream. Custom, rotating, sparse and recurrent caches retain their
-        synchronous path; subclassing KVCache is not proof of that contract.
+        stream. Plain KV and Naive's exact mixed layout are qualified; other
+        custom, sparse and recurrent state retains synchronous evaluation.
         """
-        return (
-            bool(req.output_tokens)
-            and bool(req.cache)
-            and all(type(layer) is mlx_cache.KVCache for layer in req.cache)
-            and not self._needs_affine2_sync(req.cache)
-        )
+        if not req.output_tokens or not req.cache:
+            return False
+        plain_kv = all(type(layer) is mlx_cache.KVCache for layer in req.cache)
+        native_naive = False
+        if getattr(self.model, "model_type", None) == "naive_n05_flash":
+            layers = getattr(self.model, "layers", ())
+            # Admit only the native layout qualified across sparse selection,
+            # ring wrap, SSD refault and terminal/cancel boundaries. Unknown
+            # subclasses or companion state retain synchronous evaluation.
+            native_naive = len(layers) == len(req.cache) and all(
+                (
+                    type(state) is mlx_cache.RotatingKVCache
+                    if layer.is_swa
+                    else type(state) is mlx_cache.CacheList
+                    and len(state.caches) == 2
+                    and all(type(child) is mlx_cache.KVCache for child in state.caches)
+                )
+                for layer, state in zip(layers, req.cache)
+            )
+        return (plain_kv or native_naive) and not self._needs_affine2_sync(req.cache)
 
     def _submit_on_stream(self, *values):
         with self._stream_context():

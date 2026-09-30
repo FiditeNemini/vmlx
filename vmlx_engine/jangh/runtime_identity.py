@@ -8,6 +8,9 @@ from pathlib import Path
 DECODE_ROT = os.environ.get("JANGTQ2_DECODE_ROT", "host").strip().lower()
 PREFILL = os.environ.get("JANGTQ2_PREFILL", "").strip().lower()
 EXPERT_TILES = os.environ.get("JANGH_EXPERT_TILES", "0").strip()
+PREFILL_REDUCE = os.environ.get("JANGH_PREFILL_REDUCE", "0").strip()
+if PREFILL_REDUCE not in {"0", "1"}:
+    raise ValueError("JANGH_PREFILL_REDUCE must be 0 or 1")
 H32_ROWS = os.environ.get("JANGH_H32_ROWS", "0").strip()
 if H32_ROWS not in {"0", "1"}:
     raise ValueError("JANGH_H32_ROWS must be 0 or 1")
@@ -34,4 +37,5 @@ def runtime_identity() -> str:
         + ";expert_tiles=" + EXPERT_TILES
         + ";gateup_h32=" + GATEUP_H32
         + ";h32_rows=" + H32_ROWS
+        + ";prefill_reduce=" + PREFILL_REDUCE
     )

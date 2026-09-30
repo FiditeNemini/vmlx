@@ -238,3 +238,30 @@ describe('live-loop iteration numbering (tool steps numbered from 1)', () => {
     expect(chat[chat.length - 1].reasoning_content).toBe('report the result')
   })
 })
+
+it('replays Naive native content separators from the recorded wire history on both APIs', () => {
+  const call = { id: 'native-call', type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } }
+  const row = {
+    content: 'Answer.',
+    reasoningSegmentsJson: JSON.stringify(['\nThink.\n', '\nDone.\n']),
+    toolCallsOaiJson: JSON.stringify([call]),
+    toolResultsOaiJson: JSON.stringify([{ tool_call_id: call.id, content: 'file data' }]),
+    generationRecordJson: JSON.stringify({
+      passes: [{ family: 'naive_n05_flash' }],
+      nativeFinalContent: '\n\nAnswer.',
+      toolExchange: [
+        { type: 'output_text', text: '\n\n' },
+        { type: 'function_call', call_id: call.id },
+        { type: 'function_call_output', call_id: call.id, output: 'file data' },
+      ],
+    }),
+  }
+  const chat = replayPersistedAssistantHistory(row, false)
+  expect(chat[0].content).toBe('\n\n')
+  expect(chat[2].content).toBe('\n\nAnswer.')
+  const responses = replayPersistedAssistantHistory(row, true)
+  expect(responses.filter(x => x.type === 'output_text').map(x => x.text)).toEqual(['\n\n', '\n\nAnswer.'])
+  const legacy = replayPersistedAssistantHistory({ ...row, generationRecordJson: '{}' }, false)
+  expect(legacy[0].content).toBe(null)
+  expect(legacy[2].content).toBe('Answer.')
+})

@@ -9693,6 +9693,39 @@ class Scheduler:
                                 else:
                                     prompt_len = len(request.prompt_token_ids)
                                     extended_store_armed = False
+                                    if self._model_type_for_runtime == "naive_n05_flash":
+                                        from .models.naive_n05_flash.cache_snapshot import terminal_cache_key
+
+                                        try:
+                                            native_key = terminal_cache_key(
+                                                raw_cache,
+                                                getattr(response, "all_tokens", None) or [],
+                                                request.prompt_token_ids,
+                                            )
+                                        except (ValueError, TypeError, IndexError):
+                                            native_key = None
+                                        if native_key is not None:
+                                            # Retain the separate N-1 checkpoint for exact
+                                            # prompt repeats/branches. A wrapped native SWA
+                                            # terminal cannot be rewound to that boundary.
+                                            if snapshot_cache is not None:
+                                                from .models.naive_n05_flash.cache_snapshot import snapshot_size
+                                                prompt_key = list(request.prompt_token_ids[:-1])
+                                                snapshot_size(snapshot_cache, expected_tokens=len(prompt_key))
+                                                prompt_state = snapshot_cache
+                                                if getattr(self, "_kv_cache_bits", 0):
+                                                    prompt_state = self._quantize_cache_for_storage(prompt_state)
+                                                request._naive_prompt_checkpoint = (
+                                                    prompt_key, self._extract_cache_states(prompt_state)
+                                                )
+                                            request._extracted_cache_key_tokens = native_key
+                                            cache_for_extract = raw_cache
+                                            extended_store_armed = True
+                                            logger.info(
+                                                "Naive prefix cache store using consumed terminal state "
+                                                "(%d cache-key tokens from %d prompt tokens).",
+                                                len(native_key), prompt_len,
+                                            )
                                     if (
                                         extended_cache is not None
                                         and self._uses_dsv4_cache
@@ -9827,7 +9860,7 @@ class Scheduler:
                                             f"truncation needed."
                                         )
                                         cache_for_extract = snapshot_cache
-                                        if getattr(self.model, "model_type", None) == "naive_n05_flash":
+                                        if self._model_type_for_runtime == "naive_n05_flash":
                                             # The existing mixed-SWA contract keeps
                                             # the generation header and stores N-1.
                                             # Without this explicit key, generic
@@ -11347,6 +11380,17 @@ class Scheduler:
                                     and not self._mixed_attention_cache_model
                                 ):
                                     _paged_store_kwargs["store_cumulative_state"] = False
+                                naive_prompt = getattr(request, "_naive_prompt_checkpoint", None)
+                                if naive_prompt is not None:
+                                    checkpoint_id = request_id + ":native-prompt"
+                                    try:
+                                        self.block_aware_cache.store_cache(
+                                            checkpoint_id, naive_prompt[0], naive_prompt[1],
+                                            **_paged_store_kwargs,
+                                        )
+                                    finally:
+                                        self.block_aware_cache.release_cache(checkpoint_id)
+                                        request._naive_prompt_checkpoint = None
                                 _stored_block_table = self.block_aware_cache.store_cache(
                                     request_id,
                                     store_tokens,

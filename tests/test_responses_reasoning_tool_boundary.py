@@ -205,3 +205,62 @@ async def test_responses_tool_finalization_keeps_streamed_content(
     text_done = next(i for i, e in enumerate(events) if e["type"] == "response.output_text.done")
     tool_start = next(i for i, e in enumerate(events) if e["type"] == "response.function_call_arguments.delta")
     assert all(events.index(e) < text_done < tool_start for e in deltas)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire", ["chat", "responses"])
+@pytest.mark.parametrize("split", [False, True])
+async def test_naive_tool_boundary_preserves_reasoning_tail_and_native_separator(monkeypatch, wire, split):
+    import vmlx_engine.server as server
+    from vmlx_engine.api.models import ResponsesRequest, ChatCompletionRequest
+    from vmlx_engine.engine.base import GenerationOutput
+    from vmlx_engine.reasoning.think_xml_parser import ThinkXmlReasoningParser
+    import vmlx_engine.model_config_registry as registry
+    block = '<tool_call>\n<function=read_file>\n<parameter=path>a.txt</parameter>\n</function>\n</tool_call>'
+    chunks = ['<think>\nRead', ' the file.\n</think>\n\n' + block]
+    if split:
+        chunks = ['<think>\nRead the file.\n', '</think>', '\n\n', block]
+    class Engine:
+        tokenizer = SimpleNamespace(has_thinking=False)
+        async def stream_chat(self, **kwargs):
+            text = ''
+            for i, delta in enumerate(chunks):
+                text += delta
+                done = i == len(chunks)-1
+                yield GenerationOutput(text=text, raw_text=text, new_text=delta,
+                    prompt_tokens=20, completion_tokens=i+1, finished=done,
+                    finish_reason='stop' if done else None)
+    cfg = SimpleNamespace(family_name='naive_n05_flash', supports_thinking=True,
+        supports_instruct_mode=True, reasoning_parser='think_xml', tool_parser='xml_function',
+        think_in_template=False, architecture_hints={})
+    for name, value in [('_model_name','native-boundary'),('_model_path',None),
+        ('_default_timeout',5.0),('_default_enable_thinking',None),
+        ('_reasoning_parser',ThinkXmlReasoningParser()),('_tool_call_parser','xml_function'),
+        ('_tool_call_parser_disabled_explicitly',False)]:
+        monkeypatch.setattr(server,name,value)
+    monkeypatch.setattr(registry,'get_model_config_registry',lambda: SimpleNamespace(lookup=lambda key: cfg))
+    tool={'name':'read_file','parameters':{'type':'object','properties':{'path':{'type':'string'}},'required':['path']}}
+    messages=[{'role':'user','content':'Read a.txt'}]
+    if wire=='responses':
+        req=ResponsesRequest(model='native-boundary',input='Read a.txt',stream=True,max_output_tokens=128,tools=[{'type':'function',**tool}])
+        stream=server.stream_responses_api(Engine(),messages,req)
+    else:
+        req=ChatCompletionRequest(model='native-boundary',messages=messages,stream=True,max_tokens=128,tools=[{'type':'function','function':tool}])
+        stream=server.stream_chat_completion(Engine(),messages,req)
+    events=[]
+    async for frame in stream:
+        for line in frame.splitlines():
+            if line.startswith('data: ') and line[6:] != '[DONE]': events.append(json.loads(line[6:]))
+    if wire=='responses':
+        reasoning=''.join(e.get('delta','') for e in events if e.get('type')=='response.reasoning_summary_text.delta')
+        content=''.join(e.get('delta','') for e in events if e.get('type')=='response.output_text.delta')
+        terminal=next(e['response'] for e in events if e.get('type')=='response.completed')
+        history=server._responses_output_to_assistant_messages(terminal['output'])
+        assert history[0]['content']=='\n\n'
+    else:
+        ds=[c.get('delta',{}) for e in events for c in e.get('choices',[])]
+        reasoning=''.join(d.get('reasoning_content') or d.get('reasoning') or '' for d in ds)
+        content=''.join(d.get('content') or '' for d in ds)
+        assert any(d.get('tool_calls') for d in ds)
+    assert reasoning=='\nRead the file.\n'
+    assert content=='\n\n'

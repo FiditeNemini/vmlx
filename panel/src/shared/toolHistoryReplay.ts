@@ -1,6 +1,7 @@
 import { REASONING_WITHOUT_ANSWER_NOTICE } from './responsesStreamRecovery'
 
 export interface PersistedAssistantToolHistory {
+  generationRecordJson?: unknown
   content?: unknown
   warningsJson?: unknown
   reasoningContent?: unknown
@@ -103,6 +104,22 @@ export function replayPersistedAssistantHistory(
   const calls = validCalls(message.toolCallsOaiJson)
   const results = validResults(message.toolResultsOaiJson)
   let content = typeof message.content === 'string' ? message.content : ''
+  const nativeToolContent = new Map<string, string>()
+  try {
+    const record = JSON.parse(typeof message.generationRecordJson === 'string' ? message.generationRecordJson : '{}')
+    if (record.passes?.[0]?.family === 'naive_n05_flash') {
+      if (typeof record.nativeFinalContent === 'string') content = record.nativeFinalContent
+      let pendingContent = ''
+      for (const item of record.toolExchange || []) {
+        if (item.type === 'output_text' && typeof item.text === 'string') pendingContent += item.text
+        if (item.type === 'function_call') nativeToolContent.set(item.call_id, pendingContent)
+        if (item.type === 'function_call_output') pendingContent = ''
+        if (item.role === 'assistant' && Array.isArray(item.tool_calls)) {
+          for (const call of item.tool_calls) nativeToolContent.set(call.id, typeof item.content === 'string' ? item.content : '')
+        }
+      }
+    }
+  } catch { /* Legacy rows use the existing typed fields. */ }
   const persistedSegments = persistedReasoningSegments(message)
   const segments = options.includeReasoning === false ? [] : persistedSegments
 
@@ -178,8 +195,10 @@ export function replayPersistedAssistantHistory(
   iterations.forEach((iteration, rank) => {
     const group = groups.get(iteration) || []
     const reasoning = segments[rank]
+    const toolContent = nativeToolContent.get(group[0]?.id) || ''
     if (useResponsesApi) {
       if (reasoning?.trim()) replay.push(reasoningItem(reasoning))
+      if (toolContent) replay.push({ type: 'output_text', text: toolContent })
       for (const call of group) {
         replay.push({
           type: 'function_call',
@@ -201,7 +220,7 @@ export function replayPersistedAssistantHistory(
     } else {
       replay.push({
         role: 'assistant',
-        content: null,
+        content: toolContent || null,
         tool_calls: group,
         ...(reasoning?.trim() ? { reasoning_content: reasoning } : {}),
       })

@@ -5694,7 +5694,7 @@ def _strip_tool_markup_residue_for_display(text: str) -> str:
 
 
 def _visible_prefix_before_unparsed_tool_markup(
-    text: str, *, minimum_partial: int = 1,
+    text: str, *, minimum_partial: int = 1, preserve_whitespace: bool = False,
 ) -> str:
     """Return only text that safely preceded a buffered but invalid tool call.
 
@@ -5719,7 +5719,8 @@ def _visible_prefix_before_unparsed_tool_markup(
     if harmony_match:
         marker_positions.append(harmony_match.start())
     if marker_positions:
-        return text[: min(marker_positions)].rstrip()
+        prefix = text[: min(marker_positions)]
+        return prefix if preserve_whitespace else prefix.rstrip()
 
     # The buffer can activate on a marker split at the final token. Remove the
     # longest such partial suffix without touching an ordinary earlier '<'.
@@ -5730,7 +5731,8 @@ def _visible_prefix_before_unparsed_tool_markup(
             if text.endswith(marker[:n]):
                 partial_len = max(partial_len, n)
                 break
-    return text[:-partial_len].rstrip() if partial_len else text
+    prefix = text[:-partial_len] if partial_len else text
+    return prefix if preserve_whitespace or not partial_len else prefix.rstrip()
 
 
 def _parser_routes_tools_via_reasoning_channel(request_parser, harmony_active: bool) -> bool:
@@ -5825,6 +5827,9 @@ def _new_request_reasoning_parser(
     if parser is None:
         return None
 
+    parser.preserve_native_whitespace = (
+        getattr(model_config, "family_name", None) == "naive_n05_flash"
+    )
     parser.reset_state(
         think_in_prompt=effective_think_in_template,
         harmony_active=harmony_active or _reasoning_parser_is_harmony(parser),
@@ -20796,6 +20801,9 @@ async def create_chat_completion(
         try:
             from .model_config_registry import get_model_config_registry as _mcr
             _mc_nonstream = _mcr().lookup(_model_path or _model_name or request.model)
+            request_parser.preserve_native_whitespace = (
+                getattr(_mc_nonstream, "family_name", None) == "naive_n05_flash"
+            )
             _think_in_prompt_ns = _mc_nonstream.think_in_template
             _think_in_prompt_ns = _apply_tokenizer_thinking_vocab_fallback(
                 _think_in_prompt_ns,
@@ -24355,6 +24363,9 @@ async def create_response(
         try:
             from .model_config_registry import get_model_config_registry as _mcr
             _mc_nonstream = _mcr().lookup(_model_path or _model_name or request.model)
+            request_parser.preserve_native_whitespace = (
+                getattr(_mc_nonstream, "family_name", None) == "naive_n05_flash"
+            )
             _think_in_prompt_ns = _mc_nonstream.think_in_template
             _think_in_prompt_ns = _apply_tokenizer_thinking_vocab_fallback(
                 _think_in_prompt_ns,
@@ -26407,7 +26418,7 @@ async def stream_chat_completion(
 
                 if tool_call_buffering:
                     if (
-                        _exact_once_tool_contract
+                        (_exact_once_tool_contract or getattr(request_parser, "preserve_native_whitespace", False))
                         and not suppress_reasoning
                         and delta_msg.reasoning
                     ):
@@ -26444,6 +26455,21 @@ async def stream_chat_completion(
                                 ],
                             )
                             yield f"data: {_dump_chat_chunk(reasoning_chunk)}\n\n"
+                    if getattr(request_parser, "preserve_native_whitespace", False):
+                        native_prefix = _visible_prefix_before_unparsed_tool_markup(
+                            accumulated_content, preserve_whitespace=True,
+                        )
+                        native_delta = native_prefix[len(streamed_content):] if native_prefix.startswith(streamed_content) else ""
+                        if native_delta:
+                            streamed_content += native_delta
+                            content_was_emitted = True
+                            native_chunk = ChatCompletionChunk(
+                                id=response_id, created=_created_ts, model=request.model,
+                                choices=[ChatCompletionChunkChoice(
+                                    delta=ChatCompletionChunkDelta(content=native_delta), finish_reason=None,
+                                )],
+                            )
+                            yield f"data: {_dump_chat_chunk(native_chunk)}\n\n"
                     # Buffering is speculative until the final parser returns a
                     # schema-valid function call. Do not advertise an OpenAI
                     # tool_calls START delta here: malformed required-tool
@@ -28946,6 +28972,24 @@ async def stream_responses_api(
                                             "delta": _reasoning_delta,
                                         },
                                     )
+                            if getattr(request_parser, "preserve_native_whitespace", False):
+                                native_prefix = _visible_prefix_before_unparsed_tool_markup(
+                                    accumulated_content, preserve_whitespace=True,
+                                )
+                                native_delta = native_prefix[len(streamed_text):] if native_prefix.startswith(streamed_text) else ""
+                                if native_delta:
+                                    if reasoning_item_started and not reasoning_item_finished:
+                                        for event in _finish_reasoning_item_events(streamed_reasoning_text or accumulated_reasoning):
+                                            yield event
+                                    for event in _start_message_item_events():
+                                        yield event
+                                    streamed_text += native_delta
+                                    content_was_emitted = True
+                                    yield _sse("response.output_text.delta", {
+                                        "type": "response.output_text.delta", "item_id": msg_id,
+                                        "output_index": message_output_index, "content_index": 0,
+                                        "delta": native_delta,
+                                    })
                             # Emit heartbeat during tool call buffering so the client
                             # sees activity (matches ChatCompletion heartbeat behavior).
                             yield _sse(

@@ -32,6 +32,7 @@ export interface GenerationRecord {
   status: 'in_progress' | 'completed' | 'interrupted'
   finishReason?: string
   toolExchange?: unknown[]
+  nativeFinalContent?: string
   passes: ReturnType<typeof captureGenerationPass>[]
 }
 

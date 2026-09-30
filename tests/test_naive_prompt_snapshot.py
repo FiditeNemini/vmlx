@@ -424,3 +424,84 @@ def test_explicit_naive_quantized_scheduler_ssd_continuation(tmp_path, monkeypat
             assert bool(mx.array_equal(expected, actual))
     finally:
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("length_limited", [False, True])
+def test_consumed_terminal_key_matches_actual_generator(monkeypatch, length_limited):
+    from vmlx_engine.utils import single_batch_generator as sbg
+    from vmlx_engine.models.naive_n05_flash.cache_snapshot import terminal_cache_key
+    monkeypatch.setattr(sbg, "get_effective_metal_working_set_bytes", lambda mx: (0, 64 << 30))
+    model = make_model()
+    tokens = list(range(1, 12))
+    generator = sbg.SingleBatchGenerator(
+        model, max_tokens=2, prefill_step_size=4,
+        sampler=lambda logits: mx.array([31]),
+        stop_tokens=[] if length_limited else [31],
+    )
+    generator.insert([tokens], max_tokens=[2])
+    final = None
+    while generator._request is not None or final is None:
+        prompt, generation = generator.next()
+        for response in prompt + generation:
+            final = response
+        if final is not None and final.finish_reason is not None:
+            break
+    key = terminal_cache_key(final.prompt_cache, final.all_tokens, tokens)
+    assert len(key) == len(tokens) + 1
+    assert len(final.all_tokens) - len(key) == int(length_limited)
+    assert all(c.offset == len(key) for c in leaves(final.prompt_cache))
+    with pytest.raises(ValueError):
+        terminal_cache_key(final.prompt_cache, final.all_tokens, [30] + tokens[1:])
+
+
+def test_terminal_scheduler_ssd_retains_generated_tokens(tmp_path, monkeypatch):
+    from vmlx_engine.scheduler import Scheduler, SchedulerConfig
+    from vmlx_engine.request import Request, SamplingParams
+    from vmlx_engine.utils import single_batch_generator as sbg
+    class Tokenizer:
+        clean_up_tokenization_spaces = False
+        def decode(self, tokens):
+            return "".join(chr(65 + int(t)) for t in tokens)
+    monkeypatch.setattr(sbg, "get_effective_metal_working_set_bytes", lambda mx: (0, 64 << 30))
+    scheduler = Scheduler(make_model(), Tokenizer(), SchedulerConfig(
+        max_num_seqs=1, prefill_step_size=4, enable_prefix_cache=True,
+        use_paged_cache=False, enable_block_disk_cache=True,
+        block_disk_cache_dir=str(tmp_path), paged_cache_block_size=4,
+        max_cache_blocks=32,
+    ))
+    try:
+        tokens = list(range(1, 12))
+        request = Request(request_id="terminal-native", prompt=tokens,
+                          sampling_params=SamplingParams(max_tokens=3, temperature=0))
+        request.prompt_token_ids = tokens
+        request.num_prompt_tokens = len(tokens)
+        scheduler.add_request(request)
+        for _ in range(6):
+            if any(o.finished for o in scheduler.step().outputs):
+                break
+        else:
+            pytest.fail("request did not finish")
+        repeated, remaining = scheduler.block_aware_cache.fetch_cache("prompt-branch", tokens)
+        assert repeated is not None and repeated.num_tokens == len(tokens) - 1
+        assert remaining == tokens[-1:]
+        scheduler.block_aware_cache.release_cache("prompt-branch")
+        key = request._extracted_cache_key_tokens
+        assert len(key) == len(tokens) + 2
+        table, suffix = scheduler.block_aware_cache.fetch_cache("terminal-refault", key + [17])
+        assert table is not None and table.num_tokens == len(key)
+        assert suffix == [17]
+        restored = scheduler.block_aware_cache.reconstruct_cache(table)
+        assert all(c.offset == len(key) for c in leaves(restored))
+        reference = scheduler.model.make_cache()
+        # Match original prompt chunking followed by autoregressive single tokens.
+        for chunk in (tokens[:4], tokens[4:8], tokens[8:10], tokens[10:]):
+            mx.eval(scheduler.model(mx.array([chunk]), cache=reference))
+        for token in key[len(tokens):] + [17, 18, 19]:
+            expected = scheduler.model(mx.array([[token]]), cache=reference)
+            mx.eval(expected)
+            if reference[0][0].offset > len(key):
+                actual = scheduler.model(mx.array([[token]]), cache=restored)
+                mx.eval(actual)
+                assert bool(mx.array_equal(expected, actual))
+    finally:
+        scheduler.shutdown()

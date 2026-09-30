@@ -288,8 +288,12 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 pos = start_idx + len(self.start_token)
                 in_reasoning = True
 
-            reasoning = "\n".join(part.strip() for part in reasoning_parts if part.strip())
-            content = "".join(content_parts).strip()
+            if getattr(self, "preserve_native_whitespace", False):
+                reasoning = "".join(reasoning_parts)
+                content = "".join(content_parts)
+            else:
+                reasoning = "\n".join(part.strip() for part in reasoning_parts if part.strip())
+                content = "".join(content_parts).strip()
             return reasoning or None, content or None
 
         # Case 2: Only closing tag (think was injected in prompt).
@@ -312,6 +316,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if end_pos >= 0:
             reasoning = text[:end_pos]
             content = text[end_pos + len(self.end_token) :]
+            if getattr(self, "preserve_native_whitespace", False):
+                return reasoning or None, content or None
             return reasoning.strip() or None, content.strip() or None
 
         # Case 3: Only start tag (incomplete reasoning, no end yet)
@@ -371,7 +377,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         # The whitespace BEFORE an opening marker belongs to the rail that was
         # active before it (content), so emit it rather than swallowing it.
         stripped_delta = delta_text.strip()
-        if stripped_delta == self.start_token:
+        if stripped_delta == self.start_token and not getattr(self, "preserve_native_whitespace", False):
             leading = delta_text[: delta_text.index(self.start_token)]
             # This parser is stateless — the rail is derived from the text, so
             # "already reasoning" is an unclosed start token in what came before.
@@ -382,7 +388,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             if leading and not already_reasoning:
                 return DeltaMessage(content=leading)
             return None
-        if stripped_delta == self.end_token:
+        if stripped_delta == self.end_token and not getattr(self, "preserve_native_whitespace", False):
             return None
 
         # Check token positions in text (stateless text-based detection)
@@ -438,7 +444,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # Transition: end token in this delta
                 idx = delta_text.find(self.end_token)
                 reasoning_part = delta_text[:idx]
-                content_part = delta_text[idx + len(self.end_token) :].lstrip()
+                content_part = self._native_content(delta_text[idx + len(self.end_token) :])
                 return DeltaMessage(
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
@@ -456,7 +462,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                     end_idx = after_start.find(self.end_token)
                     if end_idx >= 0:
                         reasoning_part = after_start[:end_idx]
-                        post_content = after_start[end_idx + len(self.end_token) :].lstrip()
+                        post_content = self._native_content(after_start[end_idx + len(self.end_token) :])
                         content_part = pre_content + post_content
                     else:
                         reasoning_part = after_start
@@ -486,7 +492,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # Both tokens in this delta
                 end_idx = delta_text.find(self.end_token)
                 reasoning_part = delta_text[start_idx + len(self.start_token) : end_idx]
-                content_part = delta_text[end_idx + len(self.end_token) :].lstrip()
+                content_part = self._native_content(delta_text[end_idx + len(self.end_token) :])
                 return DeltaMessage(
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
@@ -513,7 +519,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # Transition: end token in this delta
             idx = delta_text.find(self.end_token)
             reasoning_part = delta_text[:idx]
-            content_part = delta_text[idx + len(self.end_token) :].lstrip()
+            content_part = self._native_content(delta_text[idx + len(self.end_token) :])
             return DeltaMessage(
                 reasoning=reasoning_part if reasoning_part else None,
                 content=content_part if content_part else None,
@@ -529,6 +535,11 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # Still in implicit reasoning phase
             return DeltaMessage(reasoning=delta_text)
 
+    def _native_content(self, text: str) -> str:
+        # Some templates replay the close separator as part of content. Removing
+        # it changes the token prefix and discards the completed native cache.
+        return text if getattr(self, "preserve_native_whitespace", False) else text.lstrip()
+
     def _content_after_reasoning_boundary(
         self,
         previous_text: str,
@@ -542,6 +553,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         separate deltas. Keep stripping while the accumulated post-reasoning
         content is whitespace-only, then preserve every later delta verbatim.
         """
+        if getattr(self, "preserve_native_whitespace", False):
+            return delta_text
         _, marker, previous_content = previous_text.partition(self.end_token)
         if marker and not previous_content.strip():
             return delta_text.lstrip()

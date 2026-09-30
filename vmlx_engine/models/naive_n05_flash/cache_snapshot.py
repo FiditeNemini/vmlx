@@ -42,3 +42,28 @@ def clone_prompt_cache(cache):
         return type(entry).from_state(arrays, entry.meta_state)
 
     return [clone(entry) for entry in cache]
+
+
+def terminal_cache_key(cache, all_tokens, prompt_tokens):
+    """Bind consumed native state to raw tokens, including generated history.
+
+    The single-request generator normally consumes the reported token through
+    lookahead, but skips that forward at a length limit. Use the actual common
+    native offset rather than assuming either accounting convention. No rewind
+    of the rotating window or rendered-text retokenization is permitted.
+    """
+    snapshot_size(cache)
+    first = cache[0]
+    while type(first) is CacheList:
+        first = first.caches[0]
+    offset = int(first.offset)
+    tokens = list(all_tokens)
+    prompt = list(prompt_tokens)
+    if (
+        not prompt
+        or tokens[:len(prompt)] != prompt
+        or offset < len(prompt)
+        or len(tokens) - offset not in (0, 1)
+    ):
+        raise ValueError("Naive terminal state differs from its raw token sequence")
+    return tokens[:offset]

@@ -4677,6 +4677,12 @@ export function registerChatHandlers(
 
         // Release any withheld tail before the final content is assembled.
         flushToolTagHoldback();
+        if (chatDetectedFamily === "naive_n05_flash") {
+          // Native template replays the post-think separator verbatim. Keep
+          // wire history independent of the display sanitization below.
+          generationRecord.nativeFinalContent = fullContent;
+        }
+
         // Combine content from all tool iterations into the final message
         if (allGeneratedContent && fullContent.trim()) {
           fullContent = allGeneratedContent + "\n\n" + fullContent;

@@ -501,6 +501,11 @@ def compute_model_cache_key(
     except Exception:
         pass
 
+    if "model_type=naive_n05_flash" in parts:
+        # Old terminal records normalized a wrapped ring into temporal order.
+        # Do not deduplicate over those numerically different continuations.
+        parts.append("naive_terminal_physical_ring_v1")
+
     # Looped transformers can own more cache slots than their shared module
     # count. Persisted prefix/L2 records must bind that actual runtime layout,
     # not only ``num_hidden_layers``.
@@ -1929,6 +1934,7 @@ def _rotating_terminal_window(
     *,
     expected_offset: Optional[int] = None,
     concatenate=None,
+    preserve_bounded_ring=False,
 ):
     """Return the exact bounded state needed to resume a rotating KV cache.
 
@@ -1940,8 +1946,9 @@ def _rotating_terminal_window(
 
     The returned tuple is ``(keys, values, max_size, keep, offset, idx)``.  The
     tensors are in temporal order and bounded to ``min(offset, max_size)``;
-    ``idx`` is the exact state mlx-lm would have after trimming the prefill
-    buffer immediately before the next single-token decode.
+    ``idx`` is the insertion point after bounded normalization. With
+    ``preserve_bounded_ring``, an already bounded native ring retains its
+    physical order and insertion point for bit-exact single-token continuation.
     """
     if not isinstance(meta_state, (tuple, list)) or len(meta_state) < 4:
         raise ValueError("RotatingKVCache terminal snapshot is missing meta_state")
@@ -1977,6 +1984,12 @@ def _rotating_terminal_window(
         raise ValueError(
             f"invalid RotatingKVCache idx={idx_state} physical_len={seq_len}"
         )
+    # Naive attention consumes the native physical ring. Reordering an already
+    # bounded ring preserves logical tokens but changes reduction order (and
+    # therefore BF16 continuation logits). Keep both tensors and insertion
+    # pointer; oversized prefill buffers still use bounded normalization below.
+    if preserve_bounded_ring and seq_len == min(offset, max_size):
+        return keys, values, max_size, keep, offset, idx_state
     if concatenate is None:
         concatenate = mx.concatenate
 
@@ -2313,6 +2326,7 @@ def _numpy_block_slice(
     existing_tokens=0,
     store_cumulative_state=True,
     rotating_resume_block_size=0,
+    preserve_bounded_ring=False,
 ):
     """Create per-block cache_data using NumPy slicing.
 
@@ -2485,6 +2499,7 @@ def _numpy_block_slice(
                             np_v,
                             layer_state.get("meta_state", ()),
                             expected_offset=end_idx,
+                            preserve_bounded_ring=preserve_bounded_ring,
                             concatenate=np.concatenate,
                         )
                     else:
@@ -2832,6 +2847,10 @@ class BlockAwarePrefixCache:
                 the payload-driven validation used by standalone callers.
         """
         self.model = model
+        self._preserve_bounded_ring = (
+            getattr(getattr(model, "args", None), "model_type", None)
+            == "naive_n05_flash"
+        )
         # Content-derived stable key (replaces id(model)). Includes loader
         # fingerprint so two sessions with different smelt/TQ/JANG settings
         # never share blocks (would otherwise corrupt K/V routing).
@@ -5989,6 +6008,7 @@ class BlockAwarePrefixCache:
                                 global_start, global_end, is_last, existing_tokens,
                                 store_cumulative_state,
                                 self.block_size,
+                                preserve_bounded_ring=self._preserve_bounded_ring,
                             )
                         if np_block:
                             # The numpy mirror is authoritative for ordinary KV
@@ -6623,6 +6643,7 @@ class BlockAwarePrefixCache:
                                         np_v,
                                         layer_state.get("meta_state", ()),
                                         expected_offset=end_idx,
+                                        preserve_bounded_ring=self._preserve_bounded_ring,
                                         concatenate=np.concatenate,
                                     )
                                 else:
@@ -6647,6 +6668,7 @@ class BlockAwarePrefixCache:
                                         values,
                                         layer_state.get("meta_state", ()),
                                         expected_offset=end_idx,
+                                        preserve_bounded_ring=self._preserve_bounded_ring,
                                         concatenate=mx.concatenate,
                                     )
                                 else:
@@ -8070,7 +8092,11 @@ class BlockAwarePrefixCache:
                         or keep_int > max_size_int
                         or original_offset_int != target_tokens
                         or restored_len_int != required_len
-                        or original_idx_int != restored_len_int
+                        or not (keep_int <= original_idx_int <= restored_len_int)
+                        or (
+                            not self._preserve_bounded_ring
+                            and original_idx_int != restored_len_int
+                        )
                     ):
                         logger.warning(
                             "Cannot reconstruct RotatingKVCache layer %s: invalid "

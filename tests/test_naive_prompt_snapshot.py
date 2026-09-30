@@ -165,6 +165,25 @@ def test_scheduler_stores_snapshot_with_full_mixed_swa_key(tmp_path, monkeypatch
         # Terminal storage now retains all consumed output tokens, while the
         # separate N-1 checkpoint still serves an exact prompt repeat below.
         assert request._extracted_cache_key_tokens == tokens + request.output_token_ids[:-1]
+        terminal_key = request._extracted_cache_key_tokens
+        terminal_table, terminal_tail = scheduler.block_aware_cache.fetch_cache(
+            'terminal-refault', terminal_key + [12])
+        assert terminal_table is not None and terminal_table.num_tokens == len(terminal_key)
+        assert terminal_tail == [12]
+        terminal_restored = scheduler.block_aware_cache.reconstruct_cache(terminal_table)
+        assert terminal_restored is not None
+        terminal_reference = scheduler.model.make_cache()
+        for chunk in (tokens[:4], tokens[4:8], tokens[8:10]):
+            mx.eval(scheduler.model(mx.array([chunk]), cache=terminal_reference))
+        for token in [tokens[-1]] + request.output_token_ids[:-1]:
+            mx.eval(scheduler.model(mx.array([[token]]), cache=terminal_reference))
+        for actual, expected in zip(leaves(terminal_restored), leaves(terminal_reference)):
+            assert actual.meta_state == expected.meta_state
+            assert all(bool(mx.array_equal(a, b)) for a, b in zip(actual.state, expected.state))
+        a = scheduler.model(mx.array([[12]]), cache=terminal_restored)
+        b = scheduler.model(mx.array([[12]]), cache=terminal_reference)
+        mx.eval(a, b)
+        assert bool(mx.array_equal(a, b))
         disk_reads = []
         disk = scheduler.block_aware_cache.paged_cache._disk_store
         read = disk.read_block_for_reconstruction
@@ -507,3 +526,34 @@ def test_terminal_scheduler_ssd_retains_generated_tokens(tmp_path, monkeypatch):
                 assert bool(mx.array_equal(expected, actual))
     finally:
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("numpy_path", [False, True])
+def test_terminal_ring_preserves_physical_state_and_next_logits(numpy_path):
+    import numpy as np
+    from vmlx_engine.prefix_cache import _rotating_terminal_window
+    from vmlx_engine.models.naive_n05_flash.cache_snapshot import clone_prompt_cache
+    model = make_model()
+    native = model.make_cache()
+    for token in range(1, 12):
+        mx.eval(model(mx.array([[token]]), cache=native))
+    restored = clone_prompt_cache(native)
+    ring = restored[1]
+    keys, values = ring.state
+    dtype = keys.dtype
+    if numpy_path:
+        keys, values = np.array(keys.astype(mx.float32)), np.array(values.astype(mx.float32))
+    k, v, size, keep, offset, idx = _rotating_terminal_window(
+        keys, values, ring.meta_state, expected_offset=11,
+        concatenate=np.concatenate if numpy_path else mx.concatenate,
+        preserve_bounded_ring=True,
+    )
+    ring.state = [mx.array(k).astype(dtype), mx.array(v).astype(dtype)]
+    ring.meta_state = tuple(map(str, (keep, size, offset, idx)))
+    assert ring.meta_state == native[1].meta_state
+    assert all(bool(mx.array_equal(a, b)) for a, b in zip(ring.state, native[1].state))
+    for token in (12, 13, 14):
+        expected = model(mx.array([[token]]), cache=native)
+        actual = model(mx.array([[token]]), cache=restored)
+        mx.eval(expected, actual)
+        assert bool(mx.array_equal(expected, actual))

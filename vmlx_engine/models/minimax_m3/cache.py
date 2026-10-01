@@ -15,8 +15,9 @@ cached. So the only persistent state is (keys, values, idx_keys), all three
 append-only and the same length. Blocks are anchored to ABSOLUTE position
 (block = pos // 128), so the cache is append-only / trim-and-replay only: never
 shift, rotate, or evict mid-stream (that would move block boundaries and corrupt
-selection). Trimming to N tokens slices all three on the sequence axis — which is
-exactly what L1 prefix matching and L2 disk restore need.
+selection). Trimming to N tokens resets all three logical extents. Live backing
+capacity remains reusable; state/clone views slice all three on the sequence
+axis, as required by L1 prefix matching and L2 disk restore.
 
 This mirrors the composite-cache precedent of DeepseekV4Cache / ZayaCCACache: a
 custom cache object plus a `cache_data` tuple type the prefix/paged/disk tiers
@@ -155,12 +156,16 @@ class MiniMaxM3SparseCache(KVCache):
     def trim(self, n: int) -> int:  # type: ignore[override]
         """Trim the last `n` tokens from BOTH caches (prefix-match downgrade).
 
-        Append-only invariant: K/V and idx_keys are the same length, so the same
-        trim count applies to all three. Returns the number actually trimmed.
+        K/V and index history keep the same logical length. Preserve the raw
+        index backing just like KVCache preserves its K/V capacity: native MTP
+        trims unverified chain rows every cycle, then overwrites that tail with
+        confirmed rows. Shrinking the physical lane would force the next
+        update_index to concatenate the full prefix again. All readers and
+        serialization still slice to offset; stale tail rows are never visible.
+        Returns the number actually trimmed.
         """
         trimmed = super().trim(n)
         if self.idx_keys is not None and trimmed:
-            self.idx_keys = self.idx_keys[..., : self.offset, :]
             self._idx_offset = self.offset
         if trimmed:
             self._truncate_derived()

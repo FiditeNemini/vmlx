@@ -114,6 +114,8 @@ class _Request:
     image_grid_thw: Any = None
     pixel_values_videos: Any = None
     video_grid_thw: Any = None
+    prefill_started: Optional[float] = None
+    prefill_usage: Optional[dict] = None
 
 
 @dataclass
@@ -127,6 +129,7 @@ class Response:
     prompt_cache: Optional[list[Any]]
     all_tokens: Optional[list[int]]
     prompt_cache_snapshot: Optional[list[Any]] = None
+    prefill_usage: Optional[dict] = None
 
 
 class SingleBatchGenerator:
@@ -801,6 +804,17 @@ class SingleBatchGenerator:
                 model_s = time.perf_counter() - model_t0
                 sample_t0 = time.perf_counter()
             logits = logits[:, -1, :]
+            if getattr(req, "prefill_started", None) is not None:
+                # Naive's initial prompt only: complete final-position logits
+                # before sampling/lookahead, matching the MLLM receipt scope.
+                # The one-time materialization never fences steady decode.
+                (logits,) = self._eval_on_stream(logits)
+                req.prefill_usage = {
+                    "tokens": len(req.prompt_tokens),
+                    "seconds": time.perf_counter() - req.prefill_started,
+                    "scope": "model_prefill_and_prompt_state",
+                }
+                req.prefill_started = None
             overlap = self._can_overlap_decode(req)
             req.next_token, req.next_logprobs = self._sample_from_logits(
                 logits,
@@ -927,6 +941,7 @@ class SingleBatchGenerator:
             prompt_cache=req.cache,
             all_tokens=list(req.context_tokens),
             prompt_cache_snapshot=prompt_cache_snapshot or req.prompt_cache_snapshot,
+            prefill_usage=req.prefill_usage,
         )
         if req.finish_reason is not None:
             self._request = None
@@ -1019,6 +1034,12 @@ class SingleBatchGenerator:
                 req,
                 prompt_cache_snapshot=prompt_cache_snapshot,
             )
+        if getattr(self.model, "model_type", None) == "naive_n05_flash":
+            # Lookup/restore and cache creation precede this producer clock.
+            # Include chunk prefill and detached N-1 prompt state, but neither
+            # the first sampler nor the following decode forward.
+            req.prefill_usage = None
+            req.prefill_started = time.perf_counter()
         if len(req.prompt_tokens) > 1:
             # A prefix-cache HIT restores the cached prefix and then computes
             # the remaining few positions in a SMALL forward, while a cold

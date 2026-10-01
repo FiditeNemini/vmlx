@@ -244,7 +244,7 @@ def glm5_mhc_norm_decode(streams, hc_fn, hc_base, hc_scale, weight, *,
 @lru_cache(maxsize=1)
 def _compatible_runtime():
     try:
-        return (importlib.metadata.version("mlx") == "0.32.2"
+        return (importlib.metadata.version("mlx") in {"0.32.2", "0.32.3"}
                 and mx.device_info().get("device_name") == "Apple M5 Max")
     except (importlib.metadata.PackageNotFoundError, RuntimeError, OSError):
         return False

@@ -97,6 +97,8 @@ import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay
 import { hasPersistedUserMedia, resolveChatMediaPolicy } from "../../shared/chatMediaPolicy";
 import {
   calculatePrefillTps,
+  summarizePrefillPasses,
+  ExchangeFirstTokenClock,
   parseServerDecodeUsage,
   selectFinalDecodeTps,
   type ServerDecodePass,
@@ -2049,6 +2051,7 @@ export function registerChatHandlers(
           cacheDetail = mergeCacheDetails(cacheDetail, details.cache_detail);
         }
       };
+      const exchangeFirstTokenClock = new ExchangeFirstTokenClock();
       let firstTokenTime: number | null = null;
       // Track actual generation time (excludes PP and tool execution pauses)
       let generationMs = 0;
@@ -2075,6 +2078,10 @@ export function registerChatHandlers(
       const completedServerDecodePasses: ServerDecodePass[] = [];
       let currentServerDecodePass: ServerDecodePass | undefined;
       let currentPrefillUsage: unknown;
+      const completedPrefillPasses: unknown[] = [];
+      const exchangePrefillSpeed = () => summarizePrefillPasses([
+        ...completedPrefillPasses, currentPrefillUsage,
+      ]);
       const recordServerDecodeUsage = (usage: unknown) => {
         if (usage && typeof usage === "object" && "vmlx_prefill" in usage) {
           currentPrefillUsage = (usage as { vmlx_prefill?: unknown }).vmlx_prefill;
@@ -2565,6 +2572,7 @@ export function registerChatHandlers(
         logRequestShape(requestBody, "initial");
 
         fetchStartTime = Date.now(); // Capture just before fetch for accurate TTFT
+        exchangeFirstTokenClock.beginPass(fetchStartTime);
         remoteMetrics?.beginPass(fetchStartTime);
         // Remote internet providers use Electron's net.fetch for certificates
         // and proxies; loopback model servers use Node streaming for SSE.
@@ -2902,6 +2910,7 @@ export function registerChatHandlers(
           const now = Date.now();
           if (firstTokenTime === null) {
             firstTokenTime = now;
+            exchangeFirstTokenClock.recordToken(now);
             startPeriodicSave();
           }
           // Track generation time between consecutive streamed deltas. Tool
@@ -2996,12 +3005,12 @@ export function registerChatHandlers(
           // Elapsed display shares the final whole-turn clock. Generation-only
           // timing remains separate for TPS; follow-up fetches do not reset it.
           const elapsed = Math.max(0, (now - startTime) / 1000);
-          // TTFT measured from fetchStartTime (excludes health check and message building overhead)
+          // First exchange token, excluding initial health/message preparation.
           const ttft = Math.max(
             0,
-            firstTokenTime ? (firstTokenTime - fetchStartTime) / 1000 : 0,
+            exchangeFirstTokenClock.seconds(),
           );
-          const ppSpeed = calculatePrefillTps({ prefillUsage: currentPrefillUsage });
+          const ppSpeed = exchangePrefillSpeed();
 
           try {
             const win = getWindow();
@@ -3216,6 +3225,18 @@ export function registerChatHandlers(
                   responsesFinalText = completedTextParts.join("");
                 }
               }
+
+              // Tool-only generation also establishes exchange TTFT. Ignore
+              // empty argument heartbeats and generic response-created events.
+              if (
+                ((responsesEventType === "response.output_item.added" ||
+                  responsesEventType === "response.output_item.done") &&
+                  parsed.item?.type === "function_call" && parsed.item.name) ||
+                (responsesEventType === "response.function_call_arguments.delta" &&
+                  typeof parsed.delta === "string" && parsed.delta.length > 0) ||
+                (responsesEventType === "response.function_call_arguments.done" &&
+                  typeof parsed.arguments === "string" && parsed.arguments.length > 0)
+              ) exchangeFirstTokenClock.recordToken(Date.now());
 
               // Handle function_call items (tool calls) from Responses API
               // response.output_item.done carries the complete tool call: { item: { type, call_id, name, arguments } }
@@ -3462,11 +3483,10 @@ export function registerChatHandlers(
                   if (win && !win.isDestroyed()) {
                     const now = Date.now();
                     if (firstTokenTime === null) firstTokenTime = now;
+                    exchangeFirstTokenClock.recordToken(now);
                     const ttft = Math.max(
                       0,
-                      firstTokenTime
-                        ? (firstTokenTime - fetchStartTime) / 1000
-                        : 0,
+                      exchangeFirstTokenClock.seconds(),
                     );
                     // 2026-05-02: derive tps from server's usage instead of
                     // hard-coded "0.0". Suppressed-reasoning heartbeats fire
@@ -3585,6 +3605,10 @@ export function registerChatHandlers(
               // streaming (OpenAI-style: first chunk has name, subsequent chunks append arguments)
               if (choice?.tool_calls && Array.isArray(choice.tool_calls)) {
                 for (const tc of choice.tool_calls) {
+                  if ((typeof tc.function?.name === "string" && tc.function.name) ||
+                      (typeof tc.function?.arguments === "string" && tc.function.arguments)) {
+                    exchangeFirstTokenClock.recordToken(Date.now());
+                  }
                   accumulateChatToolCallDelta(receivedToolCalls, tc, () =>
                     `call_${uuidv4().replace(/-/g, "").slice(0, 16)}`,
                   );
@@ -3768,6 +3792,7 @@ export function registerChatHandlers(
         // ─── Helper: send follow-up request and stream response ────────────
         const sendFollowUp = async (): Promise<boolean> => {
           finishServerDecodePass();
+          completedPrefillPasses.push(currentPrefillUsage);
           currentPrefillUsage = undefined;
           // Fold the finished stream's prompt/cached counts into the exchange
           // totals so the final metrics pair coherently (cached <= prompt).
@@ -3781,8 +3806,9 @@ export function registerChatHandlers(
           seenResponsesApiEvents.clear();
           _sawResponsesTextDelta = false;
           responsesFinalText = "";
-          // Reset fetchStartTime so TTFT for follow-up is measured correctly
+          // Keep per-pass request timing while preserving the first exchange token.
           fetchStartTime = Date.now();
+          exchangeFirstTokenClock.beginPass(fetchStartTime);
           remoteMetrics?.beginPass(fetchStartTime);
           firstTokenTime = null;
           lastTokenTime = null;
@@ -4366,9 +4392,7 @@ export function registerChatHandlers(
                     cachedTokens,
                     cacheDetail,
                     tokensPerSecond: liveTps.toFixed(1),
-                    ttft: firstTokenTime
-                      ? ((firstTokenTime - fetchStartTime) / 1000).toFixed(2)
-                      : "0",
+                    ttft: exchangeFirstTokenClock.seconds().toFixed(2),
                     elapsed: Math.max(0, (Date.now() - startTime) / 1000).toFixed(1),
                     ...remoteMetricFields(),
                   },
@@ -4662,19 +4686,20 @@ export function registerChatHandlers(
           : serverDecodeSummary ? "server" : "client";
         const finalTpsLabel = remoteSummary?.outputTokens === undefined && isRemote
           ? "—" : finalTps.toFixed(1);
-        // TTFT measured from fetchStartTime (excludes health check and message building overhead)
+        // First exchange token, excluding initial health/message preparation.
         const ttft = Math.max(
           0,
-          firstTokenTime ? (firstTokenTime - fetchStartTime) / 1000 : 0,
+          exchangeFirstTokenClock.seconds(),
         );
         // Preserve final-pass counts separately from exchange-wide tool usage.
-        // Prefill rate comes only from that pass's engine timing receipt.
+        // Footer prefill aggregates engine receipts; preserve final-pass diagnostics.
         const finalStreamPromptTokens = promptTokens;
         const finalStreamCachedTokens = Math.min(
           cachedTokens,
           finalStreamPromptTokens,
         );
-        const finalPpSpeed = calculatePrefillTps({ prefillUsage: currentPrefillUsage });
+        const finalPpSpeed = exchangePrefillSpeed();
+        const finalPassPpSpeed = calculatePrefillTps({ prefillUsage: currentPrefillUsage });
 
         // Release any withheld tail before the final content is assembled.
         flushToolTagHoldback();
@@ -5019,7 +5044,7 @@ export function registerChatHandlers(
         } catch (_) {}
 
         console.log(
-          `[CHAT] Response complete: ${remoteSummary?.outputTokens === undefined && isRemote ? "unknown" : totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTpsLabel} t/s, decode=${decodeMetricSource}${remoteSummary ? `:${remoteSummary.outputTokens ?? "unknown"}/${remoteSummary.requestSeconds.toFixed(3)}s/${remoteSummary.passes}passes` : serverDecodeSummary ? `:${serverDecodeSummary.decodeTokens}/${serverDecodeSummary.decodeSeconds.toFixed(3)}s` : ""}, live=${isRemote ? "request-window" : liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPpSpeed ? `, ${finalPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
+          `[CHAT] Response complete: ${remoteSummary?.outputTokens === undefined && isRemote ? "unknown" : totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTpsLabel} t/s, decode=${decodeMetricSource}${remoteSummary ? `:${remoteSummary.outputTokens ?? "unknown"}/${remoteSummary.requestSeconds.toFixed(3)}s/${remoteSummary.passes}passes` : serverDecodeSummary ? `:${serverDecodeSummary.decodeTokens}/${serverDecodeSummary.decodeSeconds.toFixed(3)}s` : ""}, live=${isRemote ? "request-window" : liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPassPpSpeed ? `, ${finalPassPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
         );
 
         return assistantMessage;
@@ -5163,11 +5188,9 @@ export function registerChatHandlers(
             abortGenSec > 0 && abortTotalTokens > 0
               ? abortTotalTokens / abortGenSec
               : 0;
-          // Use fetchStartTime for TTFT (consistent with non-abort path)
-          const abortTtft = firstTokenTime
-            ? (firstTokenTime - fetchStartTime) / 1000
-            : 0;
-          const abortPpSpeed = calculatePrefillTps({ prefillUsage: currentPrefillUsage });
+          // Preserve first exchange TTFT even when interrupted during a later pass.
+          const abortTtft = exchangeFirstTokenClock.seconds();
+          const abortPpSpeed = exchangePrefillSpeed();
 
           const abortMetrics = {
             tokenCount: abortTotalTokens,

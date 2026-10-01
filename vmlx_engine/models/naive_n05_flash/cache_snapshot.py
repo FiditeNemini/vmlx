@@ -4,8 +4,23 @@ import mlx.core as mx
 from mlx_lm.models.cache import CacheList, KVCache, RotatingKVCache
 
 
+def _compact_swa_length(entry, arrays):
+    """Admit only oversized chronological, sink-free native SWA state."""
+    if type(entry) is not RotatingKVCache or len(arrays) != 2:
+        return None
+    keys, values = arrays
+    if keys.ndim != 4 or values.ndim != 4:
+        return None
+    length = int(keys.shape[2])
+    keep, size, offset, idx = map(int, entry.meta_state)
+    if (int(values.shape[2]) == length and keep == 0 and size > 0
+            and length > size and idx == length and offset >= length):
+        return size
+    return None
+
+
 def snapshot_size(cache, expected_tokens=None):
-    """Validate one common native boundary before allocating any copies."""
+    """Validate the boundary and estimate detached copy bytes without allocation."""
     offsets = []
     total = 0
 
@@ -16,8 +31,11 @@ def snapshot_size(cache, expected_tokens=None):
                 visit(child)
         elif type(entry) in (KVCache, RotatingKVCache):
             offsets.append(int(entry.offset))
-            for array in entry.state:
-                total += int(array.nbytes)
+            arrays = entry.state
+            compact_length = _compact_swa_length(entry, arrays)
+            for array in arrays:
+                total += (int(array.nbytes) if compact_length is None else
+                          int(array.nbytes) // int(array.shape[2]) * compact_length)
         else:
             raise ValueError("unsupported Naive prompt-cache component")
 
@@ -37,9 +55,21 @@ def clone_prompt_cache(cache):
     def clone(entry):
         if type(entry) is CacheList:
             return CacheList(*(clone(child) for child in entry.caches))
-        arrays = tuple(array * 1 for array in entry.state)
+        arrays = entry.state
+        metadata = entry.meta_state
+        if _compact_swa_length(entry, arrays) is not None:
+            from ...prefix_cache import _rotating_terminal_window
+
+            keys, values, size, keep, offset, idx = _rotating_terminal_window(
+                *arrays, metadata, expected_offset=entry.offset,
+                preserve_bounded_ring=True,
+            )
+            arrays = (keys, values)
+            metadata = tuple(map(str, (keep, size, offset, idx)))
+        # Detach even normalized suffix views from their oversized source backing.
+        arrays = tuple(array * 1 for array in arrays)
         mx.eval(*arrays)
-        return type(entry).from_state(arrays, entry.meta_state)
+        return type(entry).from_state(arrays, metadata)
 
     return [clone(entry) for entry in cache]
 

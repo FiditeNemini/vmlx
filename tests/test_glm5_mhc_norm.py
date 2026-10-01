@@ -122,7 +122,7 @@ def assert_words_equal(got, want):
 @pytest.mark.parametrize("pattern", ["random", "zero", "large", "cancellation"])
 def test_component_all_outputs_word_exact(pattern, coefficient_dtype):
     if not mx.metal.is_available() or not hc._compatible_runtime():
-        pytest.skip("requires MLX 0.32.2 / M5 Max; no source-host compute")
+        pytest.skip("requires MLX 0.32.2 or 0.32.3 / M5 Max; no source-host compute")
     rng = np.random.default_rng(53317)
     x = rng.normal(size=(1, 1, 4, 4096)).astype(np.float32)
     if pattern == "zero":
@@ -203,3 +203,20 @@ def test_default_policy_selects_dispatch_without_claiming_gpu_execution(monkeypa
         "requested": requested, "graph_calls": int(requested)}
     if calls:
         assert calls[0][1]["enabled"] is True
+
+
+@pytest.mark.parametrize("version,device,expected", [
+    ("0.32.2", "Apple M5 Max", True),
+    ("0.32.3", "Apple M5 Max", True),
+    ("0.32.1", "Apple M5 Max", False),
+    ("0.32.4", "Apple M5 Max", False),
+    ("0.32.3", "Apple M4 Max", False),
+])
+def test_qualified_runtime_versions_only(monkeypatch, version, device, expected):
+    monkeypatch.setattr(hc.importlib.metadata, "version", lambda name: version)
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": device})
+    hc._compatible_runtime.cache_clear()
+    try:
+        assert hc._compatible_runtime() is expected
+    finally:
+        hc._compatible_runtime.cache_clear()

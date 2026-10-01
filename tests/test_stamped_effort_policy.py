@@ -200,3 +200,38 @@ def test_policy_with_request_id_feeds_responses_finalize_pop(monkeypatch):
     }
     # pop cleared it — the finalize surface consumes exactly once
     assert pop_effort_substitution("resp_deadbeef0001") is None
+
+
+@pytest.mark.parametrize("family", ["glm5_next", "naive_n05_flash"])
+@pytest.mark.parametrize("effort", ["LOW", " low ", "High", " MAX "])
+@pytest.mark.parametrize("placement", ["generation", "template", "both"])
+def test_native_literal_effort_is_canonicalized(monkeypatch, family, effort, placement):
+    monkeypatch.setattr(server, "_stamped_reasoning_effort_contract",
+                        lambda _p: (("low", "high", "max"), "max"))
+    monkeypatch.setattr(server, "_is_hy3_model", lambda _k: False)
+    monkeypatch.setattr(server, "_model_family_for_defaults", lambda _k: family)
+    chat = {"reasoning_effort": effort} if placement != "template" else {}
+    ct = {"reasoning_effort": effort} if placement != "generation" else {}
+    server._apply_stamped_effort_policy(chat, ct, model_key="/tmp/bundle")
+    expected = effort.strip().lower()
+    assert ct["reasoning_effort"] == expected
+    if placement != "template":
+        assert chat["reasoning_effort"] == expected
+    else:
+        assert "reasoning_effort" not in chat
+
+
+@pytest.mark.parametrize("family", ["glm5_next", "naive_n05_flash"])
+@pytest.mark.parametrize("top,nested,expected", [("high", "low", "low"),
+    ("low", "high", "high"), ("max", " low ", "low"),
+    ("max", " HIGH ", "high"), ("max", "medium", "high")])
+def test_native_nested_effort_selection_reaches_engine(monkeypatch, family, top, nested, expected):
+    monkeypatch.setattr(server, "_stamped_reasoning_effort_contract",
+                        lambda _p: (("low", "high", "max"), "max"))
+    monkeypatch.setattr(server, "_is_hy3_model", lambda _k: False)
+    monkeypatch.setattr(server, "_model_family_for_defaults", lambda _k: family)
+    chat, ct = {}, {"reasoning_effort": nested}
+    server._forward_reasoning_effort_kwargs(chat, ct, top)
+    server._apply_stamped_effort_policy(chat, ct, model_key="/tmp/bundle")
+    assert ct["reasoning_effort"] == expected
+    assert chat["reasoning_effort"] == expected

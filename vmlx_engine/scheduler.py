@@ -4322,9 +4322,11 @@ class Scheduler:
         restart.
 
         The accepted hit also measures its uncached tail on this exact loaded
-        model.  Removing cache preparation from scheduled TTFT yields a
-        conservative tail-prefill/first-token sample, so one restart refault
-        seeds both sides of the *next* SSD-versus-clean decision.
+        model. Keep that request-local observation separate from clean-prefill
+        admission: a short suffix includes first-token overhead and uses a
+        different context geometry, so its seconds/token cannot estimate a
+        complete clean prefill. Without a comparable clean sample, retain the
+        existing insufficient-history SSD fallback.
         """
         execution = getattr(request, "_cache_execution", None)
         if not isinstance(execution, dict):
@@ -4374,17 +4376,9 @@ class Scheduler:
                 0,
                 int(execution.get("uncached_prompt_tokens", 0) or 0),
             )
-            prompt_tokens = max(
-                tail_tokens,
-                int(execution.get("prompt_tokens", 0) or 0),
-            )
             tail_prefill = max(0.0, scheduled_ttft - worker_cache)
-            if tail_tokens > 0 and tail_prefill > 0.0:
-                self._update_cache_admission_rate(
-                    "prefill",
-                    tail_prefill / tail_tokens,
-                    prompt_tokens,
-                )
+            execution["tail_prefill_tokens"] = tail_tokens
+            execution["tail_prefill_first_token_seconds"] = round(tail_prefill, 6)
         else:
             self._record_clean_prefill_admission_sample(
                 request,
@@ -9598,6 +9592,7 @@ class Scheduler:
                 completion_tokens=request.num_output_tokens,
                 cached_tokens=request.cached_tokens,
                 cache_detail=_detail,
+                prefill_usage=getattr(response, "prefill_usage", None),
                 logprobs=(
                     list(request.output_logprobs)
                     if request.sampling_params.logprobs

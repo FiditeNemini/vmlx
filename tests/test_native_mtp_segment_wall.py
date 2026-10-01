@@ -233,3 +233,60 @@ def test_decode_error_freezes_span_and_preserves_error_result():
     assert 'original failure' in result[0]['error']
     assert owner.active_batch is None
     assert not hasattr(req, '_native_mtp_state')
+
+
+def diagnostic_state():
+    return SimpleNamespace(
+        epoch=0, drafts=[1, 2],
+        stats=SimpleNamespace(verify_ms=10., sample_ms=2., draft_ms=3.,
+                              snapshot_ms=0., restore_ms=0., replay_ms=0.,
+                              materialize_ms=1.),
+    )
+
+
+def diagnostic_helpers():
+    ns = {}
+    load_function('_native_mtp_timing_total_ms', ns)
+    return ns, load_function('_native_mtp_diagnostic_cycle_wall', ns)
+
+
+def test_cycle_diagnostic_accounts_fence_acceptance_and_signed_remainder():
+    ns, observe = diagnostic_helpers()
+    mtp = diagnostic_state()
+    before = vars(mtp.stats).copy()
+    assert observe(mtp, now=10., fence_ms=0., acceptance_ms=0.) is None
+    mtp.stats.verify_ms += 20.
+    row = observe(mtp, now=10.05, fence_ms=7., acceptance_ms=3.)
+    assert row['observed_cycle_wall_ms'] == pytest.approx(50.)
+    assert row['phase_scope_wall_ms'] == 20.
+    assert row['unassigned_wall_ms'] == pytest.approx(20.)
+    # Overlapping phase scopes must remain visible, not silently clamped.
+    mtp.stats.verify_ms += 80.
+    row = observe(mtp, now=10.06, fence_ms=2., acceptance_ms=1.)
+    assert row['unassigned_wall_ms'] == pytest.approx(-73.)
+    assert vars(mtp.stats) == {**before, 'verify_ms': 110.}
+    assert ns['_native_mtp_timing_total_ms'](mtp.stats) == 116.
+
+
+@pytest.mark.parametrize('transition', ['epoch', 'depth', 'reentry', 'clock', 'stats'])
+def test_cycle_diagnostic_does_not_bridge_incompatible_intervals(transition):
+    _, observe = diagnostic_helpers()
+    mtp = diagnostic_state()
+    assert observe(mtp, now=10., fence_ms=0., acceptance_ms=0.) is None
+    now = 20.
+    if transition == 'epoch':
+        mtp.epoch += 1
+    elif transition == 'depth':
+        mtp.drafts.append(3)
+    elif transition == 'reentry':
+        # The real re-entry owner seeds a fresh state after the AR interval.
+        mtp = diagnostic_state()
+    elif transition == 'clock':
+        now = 9.
+    else:
+        mtp.stats.verify_ms = 0.
+    assert observe(mtp, now=now, fence_ms=1., acceptance_ms=1.) is None
+    mtp.stats.verify_ms += 1.
+    row = observe(mtp, now=now + .01, fence_ms=1., acceptance_ms=1.)
+    assert row['observed_cycle_wall_ms'] == pytest.approx(10.)
+    assert row['phase_scope_wall_ms'] == 1.

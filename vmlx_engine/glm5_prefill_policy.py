@@ -21,7 +21,7 @@ def _register_sum_default_qualified() -> bool:
         import mlx.core as mx
 
         return (
-            importlib.metadata.version("mlx") == "0.32.2"
+            importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
             and mx.metal.is_available()
             and mx.device_info().get("device_name") == "Apple M5 Max"
         )

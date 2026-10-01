@@ -18,7 +18,7 @@ def exact(a, b):
 @pytest.fixture
 def qualified(monkeypatch):
     if not mx.metal.is_available() or not fused._compatible_runtime():
-        pytest.skip("register-sum numerical qualification requires MLX0.32.2/M5")
+        pytest.skip("register-sum numerical qualification requires qualified MLX 0.32.2 or 0.32.3/M5")
     monkeypatch.setattr(fused, "_FAILED", False)
     monkeypatch.setattr(fused, "_OBSERVED", False)
     monkeypatch.setattr(kda, "_EXACT_PAIRWISE_REQUESTED", True)
@@ -145,7 +145,11 @@ def test_explicit_non_one_preserves_disable(monkeypatch, value):
     ("Apple M5 Max", "0.32.2", True, True),
     ("Apple M5 Pro", "0.32.2", True, False),
     ("Apple M3 Ultra", "0.32.2", True, False),
-    ("Apple M5 Max", "0.32.3", True, False),
+    ("Apple M5 Max", "0.32.3", True, True),
+    ("Apple M5 Max", "0.32.4", True, False),
+    ("Apple M5 Max", "0.33.0", True, False),
+    ("Apple M5 Pro", "0.32.3", True, False),
+    ("Apple M5 Max", "0.32.3", False, False),
     ("Apple M5 Max", "0.32.2", False, False),
 ])
 def test_automatic_runtime_qualification(monkeypatch, device, version, available, expected):
@@ -187,3 +191,24 @@ def test_automatic_selection_does_not_promote_batched_prefill(monkeypatch, batch
     # Fallback is the actual native expression, not an invented result.
     exact(kda._pairwise_sum(x, x, x), mx.full((batch, 1, 64, 64), 128.0))
     assert observed == [expected]
+
+
+@pytest.mark.parametrize("version,device,expected", [
+    ("0.32.2", "Apple M5 Max", True),
+    ("0.32.3", "Apple M5 Max", True),
+    ("0.32.2", "Apple M5 Pro", True),
+    ("0.32.3", "Apple M5 Pro", False),
+    ("0.32.3", "Apple M5 Ultra", False),
+    ("0.32.4", "Apple M5 Max", False),
+    ("0.33.0", "Apple M5 Max", False),
+    ("0.32.3", "Apple M4 Max", False),
+])
+def test_kernel_runtime_version_qualification(monkeypatch, version, device, expected):
+    import importlib.metadata
+    monkeypatch.setattr(importlib.metadata, "version", lambda _: version)
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": device})
+    fused._compatible_runtime.cache_clear()
+    try:
+        assert fused._compatible_runtime() is expected
+    finally:
+        fused._compatible_runtime.cache_clear()

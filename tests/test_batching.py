@@ -2309,10 +2309,10 @@ class TestSchedulerBasic:
         assert request.cached_tokens == 410
         assert request._cache_candidate_lookup_seconds == pytest.approx(2.726)
 
-    def test_ssd_only_restart_hit_seeds_total_restore_and_tail_prefill_costs(
+    def test_ssd_only_restart_hit_records_tail_without_seeding_clean_cost(
         self, mock_model, mock_tokenizer
     ):
-        """One restart refault must calibrate both sides of the next choice."""
+        """A warm tail cannot calibrate clean prefill at the full prompt size."""
         scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
         scheduler.paged_cache_manager = SimpleNamespace(disk_only=True)
         request = SimpleNamespace(
@@ -2344,19 +2344,65 @@ class TestSchedulerBasic:
         assert scheduler._cache_admission_disk_seconds_per_token == pytest.approx(
             2.805 / 410
         )
-        assert scheduler._cache_admission_prefill_seconds_per_token == pytest.approx(
-            0.195 / 67
-        )
+        assert execution["tail_prefill_tokens"] == 67
+        assert execution["tail_prefill_first_token_seconds"] == pytest.approx(0.195)
+        assert scheduler._cache_admission_prefill_seconds_per_token == 0.0
+        assert scheduler._cache_admission_prefill_sample_count == 0
         assert scheduler._cache_admission_disk_reference_tokens == 410
-        assert scheduler._cache_admission_prefill_reference_tokens == 477
+        assert scheduler._cache_admission_prefill_reference_tokens == 0
         assert scheduler._last_cache_execution == execution
 
         reject, detail = scheduler._should_clean_prefill_over_disk_only(
             paged_cached_tokens=410,
             paged_cold_tokens=410,
         )
+        assert reject is False
+        assert detail["cost_history_comparable"] is False
+        assert detail["cost_reason"] == "insufficient_cost_history"
+
+    @pytest.mark.parametrize("tail_tokens", [1, 120])
+    def test_warm_suffix_does_not_replace_clean_prefill_cost(
+        self, mock_model, mock_tokenizer, tail_tokens
+    ):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler.paged_cache_manager = SimpleNamespace(disk_only=True)
+        scheduler._record_clean_prefill_admission_sample(
+            SimpleNamespace(_cache_execution={
+                "cached_tokens": 0, "prefill_tokens": 4674, "prompt_tokens": 4674,
+            }),
+            5.545,
+        )
+        clean_rate = scheduler._cache_admission_prefill_seconds_per_token
+        request = SimpleNamespace(_cache_execution={
+            "prompt_tokens": 4701 + tail_tokens,
+            "cached_tokens": 4701,
+            "uncached_prompt_tokens": tail_tokens,
+            "prefill_tokens": tail_tokens,
+            "cache_reuse_applied": True,
+            "candidate_lookup_seconds": 6.0,
+            "total_worker_cache_seconds": 0.2,
+            "selection": {"selected": "paged"},
+        })
+        # Tiny suffix latency includes first-token overhead. Treating its rate
+        # as a full-prefill sample would incorrectly prefer this 6.2s restore.
+        scheduler._record_cache_admission_first_token_sample(
+            request, scheduled_ttft_seconds=0.2 + tail_tokens * 0.02,
+        )
+        assert scheduler._cache_admission_prefill_seconds_per_token == clean_rate
+        assert scheduler._cache_admission_prefill_reference_tokens == 4674
+        assert scheduler._cache_admission_prefill_sample_count == 1
+        assert request._cache_execution["tail_prefill_tokens"] == tail_tokens
+        assert request._cache_execution["tail_prefill_first_token_seconds"] == pytest.approx(
+            tail_tokens * 0.02
+        )
+        reject, detail = scheduler._should_clean_prefill_over_disk_only(
+            paged_cached_tokens=4701, paged_cold_tokens=4701,
+        )
         assert reject is True
-        assert detail["cost_history_comparable"] is True
+        assert detail["estimated_prefill_seconds"] == pytest.approx(
+            clean_rate * 4701, abs=1e-6
+        )
+        assert detail["estimated_disk_seconds"] == pytest.approx(6.2)
         assert detail["cost_reason"] == "estimated_clean_prefill_faster"
 
     def test_paged_quantized_kv_hit_defers_worker_dequant_for_batch_generator(

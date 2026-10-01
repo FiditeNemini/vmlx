@@ -17,7 +17,7 @@ PREVIOUS_BUNDLE_DIR="$PANEL_DIR/.bundled-python.previous.$$"
 BUNDLE_PUBLISHED=0
 STANDALONE_TARBALL=""
 JANG_LOCAL="${VMLX_JANG_TOOLS_SOURCE:-${VMLINUX_JANG_TOOLS_SOURCE:-$HOME/jang/jang-tools}}"
-JANG_MIN_VERSION="2.5.48"
+JANG_MIN_VERSION="2.5.49"
 JANG_SOURCE_COMMIT=""
 JANG_SOURCE_VERSION=""
 VMLX_SOURCE_COMMIT=""
@@ -300,7 +300,7 @@ echo "==> Upgrading pip..."
 # release currently has no macOS ARM wheel and would trigger a non-reproducible
 # source build. OpenCV's packages share the cv2 namespace and must not coexist.
 #
-MLX_VERSION="0.32.2"
+MLX_VERSION="0.32.3"
 MLX_LM_VERSION="0.31.3"
 MLX_VLM_VERSION="0.5.0"
 MFLUX_VERSION="0.19.0"
@@ -448,7 +448,7 @@ if [ -f "$JANG_LOCAL/pyproject.toml" ]; then
 else
   if [ "${VMLX_ALLOW_PYPI_JANG:-${VMLINUX_ALLOW_PYPI_JANG:-0}}" = "1" ]; then
     echo "    local jang-tools missing; VMLX_ALLOW_PYPI_JANG=1 so using PyPI fallback"
-    "$PYTHON" -m pip install --no-deps "jang>=2.5.48"
+    "$PYTHON" -m pip install --no-deps "jang>=2.5.49"
   else
     echo "ERROR: RELEASE BLOCKED — local jang-tools source missing: $JANG_LOCAL" >&2
     echo "       vMLX release builds must bundle the checked-out JANG runtime," >&2

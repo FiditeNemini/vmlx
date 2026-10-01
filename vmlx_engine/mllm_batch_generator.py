@@ -75,7 +75,7 @@ computation for SSM layers even if you have the KV cache.
 
 METAL OPTIMIZATIONS
 -------------------
-- ``mx.metal.set_cache_limit()``: 25% of max working set (floor 512MB)
+- ``mx.metal.set_cache_limit()``: shared serving policy, tightened for headroom
   Bounds the Metal allocator's free-list so prefix cache and OS get memory.
 - ``mx.async_eval()``: Used in prefill loop for GPU/CPU overlap.
   Submits sampled token + cache states to GPU without blocking.
@@ -103,6 +103,7 @@ HELPER FUNCTIONS
 import hashlib
 import importlib
 import logging
+import json
 import inspect
 import math
 import os
@@ -126,6 +127,7 @@ from .native_mtp_forward_probe import start_native_mtp_forward_probe
 from .metal.affine_moe_pair_decode import affine_moe_ar_scope
 
 import mlx.core as mx
+import numpy as np
 import mlx.nn as nn
 
 from .errors import (
@@ -165,6 +167,47 @@ from .native_mtp_profile import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _glm_native_prompt_token_ids(input_ids):
+    """Read a native GLM single-row prompt without a new GPU squeeze graph."""
+    if input_ids is None:
+        return []
+    if input_ids.ndim == 1:
+        return input_ids.tolist()
+    if input_ids.ndim == 2 and input_ids.shape[0] == 1 and input_ids.shape[1] > 0:
+        # Python row selection happens after the existing array is ready.
+        # MLX input_ids[0] instead creates a Squeeze on the generation stream.
+        return input_ids.tolist()[0]
+    return input_ids[0].tolist()
+
+
+def _mllm_processor_array(x, target_dtype=None):
+    """Normalize processor arrays without boxing large FP32 pixel payloads."""
+    if x is None:
+        return None
+    if not isinstance(x, mx.array):
+        try:
+            if type(x) is np.ndarray and x.dtype == np.float32 and x.size:
+                # Match the old FP32 -> Python float -> FP32 round trip,
+                # including signaling-NaN quieting, without millions of Python
+                # objects. Contiguous storage handles negative strides; reshape
+                # keeps scalar rank. Empty arrays retain legacy shape inference.
+                with np.errstate(invalid="ignore"):
+                    value = x.astype(np.float64).astype(np.float32)
+                x = mx.array(np.ascontiguousarray(value).reshape(x.shape))
+            elif hasattr(x, "tolist"):
+                x = mx.array(x.tolist())
+            else:
+                x = mx.array(x)
+        except Exception:
+            return x
+    if target_dtype is not None and x.dtype != target_dtype:
+        try:
+            x = x.astype(target_dtype)
+        except Exception:
+            pass
+    return x
 
 
 def _maybe_dump_prompt_tokens(request_id: str, token_ids, tokenizer) -> None:
@@ -885,7 +928,7 @@ def _vlm_image_request_cache_limit_bytes(
     return max(floor, min(max_limit, fractional))
 
 
-def _apply_vlm_image_request_cache_limit() -> bool:
+def _apply_vlm_image_request_cache_limit(steady_limit: int | None = None) -> bool:
     """Tighten the Metal reusable cache before VLM media work.
 
     This is a preflight memory-safety control, not a model behavior change. It
@@ -899,6 +942,10 @@ def _apply_vlm_image_request_cache_limit() -> bool:
     (A/B measured this restore as hygiene, not a decode-speed lever: decode
     throughput was unchanged with the limit still tightened.)
     """
+    from .mlx_memory import configured_serving_cache_limit_bytes
+
+    if configured_serving_cache_limit_bytes(0) is None:
+        return False
     if os.environ.get("VMLX_VLM_IMAGE_CACHE_LIMIT", "1") == "0":
         return False
     if not mx.metal.is_available():
@@ -935,6 +982,8 @@ def _apply_vlm_image_request_cache_limit() -> bool:
             free_fraction=free_fraction,
             floor_bytes=floor,
         )
+        if steady_limit is not None:
+            limit = min(limit, steady_limit)
         if limit <= 0:
             return False
         set_cache = getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit
@@ -6269,6 +6318,34 @@ def _native_mtp_confirmed_tokens_from_cycles(stats: MLLMNativeMTPStats) -> int:
     return max(0, int(stats.cycles)) + max(0, int(stats.accepted_tokens))
 
 
+def _native_mtp_diagnostic_cycle_wall(state, *, now, fence_ms, acceptance_ms):
+    """Observe one trace-anchor interval; never feed these values to policy.
+
+    Includes post-anchor draft/restore work, queued-token draining and executor
+    gaps. Phase deltas describe host timing scopes, not exclusive GPU duration.
+    """
+    epoch = int(getattr(state, "epoch", 0) or 0)
+    depth = len(state.drafts)
+    total = _native_mtp_timing_total_ms(state.stats)
+    prior = getattr(state, "_diagnostic_cycle_anchor", None)
+    state._diagnostic_cycle_anchor = (now, total, epoch, depth)
+    if prior is None or prior[2:] != (epoch, depth) or now < prior[0]:
+        return None
+    wall = (now - prior[0]) * 1000.0
+    phase = total - prior[1]
+    if phase < 0.0:
+        return None
+    # Signed residual exposes overlap or scope-accounting mismatch; clamping
+    # it would hide the very diagnostic discrepancy this record observes.
+    return {
+        "observed_cycle_wall_ms": wall,
+        "phase_scope_wall_ms": phase,
+        "fence_wall_ms": fence_ms,
+        "acceptance_wall_ms": acceptance_ms,
+        "unassigned_wall_ms": wall - phase - fence_ms - acceptance_ms,
+    }
+
+
 def _native_mtp_cost_ratio(
     stats: MLLMNativeMTPStats,
     ar_step_ms: float,
@@ -8469,7 +8546,7 @@ class MLLMBatchGenerator:
 
     **Metal memory:**
 
-    Sets ``mx.metal.set_cache_limit()`` at 25% of max working set,
+    Sets ``mx.metal.set_cache_limit()`` with the shared serving policy,
     uses ``mx.async_eval()`` in prefill, ``mx.contiguous()`` on extracted
     cache. Restores old limits in ``close()``.
 
@@ -8795,19 +8872,12 @@ class MLLMBatchGenerator:
             if True:  # Always set Metal limits (smelt mode doesn't need special limits)
                 active_mem, max_ws = get_effective_metal_working_set_bytes(mx)
                 self._old_wired_limit = mx.set_wired_limit(max_ws) if max_ws > 0 else None
-                # Set Metal allocator cache limit.
-                # mlxstudio#78: previously was a hard `max_ws * 0.25`, which
-                # on a 64GB M4 Max loading Gemma-4-31B (~41GB active) would
-                # reserve 12GB for cache on top of 41GB model → 53GB required
-                # vs 48GB max working set → Metal command buffer OOM on the
-                # FIRST request before a single token is generated.
-                #
-                # New policy: cap at min(25% of max_ws, 50% of FREE memory
-                # after model load). Floor at 512MB. This keeps the original
-                # behavior on machines with plenty of headroom (bounds the
-                # free-list so the OS can reclaim memory when pressured)
-                # while adapting on tight-memory systems where the model
-                # already consumed most of the budget.
+                # The server bounds the allocator after model load. This
+                # generator is created lazily on the first request, so it must
+                # preserve that shared policy rather than widen its ceiling.
+                # Standalone generators use the same policy; tight headroom
+                # may further reduce only the default, never an explicit MB
+                # override. This does not change request admission.
                 try:
                     active = active_mem
                     if active <= 0:
@@ -8823,13 +8893,29 @@ class MLLMBatchGenerator:
                     # the other half to live in without forcing the
                     # allocator to release pooled blocks back to Metal.
                     safety_limit = int(free * 0.5)
-                    cache_limit = max(
-                        512 * 1024 * 1024, min(base_limit, safety_limit)
+                    from .mlx_memory import configured_serving_cache_limit_bytes
+                    cache_limit = configured_serving_cache_limit_bytes(
+                        active,
+                        max_default_bytes=max(
+                            512 * 1024 * 1024, min(base_limit, safety_limit)
+                        ),
                     )
-                    if max_ws > 0:
+                    self._tight_memory_prefill_drain = safety_limit < base_limit
+                    if max_ws > 0 and cache_limit is not None:
                         self._old_cache_limit = _set_cache(cache_limit)
+                        # MLX returns the previous ceiling. Preserve a stricter
+                        # serving/embedding default even if active residency
+                        # grew since load. No GPU allocation occurs between
+                        # these setters. Explicit positive overrides still win.
+                        if isinstance(self._old_cache_limit, int) and self._old_cache_limit >= 0:
+                            retained_limit = configured_serving_cache_limit_bytes(
+                                active,
+                                max_default_bytes=min(cache_limit, self._old_cache_limit),
+                            )
+                            if retained_limit != cache_limit:
+                                _set_cache(retained_limit)
+                                cache_limit = retained_limit
                         self._steady_cache_limit = cache_limit
-                        self._tight_memory_prefill_drain = safety_limit < base_limit
                         logger.info(
                             f"Metal cache limit set to {cache_limit / (1024**3):.2f}GB "
                             f"(max_ws={max_ws / (1024**3):.1f}GB, "
@@ -8843,7 +8929,7 @@ class MLLMBatchGenerator:
                         logger.warning(
                             "Tight-memory configuration detected: model is "
                             "using a large fraction of max working set. "
-                            "Cache limit adjusted downward. If requests OOM, "
+                            "Allocator policy resolved for limited headroom. If requests OOM, "
                             "try a more aggressively quantized model or "
                             "reduce prompt length. (mlxstudio#78)"
                         )
@@ -9253,7 +9339,7 @@ class MLLMBatchGenerator:
                 raise ValueError("All audio inputs failed to process")
 
         if all_images or video_inputs or all_audio:
-            if _apply_vlm_image_request_cache_limit():
+            if _apply_vlm_image_request_cache_limit(self._steady_cache_limit):
                 self._vlm_cache_limit_tightened = True
             mx.clear_cache()
 
@@ -9376,38 +9462,12 @@ class MLLMBatchGenerator:
         # batched engine's outer prefill-except then silently queued an empty
         # "stop" response (#56). The SimpleEngine path never hit this because
         # mlx_vlm.generate() does its own dtype normalization before forward.
-        def _ensure_mx_array(x, target_dtype=None):
-            """Normalize numpy / torch / list / mx inputs to an mx.array,
-            optionally casting to a specific dtype. Pixtral / Mistral 3 /
-            Qwen3.5-VL processors all return different wire formats; the
-            batched engine then passes the raw value straight into forward,
-            which chokes with either `Cannot index mlx array using the given
-            type` (QuantizedEmbedding) or `Cannot interpret mlx.core.bfloat16
-            as a data type` (numpy.astype against an mx dtype). Normalizing
-            once here makes all downstream layer calls match the SimpleEngine
-            path."""
-            if x is None:
-                return None
-            if not isinstance(x, mx.array):
-                try:
-                    if hasattr(x, "tolist"):
-                        x = mx.array(x.tolist())
-                    else:
-                        x = mx.array(x)
-                except Exception:
-                    return x  # give up gracefully, downstream will error
-            if target_dtype is not None and x.dtype != target_dtype:
-                try:
-                    x = x.astype(target_dtype)
-                except Exception:
-                    pass
-            return x
 
         # Issue #56 — normalize input_ids + pixel_values + attention_mask
         # before storing on the request. Covers Mistral 3 / Pixtral,
         # Qwen3.5-VL, Gemma 4, and future VLM families without having to
         # special-case each processor's output format.
-        request.input_ids = _ensure_mx_array(inputs.get("input_ids"), mx.int32)
+        request.input_ids = _mllm_processor_array(inputs.get("input_ids"), mx.int32)
         if os.environ.get("VMLX_PROMPT_DUMP_DIR") and getattr(request.input_ids, "shape", None):
             _maybe_dump_prompt_tokens(
                 request.request_id,
@@ -9416,9 +9476,9 @@ class MLLMBatchGenerator:
             )
         pixel_values = inputs.get("pixel_values")
         video_pixel_values = inputs.get("pixel_values_videos")
-        request.pixel_values = _ensure_mx_array(pixel_values)
-        request.video_pixel_values = _ensure_mx_array(video_pixel_values)
-        request.attention_mask = _ensure_mx_array(inputs.get("attention_mask"))
+        request.pixel_values = _mllm_processor_array(pixel_values)
+        request.video_pixel_values = _mllm_processor_array(video_pixel_values)
+        request.attention_mask = _mllm_processor_array(inputs.get("attention_mask"))
         if video_cache_sources:
             # What the PROCESSOR produced (the loader's frames may be re-sized
             # by the sub-processor): the temporal/spatial patch grid per video
@@ -9441,19 +9501,19 @@ class MLLMBatchGenerator:
             if k not in ["input_ids", "pixel_values", "pixel_values_videos", "attention_mask"]
         }
         request.extra_kwargs.update(preserved_private_kwargs)
-        request.image_grid_thw = _ensure_mx_array(
+        request.image_grid_thw = _mllm_processor_array(
             request.extra_kwargs.pop("image_grid_thw", None), mx.int32
         )
         if "video_grid_thw" in request.extra_kwargs:
-            request.video_grid_thw = _ensure_mx_array(
+            request.video_grid_thw = _mllm_processor_array(
                 request.extra_kwargs.pop("video_grid_thw"), mx.int32
             )
         else:
             request.video_grid_thw = None
-        request.audio_codes = _ensure_mx_array(
+        request.audio_codes = _mllm_processor_array(
             request.extra_kwargs.pop("audio_codes", None), mx.int32
         )
-        request.audio_embeds = _ensure_mx_array(
+        request.audio_embeds = _mllm_processor_array(
             request.extra_kwargs.pop("audio_embeds", None)
         )
         input_features = request.extra_kwargs.pop("input_features", None)
@@ -9473,10 +9533,10 @@ class MLLMBatchGenerator:
             )
             if key in request.extra_kwargs
         } or None
-        request.audio_features = _ensure_mx_array(
+        request.audio_features = _mllm_processor_array(
             input_features if input_features is not None else audio_features
         )
-        request.audio_features_mask = _ensure_mx_array(
+        request.audio_features_mask = _mllm_processor_array(
             input_features_mask if input_features is not None else None, mx.bool_
         )
         request.audio_features_are_raw_input_features = input_features is not None
@@ -9492,7 +9552,7 @@ class MLLMBatchGenerator:
                 )
             )
         ):
-            request.audio_codes = _ensure_mx_array(
+            request.audio_codes = _mllm_processor_array(
                 _build_mimo_audio_codes_from_paths(
                     model=self.model,
                     processor=self.processor,
@@ -13205,7 +13265,7 @@ class MLLMBatchGenerator:
             # Media-expanded prompts must use the one-shot VLM wrapper path.
             # Drop allocator free-list memory and reject impossible requests
             # before Metal executes a command buffer that can kill the server.
-            if _apply_vlm_image_request_cache_limit():
+            if _apply_vlm_image_request_cache_limit(self._steady_cache_limit):
                 self._vlm_cache_limit_tightened = True
             mx.clear_cache()
         _raise_if_image_prefill_exceeds_budget(
@@ -14200,10 +14260,15 @@ class MLLMBatchGenerator:
         ):
             return
         from .utils.glm5_native_media import GLM5_MEDIA_KEY, glm5_media_input_key
+        timing = getattr(request, "_glm_native_media_timing", None)
+        if timing is not None:
+            timing["identity_started"] = time.perf_counter()
         try:
             request._glm_native_media_key = glm5_media_input_key(
                 request, tokens, self._media_placeholder_token_ids(),
             )
+            if timing is not None:
+                timing["whole_key_finished"] = time.perf_counter()
             from .utils.glm5_native_media import glm5_media_item_keys
             request._glm_native_media_items = None
             try:
@@ -14219,6 +14284,9 @@ class MLLMBatchGenerator:
             request._glm_native_media_key = None
             request._glm_native_media_skip = f"GLM native SSD media identity unavailable: {type(exc).__name__}"
             logger.info("%s for %s: %s", request._glm_native_media_skip, request.request_id, exc)
+        finally:
+            if timing is not None:
+                timing["identity_finished"] = time.perf_counter()
 
     def _restore_glm_native_prefix(self, request) -> None:
         native = getattr(self, "native_glm_cache", None)
@@ -14238,6 +14306,29 @@ class MLLMBatchGenerator:
                 retained_tokens=0, durable=False,
             )
             return
+        timing = getattr(request, "_glm_native_media_timing", None)
+        if timing is not None:
+            # Host wall latency, including any implicit materialization in the
+            # existing operations. Never synchronize merely to measure it.
+            fetch_started = time.perf_counter()
+            segments = (
+                ("postprocess_to_identity_ms", "postprocess_finished", "identity_started"),
+                ("trace_stop_ms", "postprocess_finished", "trace_stopped"),
+                ("derived_file_cleanup_ms", "trace_stopped", "derived_files_released"),
+                ("cancellation_check_ms", "derived_files_released", "cancellation_checked"),
+                ("token_list_extraction_ms", "cancellation_checked", "token_list_extracted"),
+                ("cache_key_merge_ms", "token_list_extracted", "before_prepare_identity"),
+                ("identity_entry_ms", "before_prepare_identity", "identity_started"),
+                ("whole_key_ms", "identity_started", "whole_key_finished"),
+                ("item_keys_and_merge_ms", "whole_key_finished", "identity_finished"),
+                ("identity_to_fetch_ms", "identity_finished", None),
+                ("total_before_fetch_ms", "postprocess_finished", None),
+            )
+            values = {name: round(1000 * ((timing[end] if end else fetch_started) - timing[start]), 3)
+                      for name, start, end in segments
+                      if start in timing and (end is None or end in timing)}
+            logger.info("GLM native media prelookup wall timing for %s: %s",
+                        request.request_id, json.dumps(values, sort_keys=True))
         try:
             found = native.fetch(
                 tokens, extra_keys=getattr(request, "_cache_extra_keys", None),
@@ -14390,7 +14481,16 @@ class MLLMBatchGenerator:
             try:
                 trace.start("preprocess")
                 self._preprocess_request(req)
+                # Request-level opt-in: no per-token work or extra GPU fences.
+                req._glm_native_media_timing = (
+                    {"postprocess_finished": time.perf_counter()}
+                    if self.native_glm_cache is not None
+                    and os.environ.get("VMLX_GLM5_MEDIA_TIMING", "").lower() in {"1", "true", "yes", "on"}
+                    else None
+                )
                 trace.stop("preprocess")
+                if req._glm_native_media_timing is not None:
+                    req._glm_native_media_timing["trace_stopped"] = time.perf_counter()
             except (MediaControlsUnmeetableError, MediaInputError) as strict_err:
                 trace.stop("preprocess")
                 rejected_request_ids.add(req.request_id)
@@ -14439,18 +14539,27 @@ class MLLMBatchGenerator:
                 # processor inside _preprocess_request; release them whether it
                 # returned, rejected the request or raised
                 _release_derived_media_files(req)
+                _media_timing = getattr(req, "_glm_native_media_timing", None)
+                if _media_timing is not None:
+                    _media_timing["derived_files_released"] = time.perf_counter()
             if _prefill_cancelled(req):
                 _release_cancelled_prefill_request(req)
                 continue
+            if _media_timing is not None:
+                _media_timing["cancellation_checked"] = time.perf_counter()
             # Save full token list BEFORE cache fetch can mutate req.input_ids.
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (
-                req.input_ids.tolist()
+                _glm_native_prompt_token_ids(req.input_ids)
+                if self.native_glm_cache is not None
+                else req.input_ids.tolist()
                 if req.input_ids is not None and req.input_ids.ndim == 1
                 else req.input_ids[0].tolist()
                 if req.input_ids is not None
                 else []
             )
+            if _media_timing is not None:
+                _media_timing["token_list_extracted"] = time.perf_counter()
             # Media identity used to salt EVERY block, including root text.
             # Scope exact item digests to their own causal placeholder runs so
             # an image->video chain reuses the unchanged image-conditioned
@@ -14468,6 +14577,8 @@ class MLLMBatchGenerator:
                 # including its generation suffix. Leave the legacy key and
                 # usage fields below unchanged for other backends/surfaces.
                 req._glm_native_full_token_ids = _all_tokens
+                if _media_timing is not None:
+                    _media_timing["before_prepare_identity"] = time.perf_counter()
                 self._prepare_glm_native_media_identity(req, _all_tokens)
             # Strip generation prompt tokens from the cache key.
             # Chat templates append assistant role tokens (e.g. <|im_start|>assistant\n<think>\n)
@@ -18337,6 +18448,7 @@ class MLLMBatchGenerator:
         # stalls later forwards. One fence per cycle bounds the outstanding
         # queue. Gated for A/B; flips default only on byte-equal + speedup
         # proof at the app-default cache shape.
+        _diag_fence_start = time.perf_counter() if _NATIVE_MTP_CYCLE_TRACE else None
         if _native_mtp_cycle_fence_enabled(
             depth,
             model_type=getattr(self, "_model_type", None),
@@ -18346,6 +18458,11 @@ class MLLMBatchGenerator:
             except Exception:
                 pass
 
+        _diag_acceptance_start = time.perf_counter() if _NATIVE_MTP_CYCLE_TRACE else None
+        _diag_fence_ms = (
+            (_diag_acceptance_start - _diag_fence_start) * 1000.0
+            if _diag_fence_start is not None else 0.0
+        )
         acceptance_rows = (
             {} if os.environ.get("VMLX_MTP_REUSE_ACCEPTANCE_ROWS", "0") == "1"
             else None
@@ -18378,6 +18495,10 @@ class MLLMBatchGenerator:
                 decision_telemetry.get("packed_probability_reads", 0)
             )
 
+        _diag_acceptance_ms = (
+            (time.perf_counter() - _diag_acceptance_start) * 1000.0
+            if _diag_acceptance_start is not None else 0.0
+        )
         state.stats.cycles += 1
         if 0 <= depth < len(state.stats.cycles_by_depth):
             state.stats.cycles_by_depth[depth] += 1
@@ -18415,6 +18536,20 @@ class MLLMBatchGenerator:
         # fixed depth disables depth adaptation but must still escape to AR
         # when MTP is measurably slower than a context-scaled AR baseline.
         if _NATIVE_MTP_CYCLE_TRACE:
+            _diag = _native_mtp_diagnostic_cycle_wall(
+                state, now=_value_cycle_now,
+                fence_ms=_diag_fence_ms, acceptance_ms=_diag_acceptance_ms,
+            )
+            if _diag is not None:
+                logger.info(
+                    "MTPCYCLE_ACCOUNTING[%s] c=%d observed_cycle_wall_ms=%.3f "
+                    "phase_scope_wall_ms=%.3f fence_wall_ms=%.3f "
+                    "acceptance_wall_ms=%.3f unassigned_wall_ms=%.3f",
+                    request.request_id, int(state.stats.cycles),
+                    _diag["observed_cycle_wall_ms"], _diag["phase_scope_wall_ms"],
+                    _diag["fence_wall_ms"], _diag["acceptance_wall_ms"],
+                    _diag["unassigned_wall_ms"],
+                )
             _prev_t = getattr(state, "_trace_prev_t", 0.0) or 0.0
             _emitted_now = int(state.stats.cycles) + int(state.stats.accepted_tokens)
             logger.info(

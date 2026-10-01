@@ -123,3 +123,40 @@ export function selectFinalDecodeTps({
     ? validCumulative
     : representativeRolling
 }
+
+/** First generation event of the whole visible turn, never reset by tool calls. */
+export class ExchangeFirstTokenClock {
+  private fetchStartedAt: number | undefined
+  private firstTokenAt: number | undefined
+
+  beginPass(now: number): void {
+    this.fetchStartedAt ??= now
+  }
+
+  recordToken(now: number): void {
+    this.firstTokenAt ??= now
+  }
+
+  seconds(): number {
+    return this.fetchStartedAt !== undefined && this.firstTokenAt !== undefined
+      ? Math.max(0, (this.firstTokenAt - this.fetchStartedAt) / 1000) : 0
+  }
+}
+
+/** Weighted engine time across all HTTP passes; missing coverage is not zero work. */
+export function summarizePrefillPasses(passes: unknown[]): string | undefined {
+  if (passes.length === 0) return undefined
+  let tokens = 0
+  let seconds = 0
+  for (const pass of passes) {
+    if (!pass || typeof pass !== 'object') return undefined
+    const receipt = pass as Record<string, unknown>
+    if (receipt.scope !== 'model_prefill_and_prompt_state' ||
+        typeof receipt.tokens !== 'number' || !Number.isSafeInteger(receipt.tokens) || receipt.tokens < 0 ||
+        typeof receipt.seconds !== 'number' || !Number.isFinite(receipt.seconds) || receipt.seconds < 0 ||
+        (receipt.tokens > 0 && receipt.seconds === 0)) return undefined
+    tokens += receipt.tokens
+    seconds += receipt.seconds
+  }
+  return tokens > 0 && seconds > 0 ? (tokens / seconds).toFixed(1) : undefined
+}

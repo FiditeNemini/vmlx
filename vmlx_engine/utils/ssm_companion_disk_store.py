@@ -697,6 +697,13 @@ class SSMCompanionDiskStore:
             except Exception as exc:
                 logger.debug("SSM background write failed for %s: %s", key, exc)
             finally:
+                # The long-lived worker frame otherwise pins the last settled
+                # snapshot while blocked on an empty queue. Drop both tuple and
+                # unpacked references before releasing its reservation or waking
+                # durability waiters, on success and publication failure alike.
+                item = None
+                data_bytes = None
+                sidecar_bytes = None
                 self._release_pending_bytes(reserved)
                 with self._write_condition:
                     self._write_inflight = max(0, self._write_inflight - 1)

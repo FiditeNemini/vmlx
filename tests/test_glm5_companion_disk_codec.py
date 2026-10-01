@@ -448,3 +448,45 @@ def test_native_facade_pool_capacity_refusal_is_not_durable(tmp_path):
         assert cache.lookup.total_nbytes == 0
     finally:
         cache.close()
+
+
+def test_native_block_facade_duplicate_fetches_once(tmp_path, monkeypatch):
+    from vmlx_engine.utils.glm5_native_prefix_cache import Glm5NativePrefixCache, glm5_native_layout
+    original = native_state(9)
+    cache = Glm5NativePrefixCache(
+        root=tmp_path, max_size_bytes=20 * 1024**2,
+        model_key="single-fetch", layout=glm5_native_layout(original),
+        sequence_block_size=4,
+    )
+    try:
+        first = cache.store(list(range(10)), 9, original)
+        assert first["durable"]
+        fetch = cache.disk.fetch
+        observed = []
+        def counted(key):
+            found = fetch(key)
+            observed.append(found)
+            return found
+        monkeypatch.setattr(cache.disk, "fetch", counted)
+        second = cache.store(list(range(10)), 9, original)
+        assert second["outcome"] == "already_durable"
+        assert second["durable"] and second["retained_tokens"] == 9
+        assert len(observed) == 1
+        same_state(original, observed[0][0])
+    finally:
+        cache.close()
+
+
+def test_native_plain_facade_keeps_incomplete_probe(tmp_path, monkeypatch):
+    cache = native_facade(tmp_path)
+    try:
+        monkeypatch.setattr(cache.disk, "has_complete", lambda key: False)
+        def unexpected_fetch(key):
+            pytest.fail("plain incomplete record must not be fetched")
+        monkeypatch.setattr(cache.disk, "fetch", unexpected_fetch)
+        monkeypatch.setattr(cache.disk, "store", lambda *args, **kwargs: False)
+        receipt = cache.store(list(range(6)), 5, native_state(5))
+        assert not receipt["durable"]
+        assert receipt["outcome"] == "refused"
+    finally:
+        cache.close()

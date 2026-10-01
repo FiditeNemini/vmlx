@@ -139,3 +139,41 @@ async def test_stream_uses_producer_window_and_preserves_terminal_usage(monkeypa
         if telemetry:
             assert last_usage["vmlx_prefill"]["seconds"] == 0.5
         assert sum(event.count("data: [DONE]") for event in events) == 1
+
+
+@pytest.mark.parametrize('has_receipt', [False, True])
+def test_text_scheduler_forwards_prefill_receipt_through_terminal(monkeypatch, has_receipt):
+    from vmlx_engine.request import Request, SamplingParams
+    from vmlx_engine.scheduler import Scheduler
+    request = Request(request_id='prefill-clock', prompt=[1, 2], sampling_params=SamplingParams(max_tokens=3))
+    request.prompt_token_ids = [1, 2]
+    request.num_prompt_tokens = 2
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.config = SimpleNamespace(enable_prefix_cache=False)
+    scheduler.uid_to_request_id = {1: request.request_id}
+    scheduler.running = {request.request_id: request}
+    scheduler.batch_generator = None
+    scheduler.stop_tokens = {0}
+    scheduler._pld_spec_enabled = False
+    scheduler.total_completion_tokens = 0
+    scheduler.num_requests_processed = 0
+
+    class Detok:
+        text = ''
+        def add_token(self, token):
+            self.text += 'x'
+        def finalize(self):
+            pass
+
+    detok = Detok()
+    monkeypatch.setattr(Scheduler, '_get_detokenizer', lambda *args: detok)
+    monkeypatch.setattr(Scheduler, '_advance_request_state_machine', lambda *args: None)
+    monkeypatch.setattr(Scheduler, '_queue_dsv4_shadow_rekey', lambda *args: None)
+    receipt = {'tokens': 2, 'seconds': .25, 'scope': 'model_prefill_and_prompt_state'}
+    for token, finish in [(3, None), (0, 'stop')]:
+        response = SimpleNamespace(uid=1, token=token, finish_reason=finish)
+        if has_receipt:
+            response.prefill_usage = receipt
+        outputs, finished = scheduler._process_batch_responses([response])
+        assert outputs[0].prefill_usage == (receipt if has_receipt else None)
+        assert outputs[0].finished is (finish is not None)

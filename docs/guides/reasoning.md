@@ -28,6 +28,16 @@ Use the loaded model's advertised effort levels: some bundles support
 `low`/`medium`/`xhigh`, while others use a different set or only an On/Off switch.
 Omitting effort preserves the native default.
 
+For stamped native effort contracts such as GLM-5.3 Flash and Naive N0.5,
+Chat Completions and Responses also accept
+`chat_template_kwargs.reasoning_effort`. When both controls specify supported
+effort tiers, the explicit template value takes precedence over top-level
+`reasoning_effort`; the selected value is normalized
+to lowercase with surrounding whitespace removed before rendering. Prefer
+sending one effort control. Both families advertise `low`, `high`, and `max`;
+omitting effort uses their native `max` default unless a server override applies.
+GLM-5.3 Flash has no native thinking-off mode; use `low` for its minimum effort.
+
 Chat Completions and Responses accept a nested budget alongside an explicit
 top-level effort:
 

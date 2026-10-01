@@ -736,3 +736,69 @@ def gather_qmv_weighted_down(h, packed, scales, cb_unused, idx, weights, bits, o
                      _consts(K, N, kt, dtype=mx.uint32)],
              grid=(NSG * 32, (N + NSG * RPS - 1) // (NSG * RPS), T), threadgroup=(NSG * 32, 1, 1),
              output_shapes=[(T, N)], output_dtypes=[out_dtype])[0]
+
+
+# ------------------------------------------------------------------ sorted prefill weighted epilogue
+@functools.lru_cache(maxsize=1)
+def prefill_weighted_unsort_available() -> bool:
+    """Only measured M5 Max / MLX 0.32.2 and 0.32.3 reductions are admitted."""
+    import importlib.metadata
+    try:
+        return (importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
+                and mx.metal.is_available()
+                and mx.device_info().get("device_name") == "Apple M5 Max")
+    except (importlib.metadata.PackageNotFoundError, RuntimeError):
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _prefill_weighted_unsort_kernel():
+    # MLX 0.32.2 col_reduce_small: eight BF16 leaves, then sequential
+    # BF16 adds in original route order. FP32 FMA/reduction is NOT equivalent.
+    return mx.fast.metal_kernel(
+        name="vmlx_jangh_prefill_weighted_unsort",
+        input_names=["Y", "INV", "S"], output_names=["OUT"],
+        compile_options={"math_mode": "safe"},
+        source=r'''
+const uint i = thread_position_in_grid.x;
+const uint d = i % 4096;
+const uint r = i / 4096;
+if (r >= ROWS) return;
+bfloat total = bfloat(0.0f);
+for (uint k=0; k<8; ++k) {
+  const uint row = INV[r*8+k];
+  // Internal caller passes argsort(argsort(...)); guard corrupted indices
+  // defensively so even malformed input can never read beyond Y.
+  if (row >= ROWS*8) { OUT[i] = bfloat(NAN); return; }
+  const bfloat w = bfloat(S[r*8+k]);
+  const bfloat p = bfloat(float(Y[size_t(row)*4096+d]) * float(w));
+  const bfloat leaf = bfloat(float(p) + 0.0f);
+  if (k == 0) total = leaf;
+  else total = bfloat(float(leaf) + float(total));
+}
+OUT[i] = total;
+''')
+
+
+def prefill_weighted_unsort(y, inverse, scores, *, enabled=False):
+    """Exact qualified BF16 top-eight epilogue, or None for stock fallback.
+
+    The inverse is an internal permutation of sorted dispatch rows. Shape and
+    dtype checks precede dispatch; custom kernels materialize strided inputs.
+    No model/cache arrays are retained. Decode and unweighted calls do not use
+    this helper. The startup flag is owned by the caller and cache identity.
+    """
+    if not enabled:
+        return None
+    if (y.ndim != 2 or y.dtype != mx.bfloat16 or y.shape[1] != 4096
+            or scores.ndim != 2 or scores.shape[1] != 8 or scores.shape[0] < 8
+            or scores.dtype not in (mx.float32, mx.bfloat16)
+            or inverse.ndim != 1 or inverse.dtype != mx.uint32
+            or y.shape[0] != scores.size or inverse.size != scores.size
+            or y.size >= 2**32 or mx.default_device() != mx.gpu
+            or not prefill_weighted_unsort_available()):
+        return None
+    return _prefill_weighted_unsort_kernel()(
+        inputs=[y, inverse, scores], template=[("ROWS", scores.shape[0])],
+        grid=(scores.shape[0]*4096, 1, 1), threadgroup=(256, 1, 1),
+        output_shapes=[(scores.shape[0], 4096)], output_dtypes=[mx.bfloat16])[0]

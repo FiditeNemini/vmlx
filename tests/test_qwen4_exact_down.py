@@ -43,7 +43,7 @@ def projection(bits=3, group=64):
 @pytest.mark.parametrize("bits,group", [(2, 32), (2, 64), (3, 64), (4, 64), (6, 64), (8, 64)])
 def test_native_down_weight_reduce_words(bits, group):
     if not mx.metal.is_available() or not candidate._compatible_runtime():
-        pytest.skip("requires actual MLX0.32.2/M5")
+        pytest.skip("requires actual MLX0.32.2 or0.32.3/M5 Max")
     p = projection(bits, group)
     ids = mx.array([[[9, 1, 11, 0, 7, 3, 10, 2, 5, 8]]], dtype=mx.uint32)
     scores = mx.array([[[.18, .12, .11, .1, .08, .07, .065, .06, .04, .025]]], dtype=mx.float16)
@@ -83,7 +83,7 @@ def test_rejects_changed_shape_dtype_and_projection():
 
 def test_invalid_internal_id_cannot_read_outside_weight_bank():
     if not mx.metal.is_available() or not candidate._compatible_runtime():
-        pytest.skip("requires actual MLX0.32.2/M5")
+        pytest.skip("requires actual MLX0.32.2 or0.32.3/M5 Max")
     p = projection()
     z = mx.ones((1, 1, 10, 1, 640), dtype=mx.float16)
     ids = mx.array([[[-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]]], dtype=mx.int32)
@@ -94,3 +94,20 @@ def test_invalid_internal_id_cannot_read_outside_weight_bank():
     # Invalid model-internal data is exposed as nonfinite, never a valid-looking
     # invented expert output. Production IDs come directly from argpartition.
     assert bool(mx.all(mx.isnan(got)))
+
+
+@pytest.mark.parametrize("version,device,expected", [
+    ("0.32.2", "Apple M5 Max", True),
+    ("0.32.3", "Apple M5 Max", True),
+    ("0.32.4", "Apple M5 Max", False),
+    ("0.32.3", "Apple M5 Ultra", False),
+    ("0.32.3", "Apple M4 Max", False),
+])
+def test_qualified_runtime_policy(monkeypatch, version, device, expected):
+    candidate._compatible_runtime.cache_clear()
+    monkeypatch.setattr(candidate.importlib.metadata, "version", lambda _: version)
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": device})
+    try:
+        assert candidate._compatible_runtime() is expected
+    finally:
+        candidate._compatible_runtime.cache_clear()

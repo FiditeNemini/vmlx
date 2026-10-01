@@ -109,7 +109,7 @@ def test_decoder_hook_keeps_unqualified_paths_on_original_route():
 def test_native_fp16_primitive_bit_parity(pattern):
     # Root-only execution on the pinned target. No dtype/runtime substitution.
     if not mx.metal.is_available() or not hc._compatible_runtime():
-        pytest.skip("requires qualified MLX 0.32.2 / M5 Max")
+        pytest.skip("requires qualified MLX 0.32.2 or 0.32.3 / M5 Max")
     rng = np.random.default_rng(49231)
     residual = rng.normal(size=(1, 1, 10240)).astype(np.float16)
     block = rng.normal(size=(1, 1, 2560)).astype(np.float16)
@@ -135,3 +135,20 @@ def test_native_fp16_primitive_bit_parity(pattern):
     mx.eval(combined, expected, *actual)
     for got, want in zip(actual, (combined, expected)):
         np.testing.assert_array_equal(np.asarray(got).view(np.uint16), np.asarray(want).view(np.uint16))
+
+
+@pytest.mark.parametrize("version,device,expected", [
+    ("0.32.2", "Apple M5 Max", True),
+    ("0.32.3", "Apple M5 Max", True),
+    ("0.32.4", "Apple M5 Max", False),
+    ("0.32.3", "Apple M5 Ultra", False),
+    ("0.32.3", "Apple M4 Max", False),
+])
+def test_qualified_runtime_policy(monkeypatch, version, device, expected):
+    hc._compatible_runtime.cache_clear()
+    monkeypatch.setattr(hc.importlib.metadata, "version", lambda _: version)
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": device})
+    try:
+        assert hc._compatible_runtime() is expected
+    finally:
+        hc._compatible_runtime.cache_clear()

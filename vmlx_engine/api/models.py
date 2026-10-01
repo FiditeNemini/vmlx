@@ -65,6 +65,15 @@ def _validate_reasoning_budget(value, field_name="reasoning.budget_tokens"):
     return value
 
 
+def _validate_template_reasoning_effort(kwargs):
+    """Keep native string/default semantics; reject malformed effort types."""
+    if kwargs is not None:
+        effort = kwargs.get("reasoning_effort")
+        if effort is not None and not isinstance(effort, str):
+            raise ValueError("chat_template_kwargs.reasoning_effort must be a string or null")
+    return kwargs
+
+
 def _normalize_nested_reasoning_budget(obj):
     # Token caps are independent of effort selection. This runs in an after
     # validator, so validate explicitly before assigning a field whose own
@@ -403,6 +412,11 @@ class ChatCompletionRequest(BaseModel):
     # Accept that shape too and normalize into `reasoning_effort` via a
     # model_validator below.
     reasoning: dict | None = None
+
+    @field_validator("chat_template_kwargs")
+    @classmethod
+    def _validate_template_effort(cls, value):
+        return _validate_template_reasoning_effort(value)
 
     @model_validator(mode="after")
     def _normalize_reasoning_alias(self):
@@ -1135,6 +1149,11 @@ class ResponsesRequest(BaseModel):
     # `_compute_bypass_prefix_cache` plumbing as Chat/Completions.
     cache_salt: str | None = None
     skip_prefix_cache: bool | None = None
+
+    @field_validator("chat_template_kwargs")
+    @classmethod
+    def _validate_template_effort(cls, value):
+        return _validate_template_reasoning_effort(value)
 
     @model_validator(mode="after")
     def _normalize_reasoning_alias(self):

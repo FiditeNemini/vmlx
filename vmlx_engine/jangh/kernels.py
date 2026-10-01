@@ -741,10 +741,10 @@ def gather_qmv_weighted_down(h, packed, scales, cb_unused, idx, weights, bits, o
 # ------------------------------------------------------------------ sorted prefill weighted epilogue
 @functools.lru_cache(maxsize=1)
 def prefill_weighted_unsort_available() -> bool:
-    """Only the measured M5 Max / MLX 0.32.2 reduction dispatch is admitted."""
+    """Only measured M5 Max / MLX 0.32.2 and 0.32.3 reductions are admitted."""
     import importlib.metadata
     try:
-        return (importlib.metadata.version("mlx") == "0.32.2"
+        return (importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
                 and mx.metal.is_available()
                 and mx.device_info().get("device_name") == "Apple M5 Max")
     except (importlib.metadata.PackageNotFoundError, RuntimeError):

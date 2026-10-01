@@ -300,7 +300,7 @@ echo "==> Upgrading pip..."
 # release currently has no macOS ARM wheel and would trigger a non-reproducible
 # source build. OpenCV's packages share the cv2 namespace and must not coexist.
 #
-MLX_VERSION="0.32.2"
+MLX_VERSION="0.32.3"
 MLX_LM_VERSION="0.31.3"
 MLX_VLM_VERSION="0.5.0"
 MFLUX_VERSION="0.19.0"

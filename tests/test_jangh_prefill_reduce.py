@@ -26,12 +26,39 @@ def test_identity_default_frozen_and_validated(monkeypatch):
         load()
 
 
+@pytest.mark.parametrize("version,metal,device,expected", [
+    ("0.32.2", True, "Apple M5 Max", True),
+    ("0.32.3", True, "Apple M5 Max", True),
+    ("0.32.4", True, "Apple M5 Max", False),
+    ("0.33.0", True, "Apple M5 Max", False),
+    ("0.32.3", True, "Apple M4 Max", False),
+    ("0.32.3", True, "Apple M5 Ultra", False),
+    ("0.32.3", False, "Apple M5 Max", False),
+])
+def test_availability_requires_qualified_version_and_device(
+    monkeypatch, version, metal, device, expected
+):
+    import importlib.metadata
+    pytest.importorskip("mlx.core")
+    from vmlx_engine.jangh import kernels as K
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: version)
+    monkeypatch.setattr(K.mx.metal, "is_available", lambda: metal)
+    monkeypatch.setattr(K.mx, "device_info", lambda: {"device_name": device})
+    K.prefill_weighted_unsort_available.cache_clear()
+    try:
+        assert K.prefill_weighted_unsort_available() is expected
+    finally:
+        # Never leave a synthetic device/version result cached for numeric tests.
+        K.prefill_weighted_unsort_available.cache_clear()
+
+
 @pytest.mark.parametrize('rows,strided', [(8, False), (9, True), (33, False)])
 def test_fused_matches_native_words(rows, strided):
     mx = pytest.importorskip('mlx.core')
     from vmlx_engine.jangh import kernels as K
     if not K.prefill_weighted_unsort_available():
-        pytest.skip('Qualified M5 Max / MLX0.32.2 only')
+        pytest.skip('Qualified M5 Max / MLX 0.32.2 or 0.32.3 only')
     mx.random.seed(73017 + rows)
     y = mx.random.normal((rows * 8, 4096)).astype(mx.bfloat16)
     order = mx.argsort(mx.random.randint(0, 256, (rows * 8,)))
@@ -70,7 +97,7 @@ def test_invalid_inverse_does_not_read_out_of_bounds():
     mx = pytest.importorskip('mlx.core')
     from vmlx_engine.jangh import kernels as K
     if not K.prefill_weighted_unsort_available():
-        pytest.skip('Qualified M5 Max / MLX0.32.2 only')
+        pytest.skip('Qualified M5 Max / MLX 0.32.2 or 0.32.3 only')
     y = mx.zeros((64, 4096), dtype=mx.bfloat16)
     inv = mx.full((64,), 2**32-1, dtype=mx.uint32)
     actual = K.prefill_weighted_unsort(y, inv, mx.ones((8, 8)), enabled=True)
@@ -106,7 +133,7 @@ def test_nonfinite_classification_and_finite_words():
     mx = pytest.importorskip('mlx.core')
     from vmlx_engine.jangh import kernels as K
     if not K.prefill_weighted_unsort_available():
-        pytest.skip('Qualified M5 Max / MLX0.32.2 only')
+        pytest.skip('Qualified M5 Max / MLX 0.32.2 or 0.32.3 only')
     values = mx.array([0.0, -0.0, float('inf'), -float('inf'), float('nan'),
                        1.0, -1.0, 0.00390625], dtype=mx.bfloat16)
     y = mx.tile(values, (64, 512))

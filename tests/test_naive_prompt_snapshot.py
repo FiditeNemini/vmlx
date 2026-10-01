@@ -612,3 +612,96 @@ def test_native_mixed_state_size_eviction_and_republication(tmp_path):
         if pressure is not None:
             pressure.close()
         store.shutdown()
+
+
+def test_oversized_chronological_snapshot_compacts_without_changing_continuation():
+    from vmlx_engine.models.naive_n05_flash.cache_snapshot import (
+        clone_prompt_cache, snapshot_size,
+    )
+    model = make_model()
+    native = model.make_cache()
+    mx.eval(model(mx.array([list(range(1, 11))]), cache=native))
+    assert native[1].state[0].shape[2] > native[1].max_size
+    original = [[a * 1 for a in c.state] for c in leaves(native)]
+    metadata = [c.meta_state for c in leaves(native)]
+    mx.eval(*[a for state in original for a in state])
+    full_bytes = sum(a.nbytes for c in leaves(native) for a in c.state)
+    estimate = snapshot_size(native, expected_tokens=10)
+    compact = clone_prompt_cache(native)
+    assert estimate < full_bytes
+    assert estimate == sum(a.nbytes for c in leaves(compact) for a in c.state)
+    assert compact[1].state[0].shape[2] == native[1].max_size
+    assert compact[1].meta_state == ('0', '4', '10', '4')
+    assert compact[0][1].state[0].dtype == mx.float32
+    assert compact[0][1].state[1].shape[-1] == 0
+    for c, arrays, meta in zip(leaves(native), original, metadata):
+        assert c.meta_state == meta
+        assert all(bool(mx.array_equal(a, b)) for a, b in zip(c.state, arrays))
+    for tokens in ([11], [12, 13]):
+        before = [[a * 1 for a in c.state] for c in leaves(native)]
+        mx.eval(*[a for state in before for a in state])
+        actual = model(mx.array([tokens]), cache=compact)
+        mx.eval(actual)
+        # Updating the detached snapshot must not write into the live source.
+        for c, arrays in zip(leaves(native), before):
+            assert all(bool(mx.array_equal(a, b)) for a, b in zip(c.state, arrays))
+        expected = model(mx.array([tokens]), cache=native)
+        mx.eval(expected)
+        assert bool(mx.array_equal(actual, expected))
+        for a, b in zip(leaves(compact), leaves(native)):
+            assert a.meta_state == b.meta_state
+            assert all(bool(mx.array_equal(x, y)) for x, y in zip(a.state, b.state))
+
+
+@pytest.mark.parametrize('budget_kind', ['backend', 'headroom'])
+def test_compact_snapshot_admission_uses_planned_copy_bytes(monkeypatch, budget_kind):
+    from vmlx_engine.utils import single_batch_generator as sbg
+    from vmlx_engine.utils import memory_limits
+    from vmlx_engine.models.naive_n05_flash import cache_snapshot as snap
+    model = make_model()
+    native = model.make_cache()
+    mx.eval(model(mx.array([list(range(1, 11))]), cache=native))
+    estimated = snap.snapshot_size(native)
+    full_bytes = sum(a.nbytes for c in leaves(native) for a in c.state)
+    assert estimated < full_bytes
+    between = (estimated + full_bytes) // 2
+    monkeypatch.setattr(memory_limits, 'get_metal_ws_guard_threshold', lambda: 100)
+    maximum = between if budget_kind == 'headroom' else 1 << 30
+    monkeypatch.setattr(sbg, 'get_effective_metal_working_set_bytes', lambda mx: (0, maximum))
+    generator = sbg.SingleBatchGenerator(
+        model, prompt_snapshot_max_bytes=between if budget_kind == 'backend' else 1 << 30,
+    )
+    req = SimpleNamespace(cache=native, gen_prompt_len=0)
+    result = generator._clone_naive_prompt_snapshot(req)
+    assert result is not None
+    assert generator.prompt_snapshot_last_estimated_bytes == estimated
+    assert sum(a.nbytes for c in leaves(result) for a in c.state) == estimated
+    if budget_kind == 'backend':
+        generator.prompt_snapshot_max_bytes = estimated - 1
+    else:
+        maximum = estimated - 1
+    monkeypatch.setattr(snap, 'clone_prompt_cache', lambda cache: pytest.fail('copy before admission'))
+    assert generator._clone_naive_prompt_snapshot(req) is None
+    assert generator.prompt_snapshot_last_reason == ('backend_budget' if budget_kind == 'backend' else 'metal_headroom')
+
+
+@pytest.mark.parametrize('case', ['keep', 'nonchronological', 'bounded_ring'])
+def test_noneligible_rotating_snapshots_preserve_native_state(case):
+    from mlx_lm.models.cache import RotatingKVCache
+    from vmlx_engine.models.naive_n05_flash.cache_snapshot import (
+        clone_prompt_cache, snapshot_size,
+    )
+    cache = RotatingKVCache(max_size=4, keep=1 if case == 'keep' else 0)
+    if case == 'bounded_ring':
+        for i in range(7):
+            cache.update_and_fetch(mx.full((1, 2, 1, 8), i), mx.full((1, 2, 1, 4), i))
+    else:
+        cache.update_and_fetch(mx.ones((1, 2, 8, 8)), mx.ones((1, 2, 8, 4)))
+        if case == 'nonchronological':
+            # Unsupported oversized insertion state is copied, not reinterpreted.
+            cache._idx = 3
+    mx.eval(cache.state)
+    copied = clone_prompt_cache([cache])[0]
+    assert snapshot_size([cache]) == sum(a.nbytes for a in cache.state)
+    assert copied.meta_state == cache.meta_state
+    assert all(bool(mx.array_equal(a, b)) for a, b in zip(copied.state, cache.state))

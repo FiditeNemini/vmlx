@@ -2335,6 +2335,80 @@ class TestBlockAwarePrefixCache:
         assert rebuilt[1].offset == 192
         assert rebuilt[1]._idx == 128
 
+    @pytest.mark.parametrize("index_lane", [False, True])
+    @pytest.mark.parametrize("valid_partial,has_chain_anchor", [(False, True), (True, True), (True, False)])
+    def test_normalized_rotating_chain_reconsiders_exact_partial(
+        self, monkeypatch, index_lane, valid_partial, has_chain_anchor,
+    ):
+        """A longer pending chain must not hide a compatible exact partial."""
+        mx = pytest.importorskip("mlx.core")
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(384))
+        manager = PagedCacheManager(block_size=64, max_blocks=32)
+        cache = BlockAwarePrefixCache(
+            model=None, paged_cache_manager=manager,
+            uses_dsv4_cache=False, uses_zaya_cache=False,
+            mixed_attention_cache_model=True,
+        )
+        assert cache.store_cache("anchor", tokens[:192], self._mixed_swa_snapshot(mx, 192))
+        partial = cache.store_cache("partial", tokens[:221], self._mixed_swa_snapshot(mx, 221))
+        assert partial is not None
+        assert cache.store_cache("long", tokens, self._mixed_swa_snapshot(mx, 384))
+        if index_lane:
+            # A longer indexed partial also lacks a usable terminal. Skip it
+            # rather than abandon the shorter exact 221 boundary. Without it,
+            # the primary lane's full256 candidate suppresses indexed221.
+            assert cache.store_cache("pending", tokens[:285], self._mixed_swa_snapshot(mx, 430, seq_len=430))
+        if not valid_partial:
+            block = manager.allocated_blocks[partial.block_ids[-1]]
+            block.cache_data = [
+                ("rotating_kv_pending", entry[1])
+                if entry[0] == "rotating_kv" else entry
+                for entry in block.cache_data
+            ]
+        if not has_chain_anchor:
+            # Keep the independent221 terminal, remove only earlier exact ring
+            # anchors from its shared full-block ancestry. No full-chain prefix
+            # can then pass native validation; the independent partial still can.
+            for bid in partial.block_ids[:-1]:
+                block = manager.allocated_blocks[bid]
+                block.cache_data = [
+                    ("rotating_kv_pending", entry[1])
+                    if entry[0] == "rotating_kv" else entry
+                    for entry in block.cache_data
+                ]
+        if index_lane:
+            monkeypatch.setattr(manager, "get_computed_blocks", lambda *args, **kwargs: ([], 0))
+        before = {bid: b.ref_count for bid, b in manager.allocated_blocks.items()}
+        query = tokens[:300]
+        hit, remaining = cache.fetch_cache("reader", query)
+        expected = 221 if valid_partial else 192
+        assert hit is not None
+        assert hit.num_tokens == expected
+        assert remaining == query[expected:]
+        rebuilt = cache.reconstruct_cache(hit)
+        assert rebuilt is not None
+        assert rebuilt[1].offset == expected
+        assert cache.get_stats()["tokens_saved"] == expected
+        assert cache.get_stats()["last_fetch_telemetry"]["origin"] == (
+            "prefix_index_match" if index_lane else "chain_block_hit"
+        )
+        assert manager.get_block_table("reader") is hit
+        cache.release_cache("reader")
+        assert manager.get_block_table("reader") is None
+        assert {bid: b.ref_count for bid, b in manager.allocated_blocks.items()} == before
+        # Scheduler completion releases via the owning entry, then detaches
+        # the manager table. A later public cleanup must not release twice.
+        again, _ = cache.fetch_cache("scheduler-reader", query)
+        assert again is not None and again.num_tokens == expected
+        entry = cache._request_tables.pop("scheduler-reader")
+        manager.release_request_refs(entry.block_table)
+        manager.detach_request("scheduler-reader")
+        cache.release_cache("scheduler-reader")
+        assert {bid: b.ref_count for bid, b in manager.allocated_blocks.items()} == before
+
     def test_both_fetch_lanes_normalize_rotating_candidates(self):
         """Both fetch lanes must call the anchor walk.
 

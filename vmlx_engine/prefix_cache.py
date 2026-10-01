@@ -3760,6 +3760,21 @@ class BlockAwarePrefixCache:
                     disk_store=_disk_store,
                     validation_payload_cache=_validation_payload_cache,
                 )
+                if _rot_anchor is None:
+                    # A terminal partial is a sibling of the longer full-block
+                    # chain, so it may exist even when that chain has no anchor.
+                    _independent, _independent_tokens = self._prefer_rotating_terminal_partial(
+                        request_id, tokens, cache_extra_keys, [], 0,
+                        _validation_payload_cache,
+                    )
+                    if _independent:
+                        self.paged_cache.release_request_refs(BlockTable(
+                            request_id=request_id,
+                            block_ids=[b.block_id for b in cached_blocks],
+                            num_tokens=num_cached,
+                        ))
+                        cached_blocks = _independent
+                        _rot_anchor = (_independent, _independent_tokens)
                 if _rot_anchor is not None:
                     _kept_rot, _rot_tokens = _rot_anchor
                     _dropped_rot = cached_blocks[len(_kept_rot):]
@@ -3785,6 +3800,10 @@ class BlockAwarePrefixCache:
                     )
                     cached_blocks = _kept_rot
                     num_cached = int(_rot_tokens)
+                    cached_blocks, num_cached = self._prefer_rotating_terminal_partial(
+                        request_id, tokens, cache_extra_keys, cached_blocks,
+                        num_cached, _validation_payload_cache,
+                    )
                     _rotating_normalized = True
                 else:
                     _reject_table = BlockTable(
@@ -4051,6 +4070,21 @@ class BlockAwarePrefixCache:
                     disk_store=_disk_store,
                     validation_payload_cache=_validation_payload_cache,
                 )
+                if _rot_anchor is None:
+                    # A terminal partial is a sibling of the longer full-block
+                    # chain, so it may exist even when that chain has no anchor.
+                    _independent, _independent_tokens = self._prefer_rotating_terminal_partial(
+                        request_id, tokens, cache_extra_keys, [], 0,
+                        _validation_payload_cache,
+                    )
+                    if _independent:
+                        self.paged_cache.release_request_refs(BlockTable(
+                            request_id=request_id,
+                            block_ids=[b.block_id for b in matched_blocks],
+                            num_tokens=pinned_table.num_tokens,
+                        ))
+                        matched_blocks = _independent
+                        _rot_anchor = (_independent, _independent_tokens)
                 if _rot_anchor is not None:
                     _kept_rot, _rot_tokens = _rot_anchor
                     _dropped_rot = matched_blocks[len(_kept_rot):]
@@ -4073,8 +4107,11 @@ class BlockAwarePrefixCache:
                         pinned_table.num_tokens,
                         _rot_tokens,
                     )
-                    matched_blocks = _kept_rot
-                    pinned_table.block_ids = [b.block_id for b in _kept_rot]
+                    matched_blocks, _rot_tokens = self._prefer_rotating_terminal_partial(
+                        request_id, tokens, cache_extra_keys, _kept_rot,
+                        int(_rot_tokens), _validation_payload_cache,
+                    )
+                    pinned_table.block_ids = [b.block_id for b in matched_blocks]
                     pinned_table.num_tokens = int(_rot_tokens)
                     pinned_table.checkpoint_tokens = int(_rot_tokens)
                     _rotating_normalized = True
@@ -4156,6 +4193,11 @@ class BlockAwarePrefixCache:
             # The index lookup pinned this exact chain before releasing the
             # paged-cache lock, so no second increment is needed here.
             block_table = pinned_table
+            # Mirror the primary lane's ownership registration. Public
+            # release_cache delegates to the paged manager's table; without
+            # this entry an indexed hit's request refs cannot be released.
+            with self.paged_cache._lock:
+                self.paged_cache.request_tables[request_id] = block_table
 
             consumed_tokens = int(block_table.num_tokens)
             remaining = tokens[consumed_tokens:]
@@ -4488,6 +4530,52 @@ class BlockAwarePrefixCache:
                 if len(entry) > 2 and entry[2] is not None:
                     saw_terminal = True
         return saw_zaya and not saw_terminal
+
+    def _prefer_rotating_terminal_partial(
+        self, request_id, tokens, cache_extra_keys, blocks, num_tokens,
+        validation_payload_cache,
+    ):
+        """Reconsider exact indexed terminals after a raw chain lost coverage."""
+        # DSV4 and Zaya have additional composite-state selection contracts.
+        if self._validate_dsv4_terminal or self._validate_zaya_terminal:
+            return blocks, num_tokens
+        upper_bound = None
+        while True:
+            match = self._find_best_prefix_match(
+                tokens, cache_extra_keys=cache_extra_keys,
+                min_prefix_len=num_tokens, max_prefix_len=upper_bound,
+            )
+            if match is None:
+                return blocks, num_tokens
+            # Lookup pins exact chain ownership atomically. Read immutable L2
+            # payloads only AFTER releasing the paged lock; never introduce a
+            # paged-lock -> disk-lock edge during native-state validation.
+            with self.paged_cache._lock:
+                replacement = [self.paged_cache.allocated_blocks[bid] for bid in match[1]]
+            try:
+                missing_terminal = self._rotating_l2_chain_missing_terminal_state(
+                    replacement, target_tokens=len(match[0]),
+                    disk_store=getattr(self.paged_cache, "_disk_store", None),
+                    validation_payload_cache=validation_payload_cache,
+                )
+            except Exception:
+                self._release_pinned_prefix_match(request_id, match)
+                raise
+            if not missing_terminal:
+                break
+            self._release_pinned_prefix_match(request_id, match)
+            upper_bound = len(match[0]) - 1
+        # Replacement retains its pins before the old chain is released,
+        # including blocks shared by both candidates.
+        self.paged_cache.release_request_refs(BlockTable(
+            request_id=request_id, block_ids=[b.block_id for b in blocks],
+            num_tokens=num_tokens,
+        ))
+        logger.info(
+            "Mixed-SWA exact terminal selection for %s improves normalized "
+            "coverage from %d to %d tokens", request_id, num_tokens, len(match[0]),
+        )
+        return replacement, len(match[0])
 
     @staticmethod
     def _normalize_rotating_candidate(
@@ -8811,6 +8899,7 @@ class BlockAwarePrefixCache:
         cache_extra_keys: Optional[Any] = None,
         *,
         min_prefix_len: int = 0,
+        max_prefix_len: Optional[int] = None,
     ) -> Optional[Tuple[List[int], List[int]]]:
         """Find and pin the best matching prefix-index entry atomically."""
         with self.paged_cache._lock:
@@ -8828,6 +8917,7 @@ class BlockAwarePrefixCache:
                     (key, entry)
                     for key, entry in self._prefix_index.items()
                     if max(0, min_prefix_len) < len(entry[0]) <= len(tokens)
+                    and (max_prefix_len is None or len(entry[0]) <= max_prefix_len)
                 ),
                 key=lambda item: len(item[1][0]),
                 reverse=True,

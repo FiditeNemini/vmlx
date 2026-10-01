@@ -271,6 +271,80 @@ def _load_block_validation_entries(file_path: Path) -> Optional[List[Tuple]]:
 
             entries: List[Tuple] = [("skip",) for _ in range(num_layers)]
             saw_native = False
+            has_cache_list = any(
+                layer_types.get(str(i)) == "cache_list" for i in range(num_layers)
+            )
+            declared_dtypes = None
+            if has_cache_list:
+                from .prefix_cache import runtime_cache_fingerprint
+
+                if (
+                    meta.get("__runtime_cache_fingerprint__")
+                    != runtime_cache_fingerprint()
+                ):
+                    return None
+                if "__tensor_dtypes__" in meta:
+                    declared_dtypes = meta["__tensor_dtypes__"]
+                    payload_names = tensor_names - {
+                        "__vmlx_block_meta__",
+                        "__metadata__",
+                    }
+                    if (
+                        not isinstance(declared_dtypes, dict)
+                        or set(declared_dtypes) != payload_names
+                        or not _block_tree_dtypes_match(meta, declared_dtypes)
+                    ):
+                        return None
+                    for name, wanted in declared_dtypes.items():
+                        physical = _BLOCK_SAFETENSORS_DTYPES.get(
+                            handle.get_slice(name).get_dtype()
+                        )
+                        if (
+                            not isinstance(wanted, str)
+                            or wanted not in _BLOCK_TENSOR_DTYPES
+                            or not (
+                                physical == wanted
+                                or (physical == "uint16" and wanted == "bfloat16")
+                            )
+                        ):
+                            return None
+
+            def _plain_kv(keys_name: str, values_name: str, legacy_key: str) -> Tuple:
+                if keys_name not in tensor_names or values_name not in tensor_names:
+                    raise ValueError("incomplete plain KV cache metadata")
+                if declared_dtypes is not None:
+                    key_dtype = declared_dtypes[keys_name]
+                    value_dtype = declared_dtypes[values_name]
+                else:
+                    target = (meta.get("__orig_dtypes__") or {}).get(legacy_key)
+                    if not isinstance(target, str):
+                        raise ValueError("missing legacy KV dtype")
+                    target = target.removeprefix("mlx.core.")
+                    if target not in {"float16", "bfloat16", "float32"}:
+                        raise ValueError("unsupported legacy KV dtype")
+                    key_dtype = _BLOCK_SAFETENSORS_DTYPES.get(
+                        handle.get_slice(keys_name).get_dtype()
+                    )
+                    value_dtype = _BLOCK_SAFETENSORS_DTYPES.get(
+                        handle.get_slice(values_name).get_dtype()
+                    )
+                    # The legacy reader casts both lanes only when keys need
+                    # restoring; modern declarations always own each lane.
+                    if key_dtype != target:
+                        key_dtype = value_dtype = target
+                if key_dtype is None or value_dtype is None:
+                    raise ValueError("unsupported KV payload dtype")
+                return (
+                    "kv",
+                    _ValidationTensor(
+                        handle.get_slice(keys_name).get_shape(), f"mlx.core.{key_dtype}"
+                    ),
+                    _ValidationTensor(
+                        handle.get_slice(values_name).get_shape(),
+                        f"mlx.core.{value_dtype}",
+                    ),
+                )
+
             for i in range(num_layers):
                 layer_type = layer_types.get(str(i))
                 layer_meta = meta.get(str(i), {})
@@ -311,13 +385,23 @@ def _load_block_validation_entries(file_path: Path) -> Optional[List[Tuple]]:
                     if keys_name not in tensor_names or values_name not in tensor_names:
                         return None
                     orig_dtype = (meta.get("__orig_dtypes__") or {}).get(str(i), "")
+                    key_dtype = (
+                        f"mlx.core.{declared_dtypes[keys_name]}"
+                        if declared_dtypes is not None
+                        else orig_dtype
+                    )
+                    value_dtype = (
+                        f"mlx.core.{declared_dtypes[values_name]}"
+                        if declared_dtypes is not None
+                        else orig_dtype
+                    )
                     entries[i] = (
                         "rotating_kv",
                         _ValidationTensor(
-                            handle.get_slice(keys_name).get_shape(), orig_dtype
+                            handle.get_slice(keys_name).get_shape(), key_dtype
                         ),
                         _ValidationTensor(
-                            handle.get_slice(values_name).get_shape(), orig_dtype
+                            handle.get_slice(values_name).get_shape(), value_dtype
                         ),
                         _scalar(f"layer_{i}_max_size", 0),
                         _scalar(f"layer_{i}_keep", 0),
@@ -340,10 +424,45 @@ def _load_block_validation_entries(file_path: Path) -> Optional[List[Tuple]]:
                         layer_meta.get("cache_meta", {}),
                     )
                     saw_native = True
+                elif layer_type == "kv" and has_cache_list:
+                    # A newly admitted CacheList must preserve sibling tags:
+                    # artificial skips trigger previous-block state checks.
+                    entries[i] = _plain_kv(
+                        f"layer_{i}_keys", f"layer_{i}_values", str(i)
+                    )
                 elif layer_type == "cache_list":
-                    # A future CacheList may nest path-dependent state. Fall
-                    # back to the full fail-closed reader until that schema has
-                    # its own metadata-only validator.
+                    # Admit only complete plain-KV children. Quantized,
+                    # cumulative, skipped and future child schemas still need
+                    # the full reader; never hide their native-state markers.
+                    count = layer_meta.get("sub_count")
+                    if type(count) is not int or count <= 0 or layer_meta.get("subs"):
+                        return None
+                    expected_names = {
+                        f"layer_{i}_sub_{j}_{kind}"
+                        for j in range(count)
+                        for kind in ("keys", "values")
+                    }
+                    actual_names = {
+                        name
+                        for name in tensor_names
+                        if name.startswith(f"layer_{i}_sub_")
+                    }
+                    if actual_names != expected_names:
+                        return None
+                    children = []
+                    for j in range(count):
+                        children.append(
+                            _plain_kv(
+                                f"layer_{i}_sub_{j}_keys",
+                                f"layer_{i}_sub_{j}_values",
+                                f"{i}_sub_{j}",
+                            )
+                        )
+                    entries[i] = ("cache_list", children)
+                    saw_native = True
+                elif has_cache_list and layer_type != "skip":
+                    # Other sibling schemas previously used the full reader.
+                    # Do not replace their state with an artificial skip.
                     return None
 
             return entries if saw_native else None

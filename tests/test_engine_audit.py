@@ -6684,8 +6684,6 @@ class TestResponsesStreamingExactToolResult:
         source = inspect.getsource(stream_responses_api)
         assert "_responses_exact_reply_target(request)" not in source
         assert "Responses API streaming exact-reply finalization" not in source
-        assert "_has_post_user_tool_result" in source
-        assert "and not _has_post_user_tool_result" in source
         assert "response.output_text.delta" in source
 
     def test_exact_reply_finalizer_only_triggers_after_current_turn_tool_result(self):

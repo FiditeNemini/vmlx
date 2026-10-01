@@ -5545,6 +5545,7 @@ _TOOL_CALL_MARKERS = [
     "[TOOL_CALLS]",
     "<function",
     "<function=",
+    "<parameter=",  # Native orphan parameter control must not stream as prose.
     "<minimax:tool_call>",
     "]<]minimax[>[",  # MiniMax-M3 namespace separator before native XML elements
     "<dots_function_call>",  # dots3_note dots XML dialect wrapper
@@ -5732,7 +5733,8 @@ def _visible_prefix_before_unparsed_tool_markup(
         return ""
 
     marker_positions = [
-        pos for marker in _TOOL_CALL_MARKERS if (pos := text.find(marker)) >= 0
+        pos for marker in _TOOL_CALL_MARKERS
+        if (pos := _first_unquoted_marker_pos(text, marker)) >= 0
     ]
     raw_json_pos = text.find(_RAW_JSON_TOOL_ANCHOR)
     if raw_json_pos >= 0:
@@ -5744,15 +5746,12 @@ def _visible_prefix_before_unparsed_tool_markup(
         prefix = text[: min(marker_positions)]
         return prefix if preserve_whitespace else prefix.rstrip()
 
-    # The buffer can activate on a marker split at the final token. Remove the
-    # longest such partial suffix without touching an ordinary earlier '<'.
-    partial_len = 0
-    for marker in _TOOL_CALL_MARKERS:
-        max_prefix = min(len(marker) - 1, len(text))
-        for n in range(max_prefix, minimum_partial - 1, -1):
-            if text.endswith(marker[:n]):
-                partial_len = max(partial_len, n)
-                break
+    # Preserve quoted partial marker examples just as complete examples.
+    partial_len = max(
+        (_tool_marker_partial_suffix_length(text, marker, minimum=minimum_partial)
+         for marker in _TOOL_CALL_MARKERS),
+        default=0,
+    )
     prefix = text[:-partial_len] if partial_len else text
     return prefix if preserve_whitespace or not partial_len else prefix.rstrip()
 
@@ -5900,7 +5899,7 @@ def _has_tool_marker_or_partial_suffix(text: str) -> bool:
     if not text:
         return False
     for marker in _TOOL_CALL_MARKERS:
-        if marker in text:
+        if _first_unquoted_marker_pos(text, marker) >= 0:
             return True
     for marker in _TOOL_CALL_MARKERS:
         if _tool_marker_partial_suffix_length(text, marker, minimum=4):
@@ -5919,10 +5918,38 @@ def _text_ends_with_tool_marker(text: str) -> bool:
     if not text:
         return False
     for marker in _TOOL_CALL_MARKERS:
-        if text.endswith(marker):
+        if text.endswith(marker) and _first_unquoted_marker_pos(text, marker) == len(text) - len(marker):
             return True
         if _tool_marker_partial_suffix_length(text, marker, minimum=4):
             return True
+    return False
+
+
+def _reasoning_has_native_tool_boundary(text: str, delta_start: int) -> bool:
+    """Recognize new private-rail markup using accumulated line/quote context.
+
+    A transport chunk boundary is not a line boundary. Abstain inside inline
+    backticks or fenced examples, including when their opener was in an earlier
+    chunk. Native tool fences themselves remain recognized at their opener.
+    """
+    for marker in _TOOL_CALL_MARKERS:
+        start = max(0, delta_start - len(marker) + 1)
+        pos = text.find(marker, start)
+        positions = []
+        while pos >= 0:
+            positions.append((pos, pos + len(marker) == len(text)))
+            pos = text.find(marker, pos + 1)
+        partial = _tool_marker_partial_suffix_length(text, marker, minimum=4)
+        if partial:
+            positions.append((len(text) - partial, True))
+        for pos, at_tail in positions:
+            prefix = text[:pos]
+            # Deliberately conservative for escaped/unmatched backticks too:
+            # unknown quote context must not turn prose into a tool status.
+            if _tool_marker_inside_code(text, pos):
+                continue
+            if at_tail or not prefix.rsplit("\n", 1)[-1].strip():
+                return True
     return False
 
 
@@ -5949,6 +5976,9 @@ def _tool_marker_partial_suffix_length(
         max_prefix = min(max_prefix, maximum)
     for length in range(max_prefix, max(1, minimum) - 1, -1):
         if text.endswith(marker[:length]):
+            start = len(text) - length
+            if _tool_marker_inside_code(text, start):
+                continue
             return length
     return 0
 
@@ -8462,67 +8492,108 @@ def _request_explicitly_requests_tool_use(
 def _request_explicitly_requires_one_tool_once(
     request: ChatCompletionRequest | ResponsesRequest | None,
 ) -> bool:
-    """Narrow Qwen early-stop gate for an explicit single-call user contract.
+    """Recognize a narrow, directly bound one-invocation command syntax.
 
-    Qwen can legitimately emit sequential or interleaved calls, so it must not
-    opt into parser-wide early stopping. Live Bonsai-27B-1bit evidence showed a
-    different bounded case: the user named ``file_info`` and said "exactly
-    once", the model emitted a complete schema-valid call, then repeated the
-    call dozens of times for thousands of hidden reasoning tokens. Stop only
-    when the latest user text itself requires exactly one invocation and names
-    exactly one tool exposed by the request.
+    This is an optional early-stop optimization, not natural-language tool
+    intent parsing. Unknown wording abstains and uses normal parser completion.
+    In particular, counting distinct tool names cannot distinguish two calls to
+    the same tool, and "exactly once" may modify an unrelated event.
     """
-    latest_user_text = _latest_request_user_text(request)
-    if not latest_user_text or not re.search(
-        r"\b(?:exactly\s+once|exactly\s+one(?:\s+native)?\s+(?:tool|function)\s+call)\b",
-        latest_user_text,
+    text = _latest_request_user_text(request)
+    if not text:
+        return False
+    try:
+        names = {
+            function["name"]
+            for tool in convert_tools_for_template(
+                _effective_tools_for_tool_parsing(request)
+            ) or []
+            if isinstance(tool, dict)
+            and isinstance(function := tool.get("function"), dict)
+            and isinstance(function.get("name"), str)
+            and function["name"]
+        }
+    except Exception:
+        return False
+    mentions = [
+        (name, list(re.finditer(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text
+        )))
+        for name in names
+    ]
+    mentions = [(name, matches) for name, matches in mentions if matches]
+    if len(mentions) != 1 or len(mentions[0][1]) != 1:
+        return False
+
+    # Accept a direct imperative at the start, never a quotation/example or
+    # an unrelated later cardinality phrase. Deliberately abstain on conditional,
+    # negated, distributive, repeated, or compound invocation wording.
+    if re.search(
+        r"\b(?:if|unless|example|quote|per|each|twice|again|another|both|"
+        r"multiple|several|never|repeat|times)\b|\bdo\s+not\b|\bdon['’]t\b", text,
         flags=re.IGNORECASE,
     ):
         return False
-
-    tool_names: list[str] = []
-    try:
-        for tool in convert_tools_for_template(
-            _effective_tools_for_tool_parsing(request)
-        ) or []:
-            function = tool.get("function") if isinstance(tool, dict) else None
-            name = function.get("name") if isinstance(function, dict) else None
-            if isinstance(name, str) and name:
-                tool_names.append(name)
-    except Exception:
+    name = re.escape(mentions[0][0])
+    binding = re.match(
+        rf"\s*(?:please\s+)?(?:"
+        rf"(?:call|invoke|use|run|execute)\s+(?:the\s+)?(?:built-in\s+)?"
+        rf"{name}(?:\s+(?:tool|function))?\s+exactly\s+once\b|"
+        rf"make\s+exactly\s+one(?:\s+native)?\s+(?:tool|function)\s+call"
+        rf"\s+(?:to|using)\s+{name}\b)", text, flags=re.IGNORECASE,
+    )
+    if not binding:
         return False
-    named_tools = {
-        name
-        for name in tool_names
-        if re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
-            latest_user_text,
-        )
-    }
-    return len(named_tools) == 1
+    tail = text[binding.end():]
+    tail = re.sub(r"\bYou\s+must\s+use\s+the\s+tool\b", "", tail, flags=re.IGNORECASE)
+    # Another invocation, even without repeating the tool name, is not the
+    # single-call contract. Compound argument scopes are ambiguous: abstain.
+    if re.search(r"\b(?:call|invoke|use|run|execute|read)\b", tail,
+                 flags=re.IGNORECASE):
+        return False
+    directive_tail = re.split(r"(?:[.?!;](?:\s|$)|\n)", tail, maxsplit=1)[0]
+    return not re.search(r"\b(?:and|or)\b", directive_tail, flags=re.IGNORECASE)
+
+
+def _tool_marker_inside_code(text: str, position: int) -> bool:
+    """Track matching Markdown code delimiters before a marker position.
+
+    Run lengths matter: two backticks are one delimiter, not two toggles.
+    Fences can contain shorter backtick runs without closing the code block.
+    Unclosed delimiters conservatively remain quoted.
+    """
+    inline = 0
+    fence: tuple[str, int] | None = None
+    for match in re.finditer(r"`+|~{3,}", text[:position]):
+        run = match.group()
+        line_prefix = text[text.rfind("\n", 0, match.start()) + 1:match.start()]
+        at_line_start = not line_prefix.strip()
+        if fence is not None:
+            line_end = text.find("\n", match.end())
+            line_tail = text[match.end():line_end if line_end >= 0 else len(text)]
+            if (at_line_start and run[0] == fence[0] and len(run) >= fence[1]
+                    and not line_tail.strip()):
+                fence = None
+            continue
+        if inline:
+            if run[0] == "`" and len(run) == inline:
+                inline = 0
+            continue
+        if at_line_start and len(run) >= 3:
+            fence = (run[0], len(run))
+        elif run[0] == "`":
+            inline = len(run)
+    return fence is not None or inline != 0
 
 
 def _first_unquoted_marker_pos(text: str, marker: str) -> int:
-    """Position of `marker` as real markup, skipping backtick-quoted mentions.
-
-    A marker MENTIONED in prose is not tool markup. Both suppressed-display
-    paths used a bare .find(), so an answer containing `<tool_call>` inside an
-    inline code span or a fence was TRUNCATED at that point — the rest of the
-    reply never reached the user — and the residue tidy then collapsed every
-    blank line in what survived. Models never wrap markup they actually emit in
-    backticks, so skip those occurrences and keep scanning for a genuine one.
-    """
+    """Find native markup outside accumulated inline/fenced code examples."""
     start = 0
     while True:
         pos = text.find(marker, start)
         if pos < 0:
             return -1
-        before = text[pos - 1] if pos > 0 else ""
-        # Only a PRECEDING backtick means "quoted mention". Testing the char
-        # after the marker as well was too broad: real zaya visual-grounding
-        # markup can be followed by a backtick, and skipping it there let live
-        # markup through into the visible answer.
-        if before != "`":
+        if not _tool_marker_inside_code(text, pos):
             return pos
         start = pos + 1
 
@@ -25969,35 +26040,11 @@ async def stream_chat_completion(
         and not _suppress_tools
         and not _tool_call_parser_disabled_explicitly
     )
-    # An explicit single-call contract has no legitimate visible prose before
-    # the first function call. Responses already buffers that selection turn
-    # from token one; Chat must do the same or native/off-template call
-    # scaffolding can leak as content before final parsing converts it into
-    # structured tool_calls. After a real tool result is in history, stream the
-    # answer normally and only re-buffer if a new marker appears.
-    _exact_once_requested = _request_explicitly_requires_one_tool_once(request)
-    _has_post_user_tool_result = _responses_messages_have_tool_result_after_latest_user(
-        messages
-    )
-    _exact_once_tool_contract = bool(
-        tool_call_active
-        and _exact_once_requested
-        and not _has_post_user_tool_result
-    )
+    # Tool availability/cardinality does not mean the model is generating a
+    # call. Preserve native prose/reasoning and buffer only after an actual
+    # marker or a recognized structured-call prefix appears below.
     _stream_speculative_tool_start_allowed = False
-    if tool_call_active and _exact_once_requested:
-        logger.info(
-            "Chat exact-once tool gate: initial_selection=%s "
-            "post_user_tool_result=%s message_shapes=%s",
-            _exact_once_tool_contract,
-            _has_post_user_tool_result,
-            [
-                (message.get("role"), message.get("type"))
-                for message in messages
-                if isinstance(message, dict)
-            ],
-        )
-    tool_call_buffering = _exact_once_tool_contract
+    tool_call_buffering = False
     # Early-stop after a complete tool-call turn (opt-in per tool parser via
     # STREAM_STOPS_AFTER_COMPLETE_CALL). Live-proven need: degraded 2-bit
     # openPangu keeps narrating after <|tool_call_end|> instead of emitting
@@ -26392,18 +26439,12 @@ async def stream_chat_completion(
                         and delta_msg.reasoning
                         and _allow_reasoning_tools
                     ):
-                        _reasoning_tail = (
-                            accumulated_reasoning[-30:]
-                            if len(accumulated_reasoning) > 30
-                            else accumulated_reasoning
-                        )
-                        # #199-2A: buffer only when the reasoning tail is ACTIVELY
-                        # emitting a tool marker (ends with a complete/partial
-                        # marker) — a real reasoning-channel tool call is still
-                        # captured, but reasoning prose that merely MENTIONS tool
-                        # syntax earlier and continues does not stall output.
-                        tool_call_buffering = _text_ends_with_tool_marker(
-                            _reasoning_tail
+                        # Use actual accumulated line/quote context, not chunk edges.
+                        tool_call_buffering = (
+                            _reasoning_has_native_tool_boundary(
+                                accumulated_reasoning,
+                                len(accumulated_reasoning) - len(delta_msg.reasoning),
+                            )
                         )
                     # GPT-OSS/Harmony native tool format: to=<name> code{...}
                     # Uses regex for specificity (plain "to=" is too broad for markers list)
@@ -26427,13 +26468,12 @@ async def stream_chat_completion(
 
                 if tool_call_buffering:
                     if (
-                        (_exact_once_tool_contract or getattr(request_parser, "preserve_native_whitespace", False))
-                        and not suppress_reasoning
+                        not suppress_reasoning
                         and delta_msg.reasoning
                     ):
-                        # Exact-once selection turns buffer visible content from
-                        # token one, but genuine reasoning should still stream on
-                        # the reasoning rail. Stop the reasoning prefix at the
+                        # A chunk can finish genuine reasoning and start native
+                        # tool markup. Keep that reasoning on its own rail,
+                        # stopping the reasoning prefix at the
                         # first native tool marker so the structured call itself
                         # never leaks as reasoning text.
                         _safe_reasoning = (
@@ -27006,8 +27046,7 @@ async def stream_chat_completion(
             # Immediate exact-once stopping happens before the current close
             # marker is fed through the reasoning splitter. Parse the complete,
             # parser-truncated raw candidate instead of an incomplete content
-            # accumulator; the exact-once branch below still suppresses any
-            # pre-call meta prose from visible output.
+            # accumulator. Preserve any native pre-call visible prose.
             parse_text = _early_stopped_tool_text
         elif request_parser and accumulated_content.strip():
             parse_text = accumulated_content.strip()
@@ -27031,8 +27070,7 @@ async def stream_chat_completion(
             # may be accumulated but never yielded due to buffering).
             unemitted_content = None
             if (
-                not _exact_once_tool_contract
-                and cleaned_text
+                cleaned_text
                 and cleaned_text.strip()
             ):
                 already_sent = streamed_content.strip()
@@ -27232,15 +27270,7 @@ async def stream_chat_completion(
                     remainder = ""
             else:
                 remainder = full if not content_was_emitted else ""
-            if _exact_once_tool_contract:
-                # An explicit exact-one selection turn has no legitimate visible
-                # prose before its required function call.  If the final parser
-                # rejects the buffered candidate, keep all native/orphan control
-                # fragments hidden and let the required-tool terminal below report
-                # the failure truthfully.  Flushing here leaked Qwen-style
-                # ``<parameter=path>...`` residue through Anthropic/Chat clients.
-                remainder = ""
-            elif remainder:
+            if remainder:
                 # Mirror the non-streaming visible-answer gate: only prose that
                 # safely precedes the first unparsed native marker is assistant
                 # text. Residue-stripping the whole rejected candidate instead
@@ -28373,34 +28403,10 @@ async def stream_responses_api(
         and not _suppress_tools
         and not _tool_call_parser_disabled_explicitly
     )
-    # An explicit single-call contract has no legitimate visible prose before
-    # the FIRST function call. Buffer that selection turn from token one so a
-    # model that closes </think> early and continues meta-reasoning cannot leak
-    # it through output_text.done. Once a tool result follows the latest user
-    # message, the required call has already happened: keep marker detection
-    # armed for any new call, but stream ordinary answer content progressively.
-    _exact_once_requested = _request_explicitly_requires_one_tool_once(request)
-    _has_post_user_tool_result = _responses_messages_have_tool_result_after_latest_user(
-        messages
-    )
-    _exact_once_tool_contract = bool(
-        tool_call_active
-        and _exact_once_requested
-        and not _has_post_user_tool_result
-    )
-    if tool_call_active and _exact_once_requested:
-        logger.info(
-            "Responses exact-once tool gate: initial_selection=%s "
-            "post_user_tool_result=%s message_shapes=%s",
-            _exact_once_tool_contract,
-            _has_post_user_tool_result,
-            [
-                (message.get("role"), message.get("type"))
-                for message in messages
-                if isinstance(message, dict)
-            ],
-        )
-    tool_call_buffering = _exact_once_tool_contract
+    # Tool availability/cardinality does not mean the model is generating a
+    # call. Preserve native prose/reasoning and buffer only after an actual
+    # marker or a recognized structured-call prefix appears below.
+    tool_call_buffering = False
     # Early-stop after a complete tool-call turn (opt-in per tool parser via
     # STREAM_STOPS_AFTER_COMPLETE_CALL) — mirrors stream_chat_completion.
     _tc_stop_parser = (
@@ -28894,16 +28900,12 @@ async def stream_responses_api(
                                 and delta_msg.reasoning
                                 and _allow_reasoning_tools
                             ):
-                                _reasoning_tail = (
-                                    accumulated_reasoning[-30:]
-                                    if len(accumulated_reasoning) > 30
-                                    else accumulated_reasoning
-                                )
-                                # #199-2A: see stream_chat_completion — buffer only
-                                # when the reasoning tail is ACTIVELY emitting a
-                                # tool marker, not on a mere mention in prose.
-                                tool_call_buffering = _text_ends_with_tool_marker(
-                                    _reasoning_tail
+                                # Use actual accumulated line/quote context, not chunk edges.
+                                tool_call_buffering = (
+                                    _reasoning_has_native_tool_boundary(
+                                        accumulated_reasoning,
+                                        len(accumulated_reasoning) - len(delta_msg.reasoning),
+                                    )
                                 )
                                 if tool_call_buffering:
                                     _buffer_trigger = "reasoning-marker"
@@ -29574,20 +29576,14 @@ async def stream_responses_api(
 
     if tool_calls:
         # Apply reasoning parser to the cleaned (pre-tool-call) text
-        if _exact_once_tool_contract:
-            # The user explicitly required one native call before any prose.
-            # Any content preceding the valid call is model meta-commentary,
-            # not assistant output. It may already be represented correctly on
-            # the reasoning rail, so never duplicate it into output_text.
-            cleaned_text = ""
-        elif request_parser and cleaned_text:
+        if request_parser and cleaned_text:
             reasoning_text, content_text = request_parser.extract_reasoning(
                 cleaned_text
             )
             if content_text:
                 cleaned_text = content_text
             elif reasoning_text:
-                cleaned_text = reasoning_text
+                cleaned_text = ""
 
         # A native tool parser may intentionally return no cleaned prose (GLM47
         # does so when a call is present). That cannot retract output_text bytes

@@ -2849,19 +2849,13 @@ class TestOpenAILogprobsFormatting:
         assert done_seen is True
 
     @pytest.mark.asyncio
-    async def test_streaming_chat_exact_once_buffers_schema_labeled_qwen_call(
+    async def test_streaming_chat_exact_once_preserves_unmarked_native_text(
         self, monkeypatch
     ):
-        """Exact-one tool selection must not leak off-template Qwen call prose.
+        """Prompt cardinality must not hide plain text before parser recognition.
 
-        Live Qwen3.6 JANGTQ emitted:
-            [Q36-JT-UI-TOOL2]
-            file_info
-            path: panel/package.json
-
-        That is a schema-valid tool intent, but it contains no canonical XML
-        marker. Chat must buffer the selection turn from token one, then emit a
-        structured tool_call instead of first streaming the lines as content.
+        Retain the existing parser's structured result, but a prompt cannot
+        retroactively erase already emitted unmarked model text.
         """
         import json
         from types import SimpleNamespace
@@ -2889,8 +2883,8 @@ class TestOpenAILogprobsFormatting:
                         tokens=list(range(index)),
                         prompt_tokens=8,
                         completion_tokens=index,
-                        finished=False,
-                        finish_reason=None,
+                        finished=index == len(chunks_out),
+                        finish_reason="stop" if index == len(chunks_out) else None,
                     )
                     if self.aborted:
                         return
@@ -2962,20 +2956,16 @@ class TestOpenAILogprobsFormatting:
             if choice.get("finish_reason") is not None
         ]
 
-        assert visible == ""
-        assert tool_deltas[0]["function"] == {"name": "", "arguments": ""}
-        assert tool_deltas[-1]["function"]["name"] == "file_info"
-        assert json.loads(tool_deltas[-1]["function"]["arguments"]) == {
-            "path": "panel/package.json"
-        }
-        assert finish_reasons == ["tool_calls"]
+        assert visible.startswith("[Q36-JT-UI-TOOL2]\n")
+        assert tool_deltas == []  # Plain visible prose is not native control markup.
+        assert finish_reasons == ["stop"]
         assert done_seen is True
 
     @pytest.mark.asyncio
-    async def test_streaming_chat_exact_once_hides_pretool_prose_and_orphan_markup(
+    async def test_streaming_chat_exact_once_preserves_prose_and_hides_orphan_markup(
         self, monkeypatch
     ):
-        """Exact-one turns never expose meta prose or rejected native fragments."""
+        """One call permits native prose but never orphan control markup."""
         import json
         from types import SimpleNamespace
 
@@ -3067,7 +3057,7 @@ class TestOpenAILogprobsFormatting:
             "<parameter=path>panel/package.json</parameter>",
             "</function></tool_call>",
         ])
-        assert visible == ""
+        assert visible == "I should call the requested tool. "
         assert calls[-1]["function"]["name"] == "file_info"
 
         visible, calls, chunks = await collect([
@@ -4524,16 +4514,16 @@ class TestOpenAILogprobsFormatting:
         assert json.loads(function_items[0]["arguments"]) == {
             "path": "panel/package.json"
         }
-        assert output_deltas == []
-        assert completed["output_text"] == ""
-        assert "reasoning before the call" not in json.dumps(completed)
+        assert output_deltas == ["reasoning before the call "]
+        assert completed["output_text"] == "reasoning before the call "
         assert "POST_CALL_REPEAT" not in json.dumps(completed)
 
     @pytest.mark.asyncio
-    async def test_streaming_responses_qwen_exact_once_streams_reasoning_not_pretool_prose(
-        self, monkeypatch
+    @pytest.mark.parametrize("terminal_reasoning_only", [False, True])
+    async def test_streaming_responses_qwen_exact_once_preserves_native_prose_and_reasoning(
+        self, monkeypatch, terminal_reasoning_only
     ):
-        """Premature post-think meta prose stays hidden before an exact-one call."""
+        """A one-call contract does not relabel native visible prose as reasoning."""
         import json
         from types import SimpleNamespace
 
@@ -4553,11 +4543,13 @@ class TestOpenAILogprobsFormatting:
                 return SimpleNamespace(reasoning=None, content=delta_text)
 
             def extract_reasoning(self, text):
+                if text.startswith("<think>") and text.endswith("</think>"):
+                    return text[7:-8], None
                 return None, text
 
         deltas = [
             "R:plan the requested call",
-            "C:visible meta-reasoning that must stay hidden ",
+            "C:I will inspect the requested file. ",
             "C:<tool_call>",
             "C:<function=file_info>",
             "C:<parameter=path>panel/package.json</parameter>",
@@ -4565,6 +4557,9 @@ class TestOpenAILogprobsFormatting:
             "C:</tool_call>",
             "C: POST_CALL_REPEAT",
         ]
+
+        if terminal_reasoning_only:
+            deltas.remove("C:I will inspect the requested file. ")
 
         class _Engine:
             tokenizer = SimpleNamespace(has_thinking=False)
@@ -4597,6 +4592,15 @@ class TestOpenAILogprobsFormatting:
         monkeypatch.setattr(server, "_reasoning_parser", _ReasoningParser())
         monkeypatch.setattr(server, "_tool_call_parser", "qwen")
         monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+
+        if terminal_reasoning_only:
+            original_parse = server._parse_tool_calls_with_parser
+            def parse_with_private_prefix(text, req):
+                cleaned, calls = original_parse(text, req)
+                if calls:
+                    return "<think>plan the requested call</think>", calls
+                return cleaned, calls
+            monkeypatch.setattr(server, "_parse_tool_calls_with_parser", parse_with_private_prefix)
 
         request = ResponsesRequest(
             model="bonsai-test",
@@ -4652,10 +4656,13 @@ class TestOpenAILogprobsFormatting:
         )
 
         assert reasoning == "plan the requested call"
-        assert visible == ""
+        assert visible == ("" if terminal_reasoning_only else "I will inspect the requested file. ")
         assert terminal["status"] == "completed"
-        assert terminal["output_text"] == ""
-        assert "visible meta-reasoning" not in json.dumps(terminal)
+        assert terminal["output_text"] == visible
+        first_output = next(i for i, event in enumerate(events)
+                            if event.get("type") == "response.reasoning_summary_text.delta")
+        assert not any(event.get("tool_call_generating") for event in events[:first_output + 1])
+        assert "plan the requested call" not in terminal["output_text"]
         assert len(function_items) == 1
         assert function_items[0]["name"] == "file_info"
         assert json.loads(function_items[0]["arguments"]) == {
@@ -7307,3 +7314,124 @@ class TestNativeParserExceptionNeverRepairsNativeMarkup:
         assert calls is None
         assert "<atem" not in cleaned
         assert diags and "boom_native_test3" in diags[0]
+
+
+class TestExactOnceInvocationScope:
+    @pytest.mark.parametrize("text, expected", [
+        ("Call read_file exactly once with path inventory.txt.", True),
+        ("Call the built-in read_file tool exactly once with path inventory.txt.", True),
+        ("Use read_file exactly once.", True),
+        ("Please invoke read_file exactly once.", True),
+        ("Make exactly one native tool call to read_file.", True),
+        ("Call read_file exactly once. You must use the tool.", True),
+        ("Use read_file to read inventory.txt and adjustments.txt. Apply the video events exactly once.", False),
+        ("Call read_file exactly once per file for inventory.txt and adjustments.txt.", False),
+        ("Call read_file exactly once for each of the two files.", False),
+        ("Call read_file exactly once, then read the other file too.", False),
+        ("Call read_file exactly once with path a.json and path b.json.", False),
+        ("Call read_file exactly once. Call read_file exactly once again.", False),
+        ("Call read_file exactly once, then do it two times.", False),
+        ("Call read_file exactly once, then repeat it.", False),
+        ("Do not call read_file exactly once.", False),
+        ("If needed, call read_file exactly once.", False),
+        ('Explain the sentence "Call read_file exactly once".', False),
+        ("Call read_file. Apply the event exactly once.", False),
+        ("Exactly once is the event count; read_file is available.", False),
+        ("Use read_file twice; apply each event exactly once.", False),
+    ])
+    @pytest.mark.parametrize("wire", ["chat", "responses"])
+    def test_single_invocation_is_bound_to_named_tool(self, text, expected, wire):
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, ResponsesRequest
+        function = {"name": "read_file", "parameters": {"type": "object"}}
+        if wire == "chat":
+            request = ChatCompletionRequest(model="test", messages=[{"role": "user", "content": text}],
+                                            tools=[{"type": "function", "function": function}])
+        else:
+            request = ResponsesRequest(model="test", input=text,
+                                       tools=[{"type": "function", **function}])
+        assert server._request_explicitly_requires_one_tool_once(request) is expected
+
+class TestOrphanParameterMarkerScope:
+    def test_parameter_marker_and_split_are_hidden_but_inline_quote_is_prose(self):
+        import vmlx_engine.server as server
+        assert server._has_tool_marker_or_partial_suffix('<parameter=path>')
+        assert server._has_tool_marker_or_partial_suffix('<para')
+        assert server._tool_safe_stream_prefix('prefix <pa') == 'prefix '
+        assert server._visible_prefix_before_unparsed_tool_markup('prefix <parameter=path>secret') == 'prefix'
+        quoted = 'Explain `<parameter=path>` literally.'
+        assert not server._has_tool_marker_or_partial_suffix(quoted)
+        assert server._visible_prefix_before_unparsed_tool_markup(quoted) == quoted
+        assert server._tool_safe_stream_prefix('Explain `<pa') == 'Explain `<pa'
+
+    @pytest.mark.parametrize("prefix, delta, expected", [
+        ("", '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="read_file">x</｜DSML｜invoke>', True),
+        ("Ready.\n", '<parameter=path>x', True),
+        ("Explain `", '<function=read_file>x</function>` literally.', False),
+        ("Example:\n```xml\n", '<function=read_file>x</function>\n```', False),
+        ("Example:\n~~~xml\n", '<function=read_file>x</function>\n~~~', False),
+        ("The syntax ", '<function=read_file> is an example.', False),
+        ("Example:\n```xml\n", '<fun', False),
+        ("Ready.\n<fu", 'nction=read_file>x', True),
+        ("Example: ``literal ", '<tool_call>', False),
+        ("Example:\n````xml\n", '<function=read_file>x</function>\n````\nExplanation', False),
+        ("Example:\n```xml\none ` literal\n", '<function=read_file>x</function>', False),
+    ])
+    def test_private_marker_uses_accumulated_quote_context(self, prefix, delta, expected):
+        import vmlx_engine.server as server
+        assert server._reasoning_has_native_tool_boundary(prefix + delta, len(prefix)) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("wire", ["chat", "responses"])
+    async def test_split_quoted_native_syntax_remains_reasoning(self, monkeypatch, wire):
+        import json
+        from types import SimpleNamespace
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
+
+        reasoning = 'Example:\n````xml\n<function=read_file>x</function>\n````\nThat was an example.'
+        deltas = ['<think>Example:\n````xml\n', '<function=read_file>x</function>\n````\nThat was an example.', '</think>Done.']
+        class Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+            async def stream_chat(self, **kwargs):
+                text = ''
+                for i, delta in enumerate(deltas):
+                    text += delta
+                    yield GenerationOutput(text=text, new_text=delta, tokens=[i], prompt_tokens=8,
+                                           completion_tokens=i + 1, finished=i == 2,
+                                           finish_reason='stop' if i == 2 else None)
+        monkeypatch.setattr(server, '_default_timeout', 5.0)
+        monkeypatch.setattr(server, '_model_name', 'test')
+        monkeypatch.setattr(server, '_model_path', None)
+        monkeypatch.setattr(server, '_reasoning_parser', DeepSeekR1ReasoningParser())
+        monkeypatch.setattr(server, '_tool_call_parser', 'dsml')
+        monkeypatch.setattr(server, '_tool_call_parser_disabled_explicitly', False)
+        messages = [{'role': 'user', 'content': 'Explain syntax; no invocation needed.'}]
+        function = {'name': 'read_file', 'parameters': {'type': 'object'}}
+        if wire == 'chat':
+            request = ChatCompletionRequest(model='test', messages=messages, stream=True,
+                                            tools=[{'type': 'function', 'function': function}])
+            stream = server.stream_chat_completion(Engine(), messages, request, fastapi_request=None)
+        else:
+            request = ResponsesRequest(model='test', input=messages, stream=True,
+                                       tools=[{'type': 'function', **function}])
+            stream = server.stream_responses_api(Engine(), messages, request, fastapi_request=None)
+        events = []
+        async for chunk in stream:
+            for line in chunk.splitlines():
+                if line.startswith('data: ') and line != 'data: [DONE]':
+                    events.append(json.loads(line[6:]))
+        if wire == 'chat':
+            ds = [choice.get('delta', {}) for event in events for choice in event.get('choices', [])]
+            actual_reasoning = ''.join(d.get('reasoning_content') or d.get('reasoning') or '' for d in ds)
+            visible = ''.join(d.get('content') or '' for d in ds)
+            assert not any(d.get('tool_calls') for d in ds)
+        else:
+            actual_reasoning = ''.join(e.get('delta', '') for e in events if e.get('type') == 'response.reasoning_summary_text.delta')
+            visible = ''.join(e.get('delta', '') for e in events if e.get('type') == 'response.output_text.delta')
+            assert not any(e.get('tool_call_generating') for e in events)
+            assert not any(e.get('item', {}).get('type') == 'function_call' for e in events)
+        assert actual_reasoning.strip() == reasoning
+        assert visible.strip() == 'Done.'

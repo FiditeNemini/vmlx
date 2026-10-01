@@ -10667,7 +10667,9 @@ class Scheduler:
                 exc_info=True,
             )
 
-    def _cleanup_finished(self, finished_ids: Set[str]) -> None:
+    def _cleanup_finished(
+        self, finished_ids: Set[str], *, _defer_final_store_gc: bool = False
+    ) -> None:
         """Clean up finished requests and store caches for reuse."""
         # This runs on the worker thread and gates the next admission (the
         # engine only clears _terminal_cleanup_complete once it finishes), so
@@ -11386,11 +11388,18 @@ class Scheduler:
                                     finally:
                                         self.block_aware_cache.release_cache(checkpoint_id)
                                         request._naive_prompt_checkpoint = None
+                                # The prompt checkpoint above must collect before
+                                # this second store. Only the sole Naive terminal
+                                # owner can repay the final collection after the
+                                # cleanup frame returns.
+                                _terminal_store_kwargs = dict(_paged_store_kwargs)
+                                if _defer_final_store_gc:
+                                    _terminal_store_kwargs["defer_post_fence_gc"] = True
                                 _stored_block_table = self.block_aware_cache.store_cache(
                                     request_id,
                                     store_tokens,
                                     cache_data,
-                                    **_paged_store_kwargs,
+                                    **_terminal_store_kwargs,
                                 )
                                 self._dsv4_trace_timing(
                                     "store_cache",
@@ -11827,25 +11836,40 @@ class Scheduler:
         finished_ids: Set[str],
     ) -> None:
         """Release text-request cache buffers after the cleanup frame returns."""
-        self._cleanup_finished(finished_ids)
-        # _cleanup_finished() publishes the native prompt-boundary state and
-        # detaches every persistent request/cache owner, but its own final loop
-        # locals still reference the just-stored ``request``/``cache_to_store``
-        # graph when the in-function allocator clear runs.  The frame returning
-        # here is the first point where those references are actually gone.
-        # Reclaim again on the same model worker so SSD-only text serving does
-        # not retain one MLX allocator step after every completed request.
-        if finished_ids and not self.running:
-            try:
-                import gc as _gc
+        # EngineCore serializes this wrapper on the model worker and gates
+        # new admission until it returns. Direct step cleanup keeps its default
+        # collections, as do other families and concurrent running requests.
+        defer_gc = (
+            getattr(self, "_model_type_for_runtime", "") == "naive_n05_flash"
+            and len(finished_ids) == 1
+            and set(self.running) == finished_ids
+        )
+        cleanup_succeeded = False
+        try:
+            if defer_gc:
+                self._cleanup_finished(finished_ids, _defer_final_store_gc=True)
+            else:
+                self._cleanup_finished(finished_ids)
+            cleanup_succeeded = True
+        finally:
+            # Repay after the successful inner frame releases its cache locals.
+            # On failure the traceback may still own those locals; attempt
+            # repayment anyway and preserve the original cleanup exception.
+            if defer_gc or (cleanup_succeeded and finished_ids and not self.running):
+                try:
+                    try:
+                        import gc as _gc
 
-                _gc.collect()
-            except Exception as gc_error:  # noqa: BLE001
-                logger.debug(
-                    "Could not collect released text terminal cache refs: %s",
-                    gc_error,
-                )
-            clear_mlx_memory_cache(log=logger)
+                        _gc.collect()
+                    except Exception as gc_error:  # noqa: BLE001
+                        logger.debug(
+                            "Could not collect released text terminal cache refs: %s",
+                            gc_error,
+                        )
+                    clear_mlx_memory_cache(log=logger)
+                except Exception:
+                    if cleanup_succeeded:
+                        raise
 
     def _is_cache_corruption_error(self, error: Exception) -> bool:
         """Check if an error indicates cache corruption.

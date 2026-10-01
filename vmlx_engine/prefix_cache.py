@@ -5095,8 +5095,8 @@ class BlockAwarePrefixCache:
                 try:
                     import gc as _gc
 
-                    # Only the idle MLLM terminal wrapper guarantees a later
-                    # collection after its cache-owning frame has unwound.
+                    # Eligible terminal wrappers guarantee a later collection
+                    # after the cache-owning frame unwinds, before another store.
                     if not defer_post_fence_gc:
                         _cleanup_phase_t0 = _cleanup_phase_start()
                         _cleanup_phase_ok = False

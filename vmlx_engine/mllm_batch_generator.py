@@ -14272,6 +14272,12 @@ class MLLMBatchGenerator:
             fetch_started = time.perf_counter()
             segments = (
                 ("postprocess_to_identity_ms", "postprocess_finished", "identity_started"),
+                ("trace_stop_ms", "postprocess_finished", "trace_stopped"),
+                ("derived_file_cleanup_ms", "trace_stopped", "derived_files_released"),
+                ("cancellation_check_ms", "derived_files_released", "cancellation_checked"),
+                ("token_list_extraction_ms", "cancellation_checked", "token_list_extracted"),
+                ("cache_key_merge_ms", "token_list_extracted", "before_prepare_identity"),
+                ("identity_entry_ms", "before_prepare_identity", "identity_started"),
                 ("whole_key_ms", "identity_started", "whole_key_finished"),
                 ("item_keys_and_merge_ms", "whole_key_finished", "identity_finished"),
                 ("identity_to_fetch_ms", "identity_finished", None),
@@ -14442,6 +14448,8 @@ class MLLMBatchGenerator:
                     else None
                 )
                 trace.stop("preprocess")
+                if req._glm_native_media_timing is not None:
+                    req._glm_native_media_timing["trace_stopped"] = time.perf_counter()
             except (MediaControlsUnmeetableError, MediaInputError) as strict_err:
                 trace.stop("preprocess")
                 rejected_request_ids.add(req.request_id)
@@ -14490,9 +14498,14 @@ class MLLMBatchGenerator:
                 # processor inside _preprocess_request; release them whether it
                 # returned, rejected the request or raised
                 _release_derived_media_files(req)
+                _media_timing = getattr(req, "_glm_native_media_timing", None)
+                if _media_timing is not None:
+                    _media_timing["derived_files_released"] = time.perf_counter()
             if _prefill_cancelled(req):
                 _release_cancelled_prefill_request(req)
                 continue
+            if _media_timing is not None:
+                _media_timing["cancellation_checked"] = time.perf_counter()
             # Save full token list BEFORE cache fetch can mutate req.input_ids.
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (
@@ -14502,6 +14515,8 @@ class MLLMBatchGenerator:
                 if req.input_ids is not None
                 else []
             )
+            if _media_timing is not None:
+                _media_timing["token_list_extracted"] = time.perf_counter()
             # Media identity used to salt EVERY block, including root text.
             # Scope exact item digests to their own causal placeholder runs so
             # an image->video chain reuses the unchanged image-conditioned
@@ -14519,6 +14534,8 @@ class MLLMBatchGenerator:
                 # including its generation suffix. Leave the legacy key and
                 # usage fields below unchanged for other backends/surfaces.
                 req._glm_native_full_token_ids = _all_tokens
+                if _media_timing is not None:
+                    _media_timing["before_prepare_identity"] = time.perf_counter()
                 self._prepare_glm_native_media_identity(req, _all_tokens)
             # Strip generation prompt tokens from the cache key.
             # Chat templates append assistant role tokens (e.g. <|im_start|>assistant\n<think>\n)

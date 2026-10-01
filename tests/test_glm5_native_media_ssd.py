@@ -408,7 +408,11 @@ def test_media_wall_timing_preserves_keys_and_adds_no_explicit_sync(monkeypatch,
     gen._restore_glm_native_prefix(control)
     original_call = native.fetch.call_args
     candidate, _ = item_request(video=True)
-    candidate._glm_native_media_timing = {"postprocess_finished": 10.0}
+    candidate._glm_native_media_timing = {
+        "postprocess_finished": 10.0, "trace_stopped": 10.01,
+        "derived_files_released": 10.02, "cancellation_checked": 10.03,
+        "token_list_extracted": 10.07, "before_prepare_identity": 10.08,
+    }
     ticks = iter([10.1, 10.2, 10.5, 10.8])
     monkeypatch.setattr(mbg.time, "perf_counter", lambda: next(ticks))
     monkeypatch.setattr(mx, "synchronize", Mock(side_effect=AssertionError("extra synchronization")))
@@ -421,4 +425,7 @@ def test_media_wall_timing_preserves_keys_and_adds_no_explicit_sync(monkeypatch,
     values = json.loads(message.split(": ", 1)[1])
     assert values == {"postprocess_to_identity_ms": 100.0, "whole_key_ms": 100.0,
                       "item_keys_and_merge_ms": 300.0, "identity_to_fetch_ms": 300.0,
-                      "total_before_fetch_ms": 800.0}
+                      "total_before_fetch_ms": 800.0, "trace_stop_ms": 10.0,
+                      "derived_file_cleanup_ms": 10.0, "cancellation_check_ms": 10.0,
+                      "token_list_extraction_ms": 40.0, "cache_key_merge_ms": 10.0,
+                      "identity_entry_ms": 20.0}

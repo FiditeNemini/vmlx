@@ -9598,6 +9598,7 @@ class Scheduler:
                 completion_tokens=request.num_output_tokens,
                 cached_tokens=request.cached_tokens,
                 cache_detail=_detail,
+                prefill_usage=getattr(response, "prefill_usage", None),
                 logprobs=(
                     list(request.output_logprobs)
                     if request.sampling_params.logprobs

@@ -705,3 +705,88 @@ def test_noneligible_rotating_snapshots_preserve_native_state(case):
     assert snapshot_size([cache]) == sum(a.nbytes for a in cache.state)
     assert copied.meta_state == cache.meta_state
     assert all(bool(mx.array_equal(a, b)) for a, b in zip(copied.state, cache.state))
+
+
+def test_naive_prefill_receipt_ends_before_sampler_and_survives_terminal(monkeypatch):
+    from vmlx_engine.utils import single_batch_generator as sbg
+    model = make_model()
+    generator = sbg.SingleBatchGenerator(model, prefill_step_size=4)
+    monkeypatch.setattr(sbg, 'get_effective_metal_working_set_bytes', lambda mx: (0, 64 << 30))
+    clock = [1000.0]
+    monkeypatch.setattr(sbg.time, 'perf_counter', lambda: clock[0])
+    original_prefill = generator._prefill
+    original_clone = generator._clone_naive_prompt_snapshot
+    original_eval = generator._eval_on_stream
+    original_sample = generator._sample_from_logits
+    initial_evals = []
+    sampler_receipts = []
+
+    def prefill(tokens, req):
+        original_prefill(tokens, req)
+        clock[0] += 11.0
+
+    def clone(req):
+        result = original_clone(req)
+        clock[0] += 7.0
+        return result
+
+    def evaluate(*values):
+        result = original_eval(*values)
+        req = generator._request
+        if req.prefill_started is not None and len(values) == 1 and values[0].shape == (1, 32):
+            initial_evals.append(req.uid)
+            clock[0] += 3.0
+        return result
+
+    def sample(logits, req, input_tokens, **kwargs):
+        assert req.prefill_started is None
+        assert req.prefill_usage is not None
+        sampler_receipts.append((req.uid, dict(req.prefill_usage)))
+        clock[0] += 100.0  # Must not enter prefill timing, including lookahead.
+        return original_sample(logits, req, input_tokens, **kwargs)
+
+    monkeypatch.setattr(generator, '_prefill', prefill)
+    monkeypatch.setattr(generator, '_clone_naive_prompt_snapshot', clone)
+    monkeypatch.setattr(generator, '_eval_on_stream', evaluate)
+    monkeypatch.setattr(generator, '_sample_from_logits', sample)
+    generator.insert([list(range(1, 12))], max_tokens=[3])
+    first, _ = generator.next()
+    receipt = first[0].prefill_usage
+    assert receipt == {'tokens': 11, 'seconds': 21.0, 'scope': 'model_prefill_and_prompt_state'}
+    snapshot = first[0].prompt_cache_snapshot
+    responses = list(first)
+    while generator._request is not None:
+        prompt, generated = generator.next()
+        responses.extend(prompt + generated)
+    assert responses[-1].finish_reason is not None
+    assert all(r.prefill_usage == receipt for r in responses)
+    assert initial_evals == [first[0].uid]
+
+    # Reuse this generator with an N-1 snapshot and a one-token uncached suffix.
+    clock[0] += 500.0  # Idle/restore time cannot contaminate the new request.
+    generator.insert([[11]], max_tokens=[1], caches=[snapshot], all_tokens=[list(range(1, 11))])
+    warm, _ = generator.next()
+    assert warm[0].prefill_usage == {'tokens': 1, 'seconds': 10.0, 'scope': 'model_prefill_and_prompt_state'}
+    assert warm[0].finish_reason == 'length'
+    assert initial_evals == [first[0].uid, warm[0].uid]
+    assert sampler_receipts[-1][1] == warm[0].prefill_usage
+
+
+def test_other_single_batch_family_does_not_emit_naive_prefill_receipt(monkeypatch):
+    from vmlx_engine.utils import single_batch_generator as sbg
+    model = make_model()
+    model.model_type = 'other-family'
+    generator = sbg.SingleBatchGenerator(model, prefill_step_size=4)
+    original_eval = generator._eval_on_stream
+    final_logits_evals = []
+
+    def evaluate(*values):
+        if len(values) == 1 and values[0].shape == (1, 32):
+            final_logits_evals.append(values[0])
+        return original_eval(*values)
+
+    monkeypatch.setattr(generator, '_eval_on_stream', evaluate)
+    generator.insert([[1, 2, 3]], max_tokens=[1])
+    outputs, _ = generator.next()
+    assert outputs[0].prefill_usage is None
+    assert final_logits_evals == []

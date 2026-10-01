@@ -179,10 +179,14 @@ def words(x):
     return host.view(np.uint16 if x.dtype == mx.float16 else np.uint32)
 
 
-@pytest.mark.parametrize("pattern", ["random", "zero", "small", "gate_extremes"])
-def test_six_outputs_and_unchanged_recurrence_exact(pattern):
+@pytest.mark.parametrize("pattern,coefficient_dtype", [
+    ("random", mx.float32), ("zero", mx.float32),
+    ("small", mx.float32), ("gate_extremes", mx.float32),
+    ("random", mx.bfloat16),
+])
+def test_six_outputs_and_unchanged_recurrence_exact(pattern, coefficient_dtype):
     if not mx.metal.is_available() or not pre._compatible_runtime():
-        pytest.skip("requires actual MLX 0.32.2 / M5 Max")
+        pytest.skip("requires actual MLX 0.32.2 or 0.32.3 / M5 Max")
     from mlx_lm.models.gated_delta import gated_delta_kernel
     from vmlx_engine.metal.affine_moe_pair_decode import affine_moe_ar_scope
     rng = np.random.default_rng(49232)
@@ -199,7 +203,8 @@ def test_six_outputs_and_unchanged_recurrence_exact(pattern):
         hosts[2][...] = np.linspace(-15, 15, 48).astype(np.float16)
         hosts[5][...] = np.linspace(-4, 4, 48)
         hosts[6][...] = np.linspace(-2, 2, 48)
-    args = tuple(mx.array(x) for x in hosts)
+    args = tuple(mx.array(x, dtype=coefficient_dtype if i >= 5 else mx.float16)
+                 for i, x in enumerate(hosts))
     expected = reference(args)
     with affine_moe_ar_scope():
         actual = pre.gdn_prework(*args, enabled=True)
@@ -216,3 +221,27 @@ def test_six_outputs_and_unchanged_recurrence_exact(pattern):
     mx.eval(*expected_step, *actual_step)
     for a, b in zip(actual_step, expected_step):
         np.testing.assert_array_equal(words(a), words(b))
+
+
+@pytest.mark.parametrize("version,device,expected", [
+    ("0.32.2", "Apple M5 Max", True),
+    ("0.32.3", "Apple M5 Max", True),
+    ("0.32.4", "Apple M5 Max", False),
+    ("0.33.0", "Apple M5 Max", False),
+    ("0.32.3", "Apple M5 Ultra", False),
+    ("0.32.3", "Apple M4 Max", False),
+])
+def test_qualified_version_and_device(monkeypatch, version, device, expected):
+    pre._compatible_runtime.cache_clear()
+    monkeypatch.setattr(pre.importlib.metadata, "version", lambda _: version)
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": device})
+    try:
+        assert pre._compatible_runtime() is expected
+    finally:
+        pre._compatible_runtime.cache_clear()
+
+
+def test_version_source_preserves_old_math_and_rejects_future():
+    assert pre._source_for_version("0.32.2") == pre._SOURCE
+    with pytest.raises(ValueError, match="unqualified"):
+        pre._source_for_version("0.32.4")

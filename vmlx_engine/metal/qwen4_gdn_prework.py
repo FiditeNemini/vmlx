@@ -2,7 +2,9 @@
 
 Boundary inspired by ddalcu/mlx-serve 3c6206d94 gdnPreworkFused. Arithmetic
 derived instead from Apple MLX 0.32.2 depthwise_conv_1d, rms_single_row,
-Sigmoid/LogAddExp and executing mlx-lm compute_g. No upstream BF16 formula
+Sigmoid/LogAddExp and executing mlx-lm compute_g. MLX 0.32.3 uses its
+native precise sigmoid expression while preserving the 0.32.2 body.
+No upstream BF16 formula
 is substituted. Coefficients may independently be BF16 or FP32; never cast to
 admission. FP16 activation + BF16/FP32 dt_bias promotes to FP32 in MLX.
 
@@ -41,7 +43,7 @@ def gdn_prework_requested():
 @lru_cache(maxsize=1)
 def _compatible_runtime():
     try:
-        return (importlib.metadata.version("mlx") == "0.32.2"
+        return (importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
                 and mx.device_info().get("device_name") == "Apple M5 Max")
     except (importlib.metadata.PackageNotFoundError, RuntimeError, OSError):
         return False
@@ -138,14 +140,34 @@ _SOURCE = r'''
 '''
 
 
+def _source_for_version(version):
+    if version == "0.32.2":
+        return _SOURCE
+    if version != "0.32.3":
+        raise ValueError("unqualified Qwen GDN prework MLX version")
+    # MLX 0.32.3 Sigmoid uses precise::exp and its native expression
+    # promotion. Half exponential/denominator temporaries change its bits.
+    return _SOURCE.replace(
+        "half e = metal::exp(metal::abs(conv));\n"
+        "        half s = half(1) / (half(1) + e);",
+        "auto s = 1 / (1 + metal::precise::exp(metal::abs(conv)));",
+    ).replace(
+        "half be = metal::precise::exp(metal::abs(b[head]));\n"
+        "        half by = half(1) / (half(1) + be);",
+        "auto by = 1 / (1 + metal::precise::exp(metal::abs(b[head])));",
+    )
+
+
 @lru_cache(maxsize=1)
 def _kernel():
+    version = importlib.metadata.version("mlx")
+    source = _source_for_version(version)
     return mx.fast.metal_kernel(
-        name="vmlx_qwen4_gdn_prework_f16_f32coeff_v1",
+        name="vmlx_qwen4_gdn_prework_f16_f32coeff_v1_" + version.replace(".", "_"),
         input_names=["qkv", "a", "b", "history", "weight", "A_log", "dt_bias",
                      "axis", "eps", "scales"],
         output_names=["q", "k", "v", "next_history", "g", "beta"],
-        source=_SOURCE, ensure_row_contiguous=True,
+        source=source, ensure_row_contiguous=True,
         compile_options={"math_mode": "safe"},
     )
 

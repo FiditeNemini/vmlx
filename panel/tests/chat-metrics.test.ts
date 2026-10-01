@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   calculatePrefillTps,
+  summarizePrefillPasses,
+  ExchangeFirstTokenClock,
   parseServerDecodeUsage,
   selectFinalDecodeTps,
   summarizeServerDecodePasses,
@@ -33,7 +35,8 @@ describe('chat prefill TPS', () => {
   })
   it('routes live, final, and abort through the measured receipt', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
-    expect(source.match(/prefillUsage: currentPrefillUsage/g)).toHaveLength(3)
+    expect(source.match(/= exchangePrefillSpeed\(\)/g)).toHaveLength(3)
+    expect(source).toContain('completedPrefillPasses.push(currentPrefillUsage)')
     expect(source).toContain('currentPrefillUsage = undefined;')
   })
 })
@@ -109,5 +112,50 @@ describe('final chat decode TPS', () => {
         rollingTps: [],
       }),
     ).toBe(31.25)
+  })
+})
+
+
+describe('whole tool-turn latency and prefill', () => {
+  const receipt = (tokens: number, seconds: number) => ({
+    scope: 'model_prefill_and_prompt_state', tokens, seconds,
+  })
+  it('keeps slow initial TTFT and weights a fast tool continuation by engine time', () => {
+    const clock = new ExchangeFirstTokenClock()
+    clock.beginPass(1000)
+    clock.recordToken(21000)
+    clock.beginPass(31000)
+    clock.recordToken(32650)
+    expect(clock.seconds()).toBe(20)
+    expect(summarizePrefillPasses([receipt(2000, 18), receipt(107, 0.97)]))
+      .toBe((2107 / 18.97).toFixed(1))
+  })
+  it('withholds exchange rate when any pass is missing its authoritative receipt', () => {
+    expect(summarizePrefillPasses([undefined, receipt(107, 0.97)])).toBeUndefined()
+    expect(summarizePrefillPasses([receipt(2000, 18), undefined])).toBeUndefined()
+    expect(summarizePrefillPasses([{ tokens: 2000, seconds: 18 }, receipt(107, 0.97)]))
+      .toBeUndefined()
+  })
+  it('keeps a tool-only first event when visible text arrives in a later pass', () => {
+    const clock = new ExchangeFirstTokenClock()
+    clock.beginPass(1000)
+    clock.recordToken(3500) // structured tool name/arguments, no visible text
+    clock.beginPass(8000)
+    clock.recordToken(8200) // tool-result answer
+    expect(clock.seconds()).toBe(2.5)
+  })
+  it('preserves first TTFT when a later request aborts before generation', () => {
+    const clock = new ExchangeFirstTokenClock()
+    clock.beginPass(100)
+    clock.recordToken(900)
+    clock.beginPass(2000)
+    expect(clock.seconds()).toBe(0.8)
+    expect(new ExchangeFirstTokenClock().seconds()).toBe(0)
+  })
+  it('handles measured zero-new-token passes without inventing throughput', () => {
+    expect(summarizePrefillPasses([receipt(0, 0.1), receipt(100, 0.9)])).toBe('100.0')
+    expect(summarizePrefillPasses([receipt(0, 0)])).toBeUndefined()
+    expect(summarizePrefillPasses([receipt(100, 0)])).toBeUndefined()
+    expect(summarizePrefillPasses([receipt(100, 2)])).toBe('50.0')
   })
 })

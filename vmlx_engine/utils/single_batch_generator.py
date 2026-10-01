@@ -35,6 +35,28 @@ from .prefill_admission import (
 
 logger = logging.getLogger(__name__)
 
+def _naive_prefill_phase_trace_enabled(model: Any) -> bool:
+    """Opt-in wall timings only; never add a device completion boundary."""
+    return getattr(model, "model_type", None) == "naive_n05_flash" and os.environ.get(
+        "VMLX_NAIVE_PREFILL_PHASE_TRACE", ""
+    ).lower() in ("1", "true", "yes", "on")
+
+
+def _log_naive_prefill_phase(req: _Request, phase: str, **fields: Any) -> None:
+    # Diagnostics must not turn a successfully completed forward into a failure.
+    # Context counts are host token-list lengths, not native cache offsets (SWA
+    # and recurrent caches do not share a physical offset interpretation).
+    try:
+        logger.info(
+            "NAIVE_PREFILL_PHASE uid=%s phase=%s wall=%s",
+            req.uid,
+            phase,
+            fields,
+        )
+    except Exception:
+        pass
+
+
 def _cold_prefill_tail_split(gen_prompt_len: int = 0) -> int:
     """How many trailing prompt tokens the COLD prefill computes separately.
 
@@ -634,6 +656,7 @@ class SingleBatchGenerator:
     def _prefill(self, tokens: list[int], req: _Request) -> None:
         if not tokens:
             return
+        _phase_trace = _naive_prefill_phase_trace_enabled(self.model)
         _prefill_keep_alloc = _prefill_keep_alloc_enabled()
         # Admission control. DSV4 has had a prefill valve for a while — it
         # projects the next chunk's peak and rejects BEFORE submitting GPU work,
@@ -664,6 +687,9 @@ class SingleBatchGenerator:
         while pos < len(tokens):
             n = min(self.prefill_step_size, len(tokens) - pos)
             chunk = tokens[pos : pos + n]
+            if _phase_trace:
+                _chunk_t0 = time.perf_counter()
+                _prior_context = len(req.context_tokens)
             if _valve_on:
                 try:
                     _active = int(mx.get_active_memory())
@@ -681,6 +707,8 @@ class SingleBatchGenerator:
                 )
             if _measure_native_peak:
                 mx.reset_peak_memory()
+            if _phase_trace:
+                _valve_done = time.perf_counter()
             with self._stream_context():
                 self._model_call(chunk, req)
                 if getattr(self.model, "model_type", None) == "naive_n05_flash":
@@ -692,15 +720,35 @@ class SingleBatchGenerator:
                 req.context_tokens.extend(chunk)
                 if req.logits_processors:
                     req.token_context.update_and_fetch(mx.array(chunk, dtype=mx.int32))
+            if _phase_trace:
+                _state_done = time.perf_counter()
             self._sync()
+            if _phase_trace:
+                _sync_done = time.perf_counter()
             if _measure_native_peak and _active > 0:
                 _valve_transient = max(
                     _valve_transient,
                     max(0, int(mx.get_peak_memory()) - _active),
                 )
+            if _phase_trace:
+                _peak_read_done = time.perf_counter()
             if not _prefill_keep_alloc:
                 if hasattr(mx, "clear_cache"):
                     mx.clear_cache()
+            if _phase_trace:
+                _chunk_done = time.perf_counter()
+                _log_naive_prefill_phase(
+                    req,
+                    "chunk_completed",
+                    query_tokens=n,
+                    prior_context_tokens=_prior_context,
+                    valve_and_peak_reset_ms=(_valve_done - _chunk_t0) * 1000,
+                    model_and_native_state_ms=(_state_done - _valve_done) * 1000,
+                    sync_ms=(_sync_done - _state_done) * 1000,
+                    peak_read_ms=(_peak_read_done - _sync_done) * 1000,
+                    clear_ms=(_chunk_done - _peak_read_done) * 1000,
+                    total_ms=(_chunk_done - _chunk_t0) * 1000,
+                )
             pos += n
 
     def _logprobs_required(self, req: _Request) -> bool:
@@ -798,6 +846,12 @@ class SingleBatchGenerator:
             input_tokens = self._rehome_on_stream(input_tokens)
             trace = self._decode_trace
             model_t0 = time.perf_counter() if trace else 0.0
+            _phase_trace = (
+                getattr(req, "prefill_started", None) is not None
+                and _naive_prefill_phase_trace_enabled(self.model)
+            )
+            if _phase_trace:
+                _final_t0 = time.perf_counter()
             logits = self.model(input_tokens[:, None], cache=req.cache)
             if trace:
                 self._sync()
@@ -814,6 +868,18 @@ class SingleBatchGenerator:
                     "seconds": time.perf_counter() - req.prefill_started,
                     "scope": "model_prefill_and_prompt_state",
                 }
+                if _phase_trace:
+                    _log_naive_prefill_phase(
+                        req,
+                        "prompt_logits_completed",
+                        query_tokens=1,
+                        prior_context_tokens=len(req.context_tokens),
+                        final_logits_ms=(
+                            req.prefill_started + req.prefill_usage["seconds"] - _final_t0
+                        ) * 1000,
+                        full_prefill_ms=req.prefill_usage["seconds"] * 1000,
+                        prompt_tokens=len(req.prompt_tokens),
+                    )
                 req.prefill_started = None
             overlap = self._can_overlap_decode(req)
             req.next_token, req.next_logprobs = self._sample_from_logits(
@@ -1072,7 +1138,19 @@ class SingleBatchGenerator:
         # openPangu and GLM each own a path-dependent native state unit. Capture
         # the immutable N-1 boundary BEFORE the final prompt token is consumed;
         # post-decode convolution/recurrent/indexer state cannot be rewound.
+        _phase_trace = _naive_prefill_phase_trace_enabled(self.model)
+        if _phase_trace:
+            _snapshot_t0 = time.perf_counter()
         typed_prompt_snapshot = self._clone_naive_prompt_snapshot(req)
+        if _phase_trace:
+            _snapshot_done = time.perf_counter()
+            _log_naive_prefill_phase(
+                req,
+                "prompt_snapshot_completed",
+                prior_context_tokens=len(req.context_tokens),
+                snapshot_ms=(_snapshot_done - _snapshot_t0) * 1000,
+                snapshot_available=typed_prompt_snapshot is not None,
+            )
         if uses_openpangu and any(
             int(getattr(layer, "offset", 0) or 0) > 0 for layer in req.cache
         ):

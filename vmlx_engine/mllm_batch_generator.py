@@ -127,6 +127,7 @@ from .native_mtp_forward_probe import start_native_mtp_forward_probe
 from .metal.affine_moe_pair_decode import affine_moe_ar_scope
 
 import mlx.core as mx
+import numpy as np
 import mlx.nn as nn
 
 from .errors import (
@@ -166,6 +167,34 @@ from .native_mtp_profile import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _mllm_processor_array(x, target_dtype=None):
+    """Normalize processor arrays without boxing large FP32 pixel payloads."""
+    if x is None:
+        return None
+    if not isinstance(x, mx.array):
+        try:
+            if type(x) is np.ndarray and x.dtype == np.float32 and x.size:
+                # Match the old FP32 -> Python float -> FP32 round trip,
+                # including signaling-NaN quieting, without millions of Python
+                # objects. Contiguous storage handles negative strides; reshape
+                # keeps scalar rank. Empty arrays retain legacy shape inference.
+                with np.errstate(invalid="ignore"):
+                    value = x.astype(np.float64).astype(np.float32)
+                x = mx.array(np.ascontiguousarray(value).reshape(x.shape))
+            elif hasattr(x, "tolist"):
+                x = mx.array(x.tolist())
+            else:
+                x = mx.array(x)
+        except Exception:
+            return x
+    if target_dtype is not None and x.dtype != target_dtype:
+        try:
+            x = x.astype(target_dtype)
+        except Exception:
+            pass
+    return x
 
 
 def _maybe_dump_prompt_tokens(request_id: str, token_ids, tokenizer) -> None:
@@ -9392,38 +9421,12 @@ class MLLMBatchGenerator:
         # batched engine's outer prefill-except then silently queued an empty
         # "stop" response (#56). The SimpleEngine path never hit this because
         # mlx_vlm.generate() does its own dtype normalization before forward.
-        def _ensure_mx_array(x, target_dtype=None):
-            """Normalize numpy / torch / list / mx inputs to an mx.array,
-            optionally casting to a specific dtype. Pixtral / Mistral 3 /
-            Qwen3.5-VL processors all return different wire formats; the
-            batched engine then passes the raw value straight into forward,
-            which chokes with either `Cannot index mlx array using the given
-            type` (QuantizedEmbedding) or `Cannot interpret mlx.core.bfloat16
-            as a data type` (numpy.astype against an mx dtype). Normalizing
-            once here makes all downstream layer calls match the SimpleEngine
-            path."""
-            if x is None:
-                return None
-            if not isinstance(x, mx.array):
-                try:
-                    if hasattr(x, "tolist"):
-                        x = mx.array(x.tolist())
-                    else:
-                        x = mx.array(x)
-                except Exception:
-                    return x  # give up gracefully, downstream will error
-            if target_dtype is not None and x.dtype != target_dtype:
-                try:
-                    x = x.astype(target_dtype)
-                except Exception:
-                    pass
-            return x
 
         # Issue #56 — normalize input_ids + pixel_values + attention_mask
         # before storing on the request. Covers Mistral 3 / Pixtral,
         # Qwen3.5-VL, Gemma 4, and future VLM families without having to
         # special-case each processor's output format.
-        request.input_ids = _ensure_mx_array(inputs.get("input_ids"), mx.int32)
+        request.input_ids = _mllm_processor_array(inputs.get("input_ids"), mx.int32)
         if os.environ.get("VMLX_PROMPT_DUMP_DIR") and getattr(request.input_ids, "shape", None):
             _maybe_dump_prompt_tokens(
                 request.request_id,
@@ -9432,9 +9435,9 @@ class MLLMBatchGenerator:
             )
         pixel_values = inputs.get("pixel_values")
         video_pixel_values = inputs.get("pixel_values_videos")
-        request.pixel_values = _ensure_mx_array(pixel_values)
-        request.video_pixel_values = _ensure_mx_array(video_pixel_values)
-        request.attention_mask = _ensure_mx_array(inputs.get("attention_mask"))
+        request.pixel_values = _mllm_processor_array(pixel_values)
+        request.video_pixel_values = _mllm_processor_array(video_pixel_values)
+        request.attention_mask = _mllm_processor_array(inputs.get("attention_mask"))
         if video_cache_sources:
             # What the PROCESSOR produced (the loader's frames may be re-sized
             # by the sub-processor): the temporal/spatial patch grid per video
@@ -9457,19 +9460,19 @@ class MLLMBatchGenerator:
             if k not in ["input_ids", "pixel_values", "pixel_values_videos", "attention_mask"]
         }
         request.extra_kwargs.update(preserved_private_kwargs)
-        request.image_grid_thw = _ensure_mx_array(
+        request.image_grid_thw = _mllm_processor_array(
             request.extra_kwargs.pop("image_grid_thw", None), mx.int32
         )
         if "video_grid_thw" in request.extra_kwargs:
-            request.video_grid_thw = _ensure_mx_array(
+            request.video_grid_thw = _mllm_processor_array(
                 request.extra_kwargs.pop("video_grid_thw"), mx.int32
             )
         else:
             request.video_grid_thw = None
-        request.audio_codes = _ensure_mx_array(
+        request.audio_codes = _mllm_processor_array(
             request.extra_kwargs.pop("audio_codes", None), mx.int32
         )
-        request.audio_embeds = _ensure_mx_array(
+        request.audio_embeds = _mllm_processor_array(
             request.extra_kwargs.pop("audio_embeds", None)
         )
         input_features = request.extra_kwargs.pop("input_features", None)
@@ -9489,10 +9492,10 @@ class MLLMBatchGenerator:
             )
             if key in request.extra_kwargs
         } or None
-        request.audio_features = _ensure_mx_array(
+        request.audio_features = _mllm_processor_array(
             input_features if input_features is not None else audio_features
         )
-        request.audio_features_mask = _ensure_mx_array(
+        request.audio_features_mask = _mllm_processor_array(
             input_features_mask if input_features is not None else None, mx.bool_
         )
         request.audio_features_are_raw_input_features = input_features is not None
@@ -9508,7 +9511,7 @@ class MLLMBatchGenerator:
                 )
             )
         ):
-            request.audio_codes = _ensure_mx_array(
+            request.audio_codes = _mllm_processor_array(
                 _build_mimo_audio_codes_from_paths(
                     model=self.model,
                     processor=self.processor,

@@ -6318,6 +6318,34 @@ def _native_mtp_confirmed_tokens_from_cycles(stats: MLLMNativeMTPStats) -> int:
     return max(0, int(stats.cycles)) + max(0, int(stats.accepted_tokens))
 
 
+def _native_mtp_diagnostic_cycle_wall(state, *, now, fence_ms, acceptance_ms):
+    """Observe one trace-anchor interval; never feed these values to policy.
+
+    Includes post-anchor draft/restore work, queued-token draining and executor
+    gaps. Phase deltas describe host timing scopes, not exclusive GPU duration.
+    """
+    epoch = int(getattr(state, "epoch", 0) or 0)
+    depth = len(state.drafts)
+    total = _native_mtp_timing_total_ms(state.stats)
+    prior = getattr(state, "_diagnostic_cycle_anchor", None)
+    state._diagnostic_cycle_anchor = (now, total, epoch, depth)
+    if prior is None or prior[2:] != (epoch, depth) or now < prior[0]:
+        return None
+    wall = (now - prior[0]) * 1000.0
+    phase = total - prior[1]
+    if phase < 0.0:
+        return None
+    # Signed residual exposes overlap or scope-accounting mismatch; clamping
+    # it would hide the very diagnostic discrepancy this record observes.
+    return {
+        "observed_cycle_wall_ms": wall,
+        "phase_scope_wall_ms": phase,
+        "fence_wall_ms": fence_ms,
+        "acceptance_wall_ms": acceptance_ms,
+        "unassigned_wall_ms": wall - phase - fence_ms - acceptance_ms,
+    }
+
+
 def _native_mtp_cost_ratio(
     stats: MLLMNativeMTPStats,
     ar_step_ms: float,
@@ -18420,6 +18448,7 @@ class MLLMBatchGenerator:
         # stalls later forwards. One fence per cycle bounds the outstanding
         # queue. Gated for A/B; flips default only on byte-equal + speedup
         # proof at the app-default cache shape.
+        _diag_fence_start = time.perf_counter() if _NATIVE_MTP_CYCLE_TRACE else None
         if _native_mtp_cycle_fence_enabled(
             depth,
             model_type=getattr(self, "_model_type", None),
@@ -18429,6 +18458,11 @@ class MLLMBatchGenerator:
             except Exception:
                 pass
 
+        _diag_acceptance_start = time.perf_counter() if _NATIVE_MTP_CYCLE_TRACE else None
+        _diag_fence_ms = (
+            (_diag_acceptance_start - _diag_fence_start) * 1000.0
+            if _diag_fence_start is not None else 0.0
+        )
         acceptance_rows = (
             {} if os.environ.get("VMLX_MTP_REUSE_ACCEPTANCE_ROWS", "0") == "1"
             else None
@@ -18461,6 +18495,10 @@ class MLLMBatchGenerator:
                 decision_telemetry.get("packed_probability_reads", 0)
             )
 
+        _diag_acceptance_ms = (
+            (time.perf_counter() - _diag_acceptance_start) * 1000.0
+            if _diag_acceptance_start is not None else 0.0
+        )
         state.stats.cycles += 1
         if 0 <= depth < len(state.stats.cycles_by_depth):
             state.stats.cycles_by_depth[depth] += 1
@@ -18498,6 +18536,20 @@ class MLLMBatchGenerator:
         # fixed depth disables depth adaptation but must still escape to AR
         # when MTP is measurably slower than a context-scaled AR baseline.
         if _NATIVE_MTP_CYCLE_TRACE:
+            _diag = _native_mtp_diagnostic_cycle_wall(
+                state, now=_value_cycle_now,
+                fence_ms=_diag_fence_ms, acceptance_ms=_diag_acceptance_ms,
+            )
+            if _diag is not None:
+                logger.info(
+                    "MTPCYCLE_ACCOUNTING[%s] c=%d observed_cycle_wall_ms=%.3f "
+                    "phase_scope_wall_ms=%.3f fence_wall_ms=%.3f "
+                    "acceptance_wall_ms=%.3f unassigned_wall_ms=%.3f",
+                    request.request_id, int(state.stats.cycles),
+                    _diag["observed_cycle_wall_ms"], _diag["phase_scope_wall_ms"],
+                    _diag["fence_wall_ms"], _diag["acceptance_wall_ms"],
+                    _diag["unassigned_wall_ms"],
+                )
             _prev_t = getattr(state, "_trace_prev_t", 0.0) or 0.0
             _emitted_now = int(state.stats.cycles) + int(state.stats.accepted_tokens)
             logger.info(

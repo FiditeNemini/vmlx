@@ -107,6 +107,7 @@ import {
 import { RemoteRequestMetrics } from "../../shared/remoteRequestMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
+import { shouldReplayHistoricalReasoning } from "../../shared/nativeReasoningHistory";
 import { orderComposerContentParts } from "../../shared/composerContentOrder";
 import { splitResponsesSystemMessages } from "../../shared/responsesSystemMessages";
 import {
@@ -1958,13 +1959,10 @@ export function registerChatHandlers(
             { ...(m as any), content: msgContent },
             useResponsesApi,
             {
-              // Naive's native template retains prior reasoning. A no-tool
-              // directive changes this turn's authorization (tool_choice=none),
-              // not its historical assistant tokens. Keep the legacy replay
-              // policy for other families.
-              includeReasoning:
-                chatDetectedFamily === "naive_n05_flash" ||
-                !currentPromptAlreadyForbidsTools,
+              includeReasoning: shouldReplayHistoricalReasoning(
+                chatDetectedFamily,
+                currentPromptAlreadyForbidsTools,
+              ),
             },
           );
           if (replay.length > 0) {

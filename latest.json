@@ -1,21 +1,21 @@
 {
-  "version": "1.6.72",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.72/vMLX-1.6.72-tahoe-arm64.dmg",
-  "sha256": "630cba1d1125ad7c599437713b6d5e00ad8e6ffe4862895481426554ea2690ed",
-  "sha512": "vQ99YxGKIITG7EpQZa/NqVdk23eZbx33prybhkJrQSGIT2e0m13Z8LrU4nbJuNzR7TfuB0ci65b4l5zavtDImQ==",
+  "version": "1.6.73",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.73/vMLX-1.6.73-tahoe-arm64.dmg",
+  "sha256": "33910313a1ca6dfc96028fbe8fb22233f314765398b00aa292fadd1f24f7d6f1",
+  "sha512": "BSH7QVxmlzpZQGbIsBTTxcTFnRJyIXD3rOGyAkqCrBx4DFPwD0zja6YbUrQtUWw09tyTUKJ3mRNLnsWTRSIYwA==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.72/vMLX-1.6.72-sequoia-arm64.dmg",
-      "bytes": 573381730,
-      "sha256": "46168db1b4885de8666a7a0b44fb4146c217666f21223adcc322a0110677f80a",
-      "sha512": "P7bGGUOEn4wNN2wKB1Ar3lXDL8it1B3eiiwdIUNVTqRPALm/nDZ5ECxWt1YfywUw+D+aa4KZJrw4luvHdRG7MQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.73/vMLX-1.6.73-sequoia-arm64.dmg",
+      "bytes": 573431276,
+      "sha256": "63d8194572545cef907470e88ea84e09236d1c1fe5c45f085ca12bce83502737",
+      "sha512": "qaBVBCx28Uvh1Ovso20nkivzLA0ZSSic2VD9vI1/SrlDHZD6LyJtXy6hGQJITlEXh/gO4q/GTCvcYh4z5LSNkA=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.72/vMLX-1.6.72-tahoe-arm64.dmg",
-      "bytes": 595386711,
-      "sha256": "630cba1d1125ad7c599437713b6d5e00ad8e6ffe4862895481426554ea2690ed",
-      "sha512": "vQ99YxGKIITG7EpQZa/NqVdk23eZbx33prybhkJrQSGIT2e0m13Z8LrU4nbJuNzR7TfuB0ci65b4l5zavtDImQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.73/vMLX-1.6.73-tahoe-arm64.dmg",
+      "bytes": 598961318,
+      "sha256": "33910313a1ca6dfc96028fbe8fb22233f314765398b00aa292fadd1f24f7d6f1",
+      "sha512": "BSH7QVxmlzpZQGbIsBTTxcTFnRJyIXD3rOGyAkqCrBx4DFPwD0zja6YbUrQtUWw09tyTUKJ3mRNLnsWTRSIYwA=="
     }
   },
-  "notes": "# vMLX 1.6.72\n\nNaive N0.5 and GLM 5.3 Flash runtime and caching update.\n\n- Naive N0.5: native reasoning/tool templates, JANGH loading, faster decode overlap, corrected output-memory accounting, and exact rotating-state SSD restoration.\n- GLM 5.3 Flash: preserve native FP32 parameters; reuse MLA/DSA blocks with KDA checkpoints through tool and media turns; preserve sampled video frames by default with supported sampling and visual-token controls.\n- API and chat: preserve tool arguments and reasoning history, retain logprob metadata for hidden parser markers, clean up canceled streams, and expose backend cache/prefill metrics through Ollama.\n- Translate the measured-prefill counter consistently across supported UI languages.\n\nExperimental kernel options remain opt-in. Performance depends on model, quantization, context and workload. This release does not claim universal MTP/prose speedups or elimination of model-generated arithmetic and scene-timing errors."
+  "notes": "# vMLX 1.6.73\n\nThis release improves GLM 5.3 Flash and Naive N0.5 loading, native caching, reasoning controls and streamed responses, and updates the macOS runtime to MLX 0.32.3 with JANG 2.5.49.\n\n- Preserve native prose and tool-call boundaries in streamed Chat and Responses output, including code examples.\n- Normalize supported reasoning-effort values consistently before forwarding them to native model templates; reject malformed nested effort types.\n- Reuse the longest valid Naive sliding-window checkpoint after cache normalization and compact detached prompt snapshots.\n- Avoid duplicate GLM disk-checkpoint reconstruction and release completed SSD companion payloads promptly.\n- Preserve configured allocator limits during multimodal generation.\n- Report completed Naive prefill timing and keep tool-turn timing statistics scoped to the exchange.\n- Preserve qualified GLM and Qwen prefill/decode paths with MLX 0.32.3.\n\nPerformance depends on model, quantization, context and hardware. Experimental JANGH weighted-prefill reduction and GLM DSA score tiling remain opt-in; this release does not promise universal throughput gains or eliminate model-owned answer-quality limitations.\n\nTahoe is the default macOS build; Sequoia is the compatibility build. Both Apple Silicon DMGs are Developer ID signed, notarized and stapled. Python wheel and source distributions accompany the release."
 }

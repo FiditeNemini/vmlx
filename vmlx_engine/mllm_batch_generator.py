@@ -169,6 +169,19 @@ from .native_mtp_profile import (
 logger = logging.getLogger(__name__)
 
 
+def _glm_native_prompt_token_ids(input_ids):
+    """Read a native GLM single-row prompt without a new GPU squeeze graph."""
+    if input_ids is None:
+        return []
+    if input_ids.ndim == 1:
+        return input_ids.tolist()
+    if input_ids.ndim == 2 and input_ids.shape[0] == 1 and input_ids.shape[1] > 0:
+        # Python row selection happens after the existing array is ready.
+        # MLX input_ids[0] instead creates a Squeeze on the generation stream.
+        return input_ids.tolist()[0]
+    return input_ids[0].tolist()
+
+
 def _mllm_processor_array(x, target_dtype=None):
     """Normalize processor arrays without boxing large FP32 pixel payloads."""
     if x is None:
@@ -14509,7 +14522,9 @@ class MLLMBatchGenerator:
             # Save full token list BEFORE cache fetch can mutate req.input_ids.
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (
-                req.input_ids.tolist()
+                _glm_native_prompt_token_ids(req.input_ids)
+                if self.native_glm_cache is not None
+                else req.input_ids.tolist()
                 if req.input_ids is not None and req.input_ids.ndim == 1
                 else req.input_ids[0].tolist()
                 if req.input_ids is not None

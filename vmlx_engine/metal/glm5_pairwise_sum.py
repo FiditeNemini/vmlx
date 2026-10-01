@@ -6,7 +6,7 @@ consecutive elements per lane, initial +0, product + accumulator, then
 simd_sum. Preserve that tree and separate FP32 product rounding. This only
 replaces bulk-prefill pairwise sums, not recurrence, chunking, or cache state.
 Unsupported runtimes/shapes and first-launch failures retain the stock path.
-Automatic use is M5 Max/MLX0.32.2/B1; other existing opt-in shapes remain
+Automatic use is M5 Max/MLX 0.32.2 or 0.32.3/B1; other existing opt-in shapes remain
 experimental. Selection policy lives in glm5_prefill_policy and the caller.
 """
 
@@ -50,9 +50,11 @@ def _compatible_runtime() -> bool:
     # A public sum API does not promise its reduction tree. Other MLX/GPU
     # versions remain on the existing path until separately qualified.
     try:
+        version = importlib.metadata.version("mlx")
+        device = mx.device_info().get("device_name", "")
         return (
-            importlib.metadata.version("mlx") == "0.32.2"
-            and "Apple M5" in mx.device_info().get("device_name", "")
+            (version == "0.32.2" and "Apple M5" in device)
+            or (version == "0.32.3" and device == "Apple M5 Max")
         )
     except (importlib.metadata.PackageNotFoundError, RuntimeError):
         return False

@@ -389,3 +389,36 @@ def test_restored_image_prefix_forwards_only_video_tail_and_publishes(tmp_path):
         assert native.last_store["retained_tokens"] == len(req._glm_native_full_token_ids) - 1
     finally:
         native.close()
+
+
+def test_media_wall_timing_preserves_keys_and_adds_no_explicit_sync(monkeypatch, caplog):
+    """Diagnostics must leave the cache lookup identity and sync policy intact."""
+    import json
+    import logging
+    import vmlx_engine.mllm_batch_generator as mbg
+
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_MEDIA_SSD", "1")
+    native = Mock()
+    native.fetch.return_value = None
+    gen = generator(native)
+    control, config = item_request(video=True)
+    gen.model = SimpleNamespace(config=config)
+    tokens = control._glm_native_full_token_ids
+    gen._prepare_glm_native_media_identity(control, tokens)
+    gen._restore_glm_native_prefix(control)
+    original_call = native.fetch.call_args
+    candidate, _ = item_request(video=True)
+    candidate._glm_native_media_timing = {"postprocess_finished": 10.0}
+    ticks = iter([10.1, 10.2, 10.5, 10.8])
+    monkeypatch.setattr(mbg.time, "perf_counter", lambda: next(ticks))
+    monkeypatch.setattr(mx, "synchronize", Mock(side_effect=AssertionError("extra synchronization")))
+    with caplog.at_level(logging.INFO):
+        gen._prepare_glm_native_media_identity(candidate, tokens)
+        gen._restore_glm_native_prefix(candidate)
+    assert native.fetch.call_args == original_call
+    assert candidate._glm_native_media_key == control._glm_native_media_key
+    message = next(record.message for record in caplog.records if "prelookup wall timing" in record.message)
+    values = json.loads(message.split(": ", 1)[1])
+    assert values == {"postprocess_to_identity_ms": 100.0, "whole_key_ms": 100.0,
+                      "item_keys_and_merge_ms": 300.0, "identity_to_fetch_ms": 300.0,
+                      "total_before_fetch_ms": 800.0}

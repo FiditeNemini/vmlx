@@ -103,6 +103,7 @@ HELPER FUNCTIONS
 import hashlib
 import importlib
 import logging
+import json
 import inspect
 import math
 import os
@@ -14215,10 +14216,15 @@ class MLLMBatchGenerator:
         ):
             return
         from .utils.glm5_native_media import GLM5_MEDIA_KEY, glm5_media_input_key
+        timing = getattr(request, "_glm_native_media_timing", None)
+        if timing is not None:
+            timing["identity_started"] = time.perf_counter()
         try:
             request._glm_native_media_key = glm5_media_input_key(
                 request, tokens, self._media_placeholder_token_ids(),
             )
+            if timing is not None:
+                timing["whole_key_finished"] = time.perf_counter()
             from .utils.glm5_native_media import glm5_media_item_keys
             request._glm_native_media_items = None
             try:
@@ -14234,6 +14240,9 @@ class MLLMBatchGenerator:
             request._glm_native_media_key = None
             request._glm_native_media_skip = f"GLM native SSD media identity unavailable: {type(exc).__name__}"
             logger.info("%s for %s: %s", request._glm_native_media_skip, request.request_id, exc)
+        finally:
+            if timing is not None:
+                timing["identity_finished"] = time.perf_counter()
 
     def _restore_glm_native_prefix(self, request) -> None:
         native = getattr(self, "native_glm_cache", None)
@@ -14253,6 +14262,23 @@ class MLLMBatchGenerator:
                 retained_tokens=0, durable=False,
             )
             return
+        timing = getattr(request, "_glm_native_media_timing", None)
+        if timing is not None:
+            # Host wall latency, including any implicit materialization in the
+            # existing operations. Never synchronize merely to measure it.
+            fetch_started = time.perf_counter()
+            segments = (
+                ("postprocess_to_identity_ms", "postprocess_finished", "identity_started"),
+                ("whole_key_ms", "identity_started", "whole_key_finished"),
+                ("item_keys_and_merge_ms", "whole_key_finished", "identity_finished"),
+                ("identity_to_fetch_ms", "identity_finished", None),
+                ("total_before_fetch_ms", "postprocess_finished", None),
+            )
+            values = {name: round(1000 * ((timing[end] if end else fetch_started) - timing[start]), 3)
+                      for name, start, end in segments
+                      if start in timing and (end is None or end in timing)}
+            logger.info("GLM native media prelookup wall timing for %s: %s",
+                        request.request_id, json.dumps(values, sort_keys=True))
         try:
             found = native.fetch(
                 tokens, extra_keys=getattr(request, "_cache_extra_keys", None),
@@ -14405,6 +14431,13 @@ class MLLMBatchGenerator:
             try:
                 trace.start("preprocess")
                 self._preprocess_request(req)
+                # Request-level opt-in: no per-token work or extra GPU fences.
+                req._glm_native_media_timing = (
+                    {"postprocess_finished": time.perf_counter()}
+                    if self.native_glm_cache is not None
+                    and os.environ.get("VMLX_GLM5_MEDIA_TIMING", "").lower() in {"1", "true", "yes", "on"}
+                    else None
+                )
                 trace.stop("preprocess")
             except (MediaControlsUnmeetableError, MediaInputError) as strict_err:
                 trace.stop("preprocess")

@@ -25,6 +25,7 @@ from vmlx_engine.metal.affine_moe_pair_decode import affine_moe_pair_activation
 from vmlx_engine.metal.qwen4_aligned_moe_prefill import aligned_switchglu
 from vmlx_engine.metal.qwen4_route_prepare import scatter_route_switchglu
 from vmlx_engine.metal.qwen4_exact_down import qwen4_exact_down
+from vmlx_engine.metal.qwen4_prefill_reduce import prefill_reduce, status as prefill_reduce_status
 
 logger = logging.getLogger(__name__)
 
@@ -350,9 +351,15 @@ def qwen4_affine_switchglu(
             _STATUS["observed_calls"] = 1
         return output, True
     if not getattr(switch, _OK_ATTR, False):
+        reduced = prefill_reduce(switch, x, indices, scores)
+        if reduced is not None:
+            return reduced, True
         routed = switch(x, indices)
         return (routed * scores[..., None]).sum(axis=-2), False
     if not full_fused_eligible:
+        reduced = prefill_reduce(switch, x, indices, scores)
+        if reduced is not None:
+            return reduced, True
         routed = switch(x, indices)
         return (routed * scores[..., None]).sum(axis=-2), False
     raise AssertionError("unreachable Qwen4 affine MoE dispatch state")
@@ -507,7 +514,7 @@ def install_qwen4_affine_moe(model: Any) -> int:
 
 
 def qwen4_affine_moe_status() -> dict[str, Any]:
-    return dict(_STATUS)
+    return {**_STATUS, "prefill_reduce": prefill_reduce_status()}
 
 
 __all__ = [

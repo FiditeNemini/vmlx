@@ -213,6 +213,8 @@ def _resolve_runtime_cache_fingerprint() -> str:
     )
     if glm5_dsa_query_tile_requested():
         parts.append("glm5_dsa_query_tile=" + glm5_dsa_query_tile_identity())
+    if os.environ.get("VMLX_QWEN4_PREFILL_REDUCE", "0") == "1":
+        parts.append("qwen4_prefill_reduce_f16_top10_v1")
     source_id = _resolve_source_checkout_id()
     if source_id:
         parts.append(f"src={source_id}")

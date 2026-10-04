@@ -145,8 +145,13 @@ class TestInstaller(unittest.TestCase):
         self.addCleanup(self.modules.stop)
         source = _PATH.with_name("install.py")
         tree = ast.parse(source.read_text())
-        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                 and n.name in {"_cfg_key", "install_jangtq2"}]
+        # install_jangtq2 is kept as an alias of install_jangh (the function was
+        # renamed when the format gained its JANGH name); execute the function
+        # bodies plus the alias assignment so either name resolves.
+        nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef)
+                                          and n.name in {"_cfg_key", "install_jangtq2", "install_jangh"})
+                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "install_jangtq2"
+                                                       for t in n.targets))]
         env = {"TQSwitchGLU": Replacement, "projection_contract": contract.projection_contract,
                "logger": logging.getLogger("installer-test")}
         future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)

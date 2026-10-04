@@ -35,6 +35,9 @@ function persist(partialContent: string, reasoning: string, aborted = false) {
     collectedToolStatuses: [], abortController: { signal: { aborted } }, errMsg: 'Server error: Stream generation failed: RuntimeError: NativeMTPError: pending-verify cache rejected rollback',
     responseWarnings: ['Existing notice'], nativeMtpChatErrorWarning,
     chatId: 'chat', proofRequestId: undefined, wireRequestIds: [], activeRequests: new Map(), abortFinishReason: null, abortMetrics: {},
+    // The abort completion payload carries the finalized display timeline
+    // (undefined when the recorder could not admit the interrupted stream).
+    generationRecord: { version: 1, status: 'interrupted', passes: [], displayTimeline: undefined },
   }
   return run(`${declaration('nativeMtpErrorWarning').getText(tree)}\n${declaration('abortWarnings').getText(tree)}\n${declaration('hadVisibleActivity').getText(tree)}\nif (hadVisibleActivity) {${owned.map(n => n.getText(tree)).join('\n')}}\nreturn { assistantMessage, hadVisibleActivity: Boolean(hadVisibleActivity), complete: ${complete.arguments[1].getText(tree)} };`, env)
 }

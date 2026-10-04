@@ -108,3 +108,54 @@ def test_routed_paths_match_dense_reference(gu, dn, T, fused):
     unweighted = np.array(m(xm, mx.array(inds)[None]).astype(mx.float32))[0]           # (T, k, D)
     err2 = np.linalg.norm((unweighted * scores[..., None]).sum(1) - ref) / np.linalg.norm(ref)
     assert err2 < 2e-3, (gu, dn, T, fused, err2)
+
+
+class TestDecodeVsSortedPathSelection:
+    """Routed-path choice by TOKENS (measured crossover) must be honoured at both call sites
+    (routed() and the unweighted __call__), and the legacy row rule must survive for modules
+    without a loader-set limit (GLM/Naive geometry stays exactly as qualified)."""
+
+    @staticmethod
+    def _paths_taken(m, T, monkeypatch):
+        taken = []
+        real_prefill, real_decode = m._prefill, m._decode_h
+
+        def spy_prefill(*args, **kwargs):
+            taken.append("sorted"); return real_prefill(*args, **kwargs)
+
+        def spy_decode(*args, **kwargs):
+            taken.append("decode"); return real_decode(*args, **kwargs)
+
+        monkeypatch.setattr(m, "_prefill", spy_prefill)
+        monkeypatch.setattr(m, "_decode_h", spy_decode)
+        rng = np.random.default_rng(T)
+        x = mx.array((rng.standard_normal((T, D)) * 0.5).astype(np.float16))[None]
+        inds = mx.array(np.stack([rng.choice(E, KK, replace=False) for _ in range(T)]).astype(np.int32))[None]
+        scores = mx.array((np.ones((T, KK)) / KK).astype(np.float16))[None]
+        mx.eval(m.routed(x, inds, scores)); routed = taken[-1]
+        taken.clear()
+        mx.eval(m(x, inds)); unweighted = taken[-1]
+        return routed, unweighted
+
+    def test_legacy_row_rule_without_limit(self, monkeypatch):
+        m, _ = _module(4, 6, seed=1)
+        assert not hasattr(m, "decode_max_tokens")
+        assert self._paths_taken(m, 6, monkeypatch) == ("decode", "decode")   # 60 rows < 64
+        assert self._paths_taken(m, 7, monkeypatch) == ("sorted", "sorted")   # 70 rows >= 64
+
+    @pytest.mark.parametrize("limit,T,expected", [(96, 7, "decode"), (96, 96, "decode"), (96, 97, "sorted"), (8, 8, "decode"), (8, 9, "sorted"), (0, 1, "sorted")])
+    def test_token_limit_rules_both_call_sites(self, monkeypatch, limit, T, expected):
+        m, _ = _module(4, 6, seed=2)
+        m.decode_max_tokens = limit
+        assert self._paths_taken(m, T, monkeypatch) == (expected, expected)
+
+    def test_selector_arithmetic(self):
+        m, _ = _module(4, 4, seed=3)
+        assert m._use_sorted(63, KK) is False and m._use_sorted(64, KK) is True
+        m.decode_max_tokens = 96
+        assert m._use_sorted(96 * KK, KK) is False and m._use_sorted(97 * KK, KK) is True
+        assert m._use_sorted(96 * KK + 9, KK) is False   # partial token rows round down
+
+    def test_qwen4_loader_default_matches_measured_crossover(self):
+        from vmlx_engine.jangh import runtime_identity as R
+        assert R.QWEN4_DECODE_MAX_TOKENS == 96

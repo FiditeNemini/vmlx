@@ -76,6 +76,8 @@ def test_loader_uses_frozen_policy_after_environment_mutation(monkeypatch, enabl
                            up_proj=SimpleNamespace(), down_proj=SimpleNamespace())
     model = SimpleNamespace(named_modules=lambda: [("bank", bank)])
     assert namespace[node.name](model, {}) == 1
+    # The decode-vs-sorted token limit is always installed (measured default or env pin).
+    assert bank.decode_max_tokens == 96
     assert getattr(bank, "use_weighted_unsort", False) == (enabled == "1")
     for linear in (bank.gate_proj, bank.up_proj, bank.down_proj):
         assert getattr(linear, "use_h32_rows", False) == (enabled == "1")
@@ -103,3 +105,21 @@ def test_dispatch_imports_same_frozen_policy(monkeypatch, filename, name, enable
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
     expected = enabled == "1" if name == "TAIL_SPLIT" else enabled
     assert namespace[name] == expected
+
+
+@pytest.mark.parametrize("value,expected", [(None, ""), ("", ""), ("96", "96"), ("8", "8"), (" 12 ", "12")])
+def test_decode_max_tokens_is_part_of_the_identity(monkeypatch, value, expected):
+    monkeypatch.delenv("JANGH_DECODE_MAX_TOKENS", raising=False)
+    if value is not None:
+        monkeypatch.setenv("JANGH_DECODE_MAX_TOKENS", value)
+    policy = load_identity()
+    assert policy.DECODE_MAX_TOKENS == expected
+    assert f";decode_max_tokens={expected}" in policy.runtime_identity()
+
+
+@pytest.mark.parametrize("value,expected", [(None, 96), ("", 96), ("8", 8), ("128", 128), ("x", 96)])
+def test_qwen4_decode_max_tokens_env_pin(monkeypatch, value, expected):
+    monkeypatch.delenv("JANGH_DECODE_MAX_TOKENS", raising=False)
+    if value is not None:
+        monkeypatch.setenv("JANGH_DECODE_MAX_TOKENS", value)
+    assert load_identity().qwen4_decode_max_tokens() == expected

@@ -142,13 +142,30 @@ class TQSwitchGLU(nn.Module):
             return (y * scores[..., None].astype(y.dtype)).sum(axis=-2)
         return y[inv]
 
+    def _use_sorted(self, routed_rows: int, kk: int) -> bool:
+        """Choose the sorted NAX prefill path (True) or the per-row gather decode path (False).
+
+        Legacy rule: sorted when routed rows >= SORT_THRESHOLD (64), i.e. >= 8 tokens at k=8
+        (GLM/Naive geometry, qualified). A family loader may set ``decode_max_tokens`` from a
+        measured crossover; the rule is then by TOKENS. Measured on M5 Max / MLX 0.32.3 for
+        qwen4_exp (D=2560, I=640, E=512, k=10, JANGH 4/6-bit): the gather path wins through
+        96 tokens (3.5 ms vs 5.6 ms at 64, 5.0 vs 6.0 at 96) and loses from 128 (6.5 vs 6.3);
+        the sorted path has ~5.5 ms of fixed argsort/gather/tile cost. With the row rule a
+        continuous-batching decode step of >= 7 sequences (70 rows) ran the prefill kernels:
+        measured 8 concurrent = 35 tok/s aggregate, below single-stream (producer 05 playbook).
+        """
+        limit = getattr(self, "decode_max_tokens", None)
+        if limit is None:
+            return routed_rows >= SORT_THRESHOLD
+        return (routed_rows // max(1, int(kk))) > int(limit)
+
     def _experts(self, x, indices):
         """x (..., D), indices (..., k) -> (..., k, D) in x.dtype (unweighted, like SwitchGLU)."""
         d = self.down_proj
         lead, kk, D = x.shape[:-1], indices.shape[-1], x.shape[-1]
         xf = x.reshape(-1, D)
         idx = indices.reshape(-1).astype(mx.uint32)
-        if idx.size < SORT_THRESHOLD:
+        if not self._use_sorted(idx.size, kk):
             h, rk = self._down_in(self._decode_h(xf, idx))
             y = K.gather_qmv(h, d.tq2_packed, d.tq2_scales, d._cb, idx, d.bits, x_per_dispatch=True, rotate=rk)
             return y.astype(x.dtype).reshape(*lead, kk, D)
@@ -162,7 +179,7 @@ class TQSwitchGLU(nn.Module):
         into the down kernel; prefill uses the sorted NAX path then a weighted reduction."""
         d = self.down_proj
         lead, kk, D = x.shape[:-1], indices.shape[-1], x.shape[-1]
-        if indices.size >= SORT_THRESHOLD:
+        if self._use_sorted(indices.size, kk):
             if (PREFILL_REDUCE == "1" and x.ndim == 3 and x.shape[0] == 1
                     and x.shape[1] >= 8 and kk == 8 and D == 4096
                     and x.dtype == mx.bfloat16):

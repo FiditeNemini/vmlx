@@ -15,6 +15,20 @@ def _producer_binary_flag(name: str, default: str) -> str:
 QWEN4_PREFILL_FUSED = _producer_binary_flag("JANGH_QWEN4_PREFILL_FUSED", "1")
 WEIGHTED_UNSORT = _producer_binary_flag("JANGH_WEIGHTED_UNSORT", "0")
 TAIL_SPLIT = _producer_binary_flag("JANGH_TAIL_SPLIT", "1")
+# Decode-vs-sorted routed path by TOKEN count (see switch.TQSwitchGLU._use_sorted). Empty = the
+# family loader's measured default; an integer pins it. Part of the identity because a short
+# prefill chunk below the limit runs the gather kernels (fp32 weighted accumulate) instead of the
+# sorted NAX path, which is a different (both exact-gated) rounding path for stored KV.
+DECODE_MAX_TOKENS = os.environ.get("JANGH_DECODE_MAX_TOKENS", "").strip()
+# Measured 2026-10-04 on M5 Max / MLX 0.32.3 for qwen4_exp (D=2560, I=640, E=512, k=10, JANGH 4/6-bit),
+# jangh_crossover_bench.py, interleaved A/B/A/B, medians of 14 rounds: the gather decode path wins
+# through 96 tokens and the sorted NAX path from 128.
+QWEN4_DECODE_MAX_TOKENS = 96
+
+
+def qwen4_decode_max_tokens() -> int:
+    """Effective qwen4_exp decode-vs-sorted token limit: the env pin when it is an integer, else the measured default."""
+    return int(DECODE_MAX_TOKENS) if DECODE_MAX_TOKENS.isdigit() else QWEN4_DECODE_MAX_TOKENS
 
 DECODE_ROT = os.environ.get("JANGTQ2_DECODE_ROT", "host").strip().lower()
 PREFILL = os.environ.get("JANGTQ2_PREFILL", "").strip().lower()
@@ -52,4 +66,5 @@ def runtime_identity() -> str:
         + ";qwen4_prefill_fused=" + QWEN4_PREFILL_FUSED
         + ";weighted_unsort=" + WEIGHTED_UNSORT
         + ";tail_split=" + TAIL_SPLIT
+        + ";decode_max_tokens=" + DECODE_MAX_TOKENS
     )

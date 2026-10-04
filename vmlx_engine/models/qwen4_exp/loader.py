@@ -526,11 +526,18 @@ def _install_jangh_routed_experts(model, config: dict) -> int:
     # qwen4_exp prefill speed options (measured one MoE layer, D=2560 I=640 E=512 k=10, f16: JANGH/affine 1.235 ->
     # 0.995 at 4k tokens): single-launch Hadamard-32 row rotation + fused fp32 weighted unsort. Scoped to this family
     # so GLM/Naive keep their qualified numerics. Env JANGH_QWEN4_PREFILL_FUSED=0 restores the generic path.
-    from vmlx_engine.jangh.runtime_identity import QWEN4_PREFILL_FUSED
+    from vmlx_engine.jangh.runtime_identity import QWEN4_PREFILL_FUSED, qwen4_decode_max_tokens
 
-    if QWEN4_PREFILL_FUSED == "1":
-        for _path, mod in model.named_modules():
-            if getattr(mod, "is_jangtq2", False):
+    # Decode-vs-sorted routed path by TOKENS, not routed rows (switch._use_sorted). Measured
+    # crossover for this geometry (D=2560, I=640, E=512, k=10, JANGH 4/6-bit, M5 Max, MLX
+    # 0.32.3): gather wins through 96 tokens, sorted from 128. The legacy 64-row rule sent a
+    # continuous-batching decode step of >= 7 sequences to the prefill kernels (8 concurrent
+    # measured 35 tok/s aggregate, below single-stream). JANGH_DECODE_MAX_TOKENS pins it for A/B.
+    decode_max_tokens = qwen4_decode_max_tokens()
+    for _path, mod in model.named_modules():
+        if getattr(mod, "is_jangtq2", False):
+            mod.decode_max_tokens = decode_max_tokens
+            if QWEN4_PREFILL_FUSED == "1":
                 mod.use_weighted_unsort = True
                 for lin in (mod.gate_proj, mod.up_proj, mod.down_proj):
                     lin.use_h32_rows = True

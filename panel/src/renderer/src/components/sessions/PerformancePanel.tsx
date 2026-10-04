@@ -261,6 +261,8 @@ interface HealthData {
     runtime_available?: boolean
     runtime_supported?: boolean
     runtime_active?: boolean
+    mode?: 'ar' | 'adaptive' | 'fixed' | string
+    depth_policy?: string
     effective_depth?: number | null
     effective_depth_source?: string | null
     runtime_reason?: string
@@ -437,7 +439,17 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                 }
               />
             )}
-            {health.mtp?.effective_depth && health.mtp.runtime_available && (
+            {health.mtp?.mode && health.mtp.status !== 'not_configured' && (
+              <InfoCard
+                label={t('sessions.performance.mtpMode')}
+                value={health.mtp.mode === 'adaptive'
+                  ? t('sessions.performance.mtpModeAdaptive')
+                  : health.mtp.mode === 'ar'
+                    ? t('sessions.performance.mtpModeAr')
+                    : t('sessions.performance.mtpModeFixed', { depth: health.mtp.effective_depth ?? '?' })}
+              />
+            )}
+            {health.mtp?.effective_depth && health.mtp.runtime_available && health.mtp.mode !== 'ar' && (
               <InfoCard
                 label={t('sessions.performance.mtpDepth')}
                 value={health.mtp.effective_depth_source === 'default'

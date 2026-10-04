@@ -102,6 +102,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         nativeMtpMode: resolveNativeMtpStartupMode(
           detected?.family,
           !defaultsOnly && nativeMtpModeEditedRef.current ? prev.nativeMtpMode : undefined,
+          detected?.nativeMtp?.defaultMode,
         ),
         // Auto remains undefined; detection is displayed separately and launch
         // resolves the effective value. Materializing detection here made a
@@ -248,7 +249,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         ]) as [any, any]
         if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
         if (detected && detected.family !== 'unknown') {
-          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family)
+          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family, undefined, detected.nativeMtp?.defaultMode)
           base.enableAutoToolChoice = undefined
           if (['deepseek-v4', 'minimax_m3', 'openpangu_v2'].includes(detected.family)) {
             base.timeout = 900
@@ -722,7 +723,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                                 if (!selectionStillCurrent()) return
                                 setConfig(current => ({
                                   ...applyBundleDsv4PoolQuantToSessionConfig(current, det),
-                                  nativeMtpMode: resolveNativeMtpStartupMode(det?.family, stored.nativeMtpMode),
+                                  nativeMtpMode: resolveNativeMtpStartupMode(det?.family, stored.nativeMtpMode, det?.nativeMtp?.defaultMode),
                                 }))
                                 if (det?.cacheType) setDetectedCacheType(det.cacheType)
                                 setDetectedUsePagedCache(det?.usePagedCache)

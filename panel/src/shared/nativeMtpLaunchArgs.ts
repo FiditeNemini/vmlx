@@ -1,91 +1,111 @@
-import { finitePositiveInteger } from './launchArgValues'
-import { normalizeDetectedFamilyName } from './detectedFamilyNames'
+/**
+ * Native in-model MTP: ONE user decision, two values.
+ *
+ *   'off'      — plain autoregressive decode (AR). The bundle's MTP head is
+ *                loaded nowhere; the engine receives --disable-native-mtp.
+ *   'adaptive' — the engine's adaptive speculative policy. It starts every
+ *                request at the bundle's capability ceiling, measures the
+ *                completed verify-cycle cost against its own AR baseline, steps
+ *                the draft depth down (D3 -> D1 -> AR) when a window loses,
+ *                re-probes with backoff, and promotes back when the deeper rung
+ *                wins. The request/bundle sampler is never changed: greedy
+ *                requests use identity verification, sampled requests use
+ *                rejection-sampling acceptance (`compatible-only`).
+ *
+ * There is deliberately NO user-facing depth (D1/D2/D3), no "fixed" policy and
+ * no "deterministic" greedy override any more (Eric, 2026-10-04: "users no
+ * longer have adaptive/d1/d2/d3 buttons but only ar (mtp off) and adaptive
+ * mtp"). The engine keeps `--native-mtp-depth N --native-mtp-depth-policy
+ * fixed` as a measurement lever for benchmarks; the app never emits it.
+ *
+ * Legacy persisted values ('auto', 'deterministic', nativeMtpDepth,
+ * nativeMtpDepthOverride, nativeMtpAutoSamplingPolicy) are read-only history:
+ * 'auto'/'deterministic' normalize to 'adaptive'; the depth/override/sampling
+ * fields are ignored everywhere. A saved deterministic session therefore
+ * stops forcing temperature 0 on every request — that enforcement was a
+ * sampler clamp hidden inside an MTP control.
+ */
 
-/** Fresh/reset session policy. Explicit saved choices always win. */
+export type NativeMtpMode = 'adaptive' | 'off'
+
+/** Values that may still exist in persisted session rows. */
+export type LegacyNativeMtpMode = NativeMtpMode | 'auto' | 'deterministic'
+
+/** The only sampling policy the app ever launches. */
+export const NATIVE_MTP_SAMPLING_POLICY = 'compatible-only' as const
+
+/**
+ * Map any stored/legacy/malformed value onto the two product modes.
+ * `undefined` stays `undefined` so callers can tell "not chosen" from "off".
+ */
+export function normalizeNativeMtpMode(raw: unknown): NativeMtpMode | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined
+  if (raw === 'off') return 'off'
+  if (raw === 'adaptive' || raw === 'auto' || raw === 'deterministic') return 'adaptive'
+  return undefined
+}
+
+/**
+ * Fresh/reset session default. An explicit saved choice always wins.
+ *
+ * Adaptive is the default for every bundle that passed the runtime gate: the
+ * AR-safety valve guarantees a losing request falls back to plain decode, so
+ * there is no family-level reason to start Off. A bundle whose measured
+ * verifier is slower than AR declares `defaultMode: 'off'` through model
+ * detection (GLM-5.3 today); that is a model-derived default, not a user
+ * setting, and the user can still choose Adaptive explicitly.
+ */
 export function resolveNativeMtpStartupMode(
-  family?: string,
-  configured?: 'auto' | 'deterministic' | 'off',
-): 'auto' | 'deterministic' | 'off' {
-  if (configured !== undefined) return configured
-  // Classify by architecture, never the folder name, quant tier, or MTP depth.
-  // D3 remains the opt-in ceiling; it is not evidence the user enabled MTP.
-  return normalizeDetectedFamilyName(family) === 'qwen4-exp' || family === 'qwen4_exp_text'
-    ? 'off'
-    : 'auto'
+  _family?: string,
+  configured?: unknown,
+  modelDefaultMode?: 'auto' | 'off',
+): NativeMtpMode {
+  const explicit = normalizeNativeMtpMode(configured)
+  if (explicit !== undefined) return explicit
+  return modelDefaultMode === 'off' ? 'off' : 'adaptive'
 }
 
 export interface NativeMtpLaunchPolicyInput {
   supported: boolean
-  detectedDepth?: number
-  configuredDepth?: number
-  depthOverride?: boolean
-  mode?: 'auto' | 'deterministic' | 'off'
+  /** Session `nativeMtpMode` (new or legacy spelling). */
+  mode?: unknown
+  /** Bundle-level measured default from model detection. */
   modelDefaultMode?: 'auto' | 'off'
   externalSpeculativeActive?: boolean
 }
 
+/**
+ * Effective mode for a session.
+ *
+ * A legacy 'auto' row on a bundle that declares `defaultMode: 'off'` keeps its
+ * old meaning (AR): that row never recorded an explicit opt-in. A row that
+ * stores the new 'adaptive' value IS an explicit opt-in and runs adaptive even
+ * on such a bundle. 'deterministic' was always an explicit MTP opt-in.
+ */
 export function resolveNativeMtpMode(
-  input: Pick<NativeMtpLaunchPolicyInput, 'mode' | 'modelDefaultMode' | 'depthOverride'>,
-): 'auto' | 'deterministic' | 'off' {
-  const configured = input.mode || 'auto'
-  // GLM-5.3 is measured slower under its current verifier, so its bundle-level
-  // Auto policy is AR. A fixed D1-D3 selection is an explicit opt-in and must
-  // remain available for measurement/tuning.
-  if (
-    configured === 'auto'
-    && input.modelDefaultMode === 'off'
-    && input.depthOverride !== true
-  ) return 'off'
-  return configured
+  input: Pick<NativeMtpLaunchPolicyInput, 'mode' | 'modelDefaultMode'>,
+): NativeMtpMode {
+  const raw = input.mode
+  if (raw === 'off') return 'off'
+  if (raw === 'adaptive' || raw === 'deterministic') return 'adaptive'
+  // undefined / legacy 'auto' / unknown: the model-derived default decides.
+  return input.modelDefaultMode === 'off' ? 'off' : 'adaptive'
 }
 
-/** The form and launcher must display/use the same supported fixed ceiling. */
-export function resolveFixedNativeMtpDepth(configuredDepth?: number, detectedDepth?: number): number {
-  return Math.max(1, Math.min(3,
-    finitePositiveInteger(configuredDepth) || finitePositiveInteger(detectedDepth) || 1,
-  ))
-}
-
-/** One source of truth for Electron preview and the process launcher. */
-export function buildNativeMtpLaunchArgs(
-  input: NativeMtpLaunchPolicyInput,
-): string[] {
+/** One source of truth for the Electron CLI preview and the process launcher. */
+export function buildNativeMtpLaunchArgs(input: NativeMtpLaunchPolicyInput): string[] {
   if (!input.supported) return []
   const mode = resolveNativeMtpMode(input)
   if (mode === 'off' || input.externalSpeculativeActive) {
     return ['--disable-native-mtp']
   }
-
-  // Native MTP enabled in Server settings pins the STARTUP DEFAULTS to
-  // greedy (temperature 0, top_p 1, top_k dropped, min_p 0) for every
-  // surface — chat settings and API alike — while an EXPLICIT request
-  // temperature in API kwargs still wins (engine deterministic-defaults
-  // policy). Deterministic mode goes further and hard-pins greedy for every
-  // request (greedy-only). 'auto' previously sent compatible-only, which
-  // silently kept the bundle's sampled temperature as the default and made
-  // every app-managed MTP session run stochastic rejection sampling.
-  const samplingArgs = [
-    '--native-mtp-sampling-policy',
-    mode === 'deterministic' ? 'greedy-only' : 'deterministic-defaults',
-  ]
-  if (input.depthOverride !== true) {
-    // Adaptive policy: emit NO explicit depth. --native-mtp-depth becomes
-    // the engine's explicit VMLINUX_NATIVE_MTP_DEPTH override, which pins
-    // the start depth and bypasses tuning sidecars, bundle stamps, and the
-    // session-scoped adaptive profile. This launcher used to always send
-    // it with detectedDepth — and detectedDepth comes from
-    // mtp_num_hidden_layers, a HEAD LAYER COUNT (1), not a draft depth —
-    // so every "adaptive" app session was silently pinned to fixed D1
-    // (live-proven on Flash-Next JANG_4M: effective_depth=1
-    // source=VMLINUX_NATIVE_MTP_DEPTH).
-    return ['--native-mtp-depth-policy', 'adaptive', ...samplingArgs]
-  }
-  const depth = resolveFixedNativeMtpDepth(input.configuredDepth, input.detectedDepth)
+  // No --native-mtp-depth: that flag is the engine's explicit
+  // VMLINUX_NATIVE_MTP_DEPTH override, which pins the start depth and bypasses
+  // tuning sidecars and bundle stamps. The engine resolves the ceiling itself.
   return [
-    '--native-mtp-depth',
-    depth.toString(),
     '--native-mtp-depth-policy',
-    'fixed',
-    ...samplingArgs,
+    'adaptive',
+    '--native-mtp-sampling-policy',
+    NATIVE_MTP_SAMPLING_POLICY,
   ]
 }

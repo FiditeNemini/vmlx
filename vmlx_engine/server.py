@@ -10661,6 +10661,14 @@ def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
     status["depth_policy"] = (
         "fixed" if _depth_policy_raw in {"0", "false", "no", "off"} else "adaptive"
     )
+    # The product exposes exactly two user modes: "ar" (native MTP disabled)
+    # and "adaptive" (engine-governed ladder from the capability ceiling).
+    # "fixed" only appears when a benchmark pins --native-mtp-depth-policy
+    # fixed; the app never emits it. Published so the panel can label the
+    # live state truthfully instead of inferring it from argv.
+    status["mode"] = (
+        "ar" if native_disabled else status["depth_policy"]
+    )
     # Greedy requests take identity verify. Sampled MLLM requests use the
     # shared rejection-sampling rule when enabled; the kill switch restores
     # the old deterministic-only gate. Publish the imported runtime value so

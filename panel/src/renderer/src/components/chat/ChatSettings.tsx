@@ -34,7 +34,6 @@ import {
   parseSessionNativeMtpMode,
   resolveMtpTemperatureNotice,
 } from '../../../../shared/mtpTemperatureNotice'
-import { resolveNativeMtpMode } from '../../../../shared/nativeMtpLaunchArgs'
 
 interface ChatProfile {
   id: string
@@ -176,36 +175,25 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
       return {}
     }
   })()
-  const nativeMtpMode = resolveNativeMtpMode({
-    mode: parseSessionNativeMtpMode(nativeMtpConfig) as 'auto' | 'deterministic' | 'off',
-    modelDefaultMode: detectedNativeMtpDefaultMode,
-    depthOverride: nativeMtpConfig.nativeMtpDepthOverride === true,
-  })
-  const mtpGreedyEnforced = !isRemote && detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'
-  const displayedTemperature = mtpGreedyEnforced
-    ? 0
-    : displayedOverrides.temperature ?? displayedModelDefaults.temperature
-  // MTP is a property of the BUNDLE; whether it actually runs is decided by the
-  // session's nativeMtpMode plus the effective temperature. Both are needed, so
-  // neither a capable bundle nor a deterministic session alone is enough.
+  const nativeMtpMode = parseSessionNativeMtpMode(nativeMtpConfig)
+  // Adaptive MTP never pins the sampler: the displayed values are exactly the
+  // saved/bundle values the request will carry.
+  const displayedTemperature = displayedOverrides.temperature ?? displayedModelDefaults.temperature
+  // MTP is a property of the BUNDLE; whether it runs is decided by the
+  // session's nativeMtpMode (or the bundle's measured default).
   const mtpTemperatureNotice = resolveMtpTemperatureNotice({
     isRemote,
     nativeMtpSupported: detectedNativeMtpSupported === true,
     mode: nativeMtpMode,
+    modelDefaultMode: detectedNativeMtpDefaultMode,
     temperature: displayedTemperature,
   })
-  const displayedTopP = mtpGreedyEnforced
-    ? 1
-    : displayedOverrides.topP ?? displayedModelDefaults.topP
-  const displayedTopKValue = mtpGreedyEnforced
-    ? 0
-    : displayedOverrides.topK ?? displayedModelDefaults.topK
+  const displayedTopP = displayedOverrides.topP ?? displayedModelDefaults.topP
+  const displayedTopKValue = displayedOverrides.topK ?? displayedModelDefaults.topK
   const displayedTopK = displayedTopKValue == null
     ? undefined
     : Math.max(0, Math.round(displayedTopKValue))
-  const displayedMinP = mtpGreedyEnforced
-    ? 0
-    : displayedOverrides.minP ?? displayedModelDefaults.minP
+  const displayedMinP = displayedOverrides.minP ?? displayedModelDefaults.minP
   const displayedRepeatPenalty = displayedOverrides.repeatPenalty ?? displayedModelDefaults.repeatPenalty
   const dsv4TopPMismatch = hydrationCurrent && shouldWarnDsv4TopP(
     detectedFamily,
@@ -810,34 +798,17 @@ function statusToneClass(status: string): string {
                 }}
                 min={0} max={2} step="any"
                 exactInput={{ min: 0, max: 2 }}
-                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.temperatureHelp')}
               />
             )}
-            {/* Deterministic MTP pins the measured greedy path. Auto preserves
-                the saved/bundle sampling controls and uses stochastic verify. */}
+            {/* Adaptive MTP keeps the saved/bundle sampler and verifies
+                sampled requests by rejection sampling. */}
             {mtpTemperatureNotice && (
               <p
                 data-testid="mtp-temperature-notice"
-                className={
-                  mtpTemperatureNotice.kind === 'inactive'
-                    ? 'mt-1 text-xs text-amber-500'
-                    : 'mt-1 text-xs text-neutral-500'
-                }
+                className="mt-1 text-xs text-neutral-500"
               >
-                {mtpTemperatureNotice.kind === 'default'
-                  ? t('chat.settings.mtpTempDefault')
-                  : mtpTemperatureNotice.kind === 'pinned'
-                  ? t('chat.settings.mtpTempPinned')
-                  : mtpTemperatureNotice.kind === 'active'
-                    ? t('chat.settings.mtpTempActive', {
-                        temperature: mtpTemperatureNotice.temperature ?? 0,
-                      })
-                    : t('chat.settings.mtpTempInactive', {
-                        // only the `inactive` branch carries a temperature, but
-                        // the field is optional on the union, so narrow it here
-                        temperature: mtpTemperatureNotice.temperature ?? 0,
-                      })}
+                {t('chat.settings.mtpTempActive', { temperature: mtpTemperatureNotice.temperature })}
               </p>
             )}
             {displayedTopP != null && (
@@ -850,7 +821,6 @@ function statusToneClass(status: string): string {
                 }}
                 min={topPSliderMin} max={TOP_P_MAX} step="any"
                 exactInput={{ min: Number.MIN_VALUE, max: TOP_P_MAX }}
-                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.topPHelp')}
               />
             )}
@@ -890,7 +860,6 @@ function statusToneClass(status: string): string {
                 }}
                 min={0} max={topKSliderMax} step={1}
                 exactInput={{ min: 0, max: TOP_K_MAX }}
-                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.topKHelp')}
                 format={value => Math.round(value) <= 0
                   ? t('chat.settings.topKOff')
@@ -909,7 +878,6 @@ function statusToneClass(status: string): string {
                 }}
                 min={0} max={1} step="any"
                 exactInput={{ min: 0, max: 1 }}
-                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.minPHelp')}
               />
             )}

@@ -114,10 +114,11 @@ export interface ServerConfig {
   speculativeModel?: string
   numDraftTokens?: number
 
-  // Native in-model MTP (Qwen3.6 preserved-MTP bundles)
-  nativeMtpMode?: 'deterministic' | 'auto' | 'off'
-  nativeMtpDepth?: number
-  nativeMtpDepthOverride?: boolean
+  // Native in-model MTP: 'adaptive' (engine-governed speculation) or 'off'
+  // (plain AR). 'auto'/'deterministic' are legacy persisted spellings that
+  // normalize to 'adaptive'; legacy nativeMtpDepth/Override/AutoSamplingPolicy
+  // keys in old rows are ignored.
+  nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'
 
   // Generation defaults
   defaultTemperature?: number

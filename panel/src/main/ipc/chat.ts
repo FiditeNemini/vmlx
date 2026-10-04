@@ -132,7 +132,6 @@ import {
   toolCapabilityNames,
 } from "../tool-capability-epoch";
 import { resolveSlowFamilyTimeoutSeconds } from '../../shared/slowFamilyTimeouts';
-import { applyMtpSamplerOverrides } from '../../shared/effectiveGenerationDefaults';
 
 // Default connection config (fallback values)
 const DEFAULT_PORT = 8000;
@@ -1090,7 +1089,6 @@ export function registerChatHandlers(
       let supportedReasoningEfforts: ReasoningEffort[] | undefined;
       let remoteReasoningFormat: RemoteReasoningFormat | undefined;
       let defaultReasoningEffort: ReasoningEffort | undefined;
-      let chatNativeMtp: RemoteDetectedConfig['nativeMtp'];
       let chatSessionConfig: Record<string, unknown> = {};
       let sessionImageTokenBudget: number | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
@@ -1168,7 +1166,6 @@ export function registerChatHandlers(
             supportedReasoningEfforts = detected.supportedReasoningEfforts;
             remoteReasoningFormat = detected.remoteReasoningFormat;
             defaultReasoningEffort = detected.defaultReasoningEffort;
-            chatNativeMtp = detected.nativeMtp;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
               chatDetectedFamily,
@@ -1625,19 +1622,10 @@ export function registerChatHandlers(
         ...(db.getChatOverrides(chatId) || {}),
         chatId,
       });
-      // Chat Settings displays Native-MTP's effective greedy tuple, but those
-      // controls are intentionally disabled and therefore are not persisted as
-      // synthetic per-chat overrides. Apply the same shared session policy at
-      // the actual request boundary so the visible contract and the Chat /
-      // Responses wire bodies cannot diverge. Remote providers retain their
-      // own sampling contract.
-      const effectiveSamplerOverrides = isRemote
-        ? overrides
-        : applyMtpSamplerOverrides(
-            overrides,
-            chatSessionConfig,
-            chatNativeMtp,
-          );
+      // Adaptive MTP never rewrites the sampler (compatible-only: greedy
+      // requests verify by identity, sampled requests by rejection sampling),
+      // so the request boundary forwards the user's overrides untouched.
+      const effectiveSamplerOverrides = overrides;
       if (supportsInstructMode === false && overrides?.enableThinking === false) {
         throw new Error(
           "This model has no native Thinking Off/Instruct mode. Open Chat Settings and choose Auto or On.",

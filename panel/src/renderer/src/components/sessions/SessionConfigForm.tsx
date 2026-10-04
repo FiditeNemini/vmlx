@@ -1,5 +1,5 @@
 import { DEFAULT_BLOCK_DISK_CACHE_PERCENT } from '../../../../shared/cacheDefaults'
-import { resolveFixedNativeMtpDepth } from '../../../../shared/nativeMtpLaunchArgs'
+import { resolveNativeMtpMode } from '../../../../shared/nativeMtpLaunchArgs'
 import { useEffect, useState, useRef } from 'react'
 import { Modal } from '../ui/Modal'
 import { useTranslation } from '../../i18n'
@@ -82,9 +82,7 @@ export interface SessionConfig {
   servedModelName: string
   speculativeModel: string
   numDraftTokens: number
-  nativeMtpMode?: 'deterministic' | 'auto' | 'off'
-  nativeMtpDepth?: number
-  nativeMtpDepthOverride?: boolean
+  nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'
   smelt: boolean
   smeltExperts: number
   flashMoe: boolean
@@ -186,9 +184,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   servedModelName: '',
   speculativeModel: '',
   numDraftTokens: 3,
-  nativeMtpMode: 'auto',
-  nativeMtpDepth: 3,
-  nativeMtpDepthOverride: true,
+  nativeMtpMode: undefined,
   smelt: false,
   smeltExperts: 50,
   flashMoe: false,
@@ -568,13 +564,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const nativeMtpSupported = !!detectedNativeMtp?.supported
   const omniBackendVisible = normalizedDetectedFamily === 'nemotron-h' && multimodalActive && config.isMultimodal !== false && !effectiveSmeltActive
   const nativeOmniStage1 = omniBackendVisible && (config.omniBackend || 'stage1') === 'stage1'
-  const nativeMtpMode = config.nativeMtpMode || DEFAULT_CONFIG.nativeMtpMode || 'auto'
-  const nativeMtpDepth = config.nativeMtpDepthOverride === true
-    ? resolveFixedNativeMtpDepth(config.nativeMtpDepth, detectedNativeMtp?.depth)
-    : (detectedNativeMtp?.depth || config.nativeMtpDepth || 3)
-  const nativeMtpDepthPolicy = config.nativeMtpDepthOverride === true
-    ? 'fixed'
-    : 'adaptive'
+  // Legacy 'auto'/'deterministic' rows display as the mode they will launch as.
+  const nativeMtpMode = resolveNativeMtpMode({
+    mode: config.nativeMtpMode,
+    modelDefaultMode: detectedNativeMtp?.defaultMode,
+  })
   const hasDeclaredSamplingDefaults =
     config.defaultSamplingDefaultsDeclared === true ||
     config.defaultDoSample === false ||
@@ -1737,60 +1731,22 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {nativeMtpSupported && (
           <>
         <PerformanceHint text={t('sessions.config.nativeMtpHint')} />
-        {nativeMtpMode === 'auto' && detectedNativeMtp?.defaultMode === 'off' && (
-          <InfoNote text={t('sessions.config.nativeMtpDefaultOffNote')} />
-        )}
-        {nativeMtpMode === 'auto' && detectedNativeMtp?.defaultMode !== 'off' && (
-          <InfoNote text={t('sessions.config.nativeMtpAutoNote')} />
-        )}
-        {nativeMtpMode === 'deterministic' && (
-          <InfoNote text={t('sessions.config.nativeMtpDeterministicNote', { depth: nativeMtpDepth })} />
-        )}
         <SelectField settingKey="nativeMtpMode"
           label={t('sessions.config.nativeMtpMode')}
           tooltip={t('sessions.config.nativeMtpModeTooltip')}
           value={nativeMtpMode}
-          onChange={v => onChange('nativeMtpMode', v as 'deterministic' | 'auto' | 'off')}
+          onChange={v => onChange('nativeMtpMode', v as 'adaptive' | 'off')}
           options={[
-            { value: 'auto', label: t('sessions.config.mtpAutoBundleDefaults') },
-            { value: 'deterministic', label: t('sessions.config.mtpDeterministicOverride') },
-            { value: 'off', label: t('chat.settings.thinkingOff') },
+            { value: 'adaptive', label: t('sessions.config.nativeMtpModeAdaptive') },
+            { value: 'off', label: t('sessions.config.nativeMtpModeAr') },
           ]}
         />
-        <SelectField settingKey="nativeMtpDepth"
-          label={t('sessions.config.nativeMtpDepthPolicy')}
-          tooltip={t('sessions.config.nativeMtpDepthPolicyTooltip')}
-          value={nativeMtpDepthPolicy}
-          onChange={v => {
-            const fixed = v === 'fixed'
-            if (fixed) onChange('nativeMtpDepth', nativeMtpDepth)
-            onChange('nativeMtpDepthOverride', fixed)
-          }}
-          options={[
-            { value: 'adaptive', label: t('sessions.config.nativeMtpDepthAdaptive') },
-            { value: 'fixed', label: t('sessions.config.nativeMtpDepthFixed') },
-          ]}
-          disabled={nativeMtpMode === 'off'}
-        />
-        <SliderField settingKey="nativeMtpDepth"
-          label={t('sessions.config.nativeMtpDepth')}
-          tooltip={t('sessions.config.nativeMtpDepthTooltip')}
-          value={nativeMtpDepth}
-          maxInput={3}
-          onChange={v => {
-            onChange('nativeMtpDepth', v)
-            onChange('nativeMtpDepthOverride', true)
-          }}
-          min={1}
-          max={3}
-          step={1}
-          defaultValue={3}
-          disabled={nativeMtpMode === 'off' || nativeMtpDepthPolicy !== 'fixed'}
-        />
-        <InfoNote text={nativeMtpDepthPolicy === 'fixed'
-          ? t('sessions.config.nativeMtpDepthFixedNote', { depth: nativeMtpDepth })
-          : t('sessions.config.nativeMtpDepthAdaptiveNote', { depth: nativeMtpDepth })}
-        />
+        {nativeMtpMode === 'adaptive' && (
+          <InfoNote text={t('sessions.config.nativeMtpAdaptiveNote')} />
+        )}
+        {nativeMtpMode === 'off' && detectedNativeMtp?.defaultMode === 'off' && (
+          <InfoNote text={t('sessions.config.nativeMtpDefaultOffNote')} />
+        )}
         <InfoNote text={t('sessions.config.nativeMtpDetectedNote', { scope: detectedNativeMtp?.runtimeScope || 'text', cache: detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown', depthSource: detectedNativeMtp?.depthSource || 'default' })} />
           </>
         )}

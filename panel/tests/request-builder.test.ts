@@ -192,12 +192,10 @@ describe('buildRequestBody — Chat Completions API', () => {
         expect(body.repetition_penalty).toBeUndefined()
     })
 
-    it('applies the shared Native-MTP effective sampler at both live request boundaries', () => {
+    it('forwards chat overrides untouched at both live request boundaries (Adaptive MTP never rewrites the sampler)', () => {
         const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
-        expect(source).toContain("applyMtpSamplerOverrides")
-        expect(source).toContain('const effectiveSamplerOverrides = isRemote')
-        expect(source).toContain('chatSessionConfig,')
-        expect(source).toContain('chatNativeMtp,')
+        expect(source).not.toContain("applyMtpSamplerOverrides")
+        expect(source).toContain('const effectiveSamplerOverrides = overrides;')
         expect(source.match(/effectiveSamplerOverrides\?\.temperature/g)).toHaveLength(2)
         expect(source.match(/effectiveSamplerOverrides\?\.topP/g)).toHaveLength(2)
         expect(source.match(/effectiveSamplerOverrides\?\.topK/g)).toHaveLength(2)

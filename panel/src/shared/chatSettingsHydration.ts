@@ -1,7 +1,12 @@
-import {
-  applyEffectiveSessionGenerationDefaults,
-  type GenerationDefaultsLike,
-} from './effectiveGenerationDefaults'
+export interface GenerationDefaultsLike {
+  temperature?: number
+  topP?: number
+  topK?: number
+  minP?: number
+  repeatPenalty?: number
+  maxTokens?: number
+  maxThinkingTokens?: number
+}
 
 export interface ChatSettingsGenerationDefaults {
   doSample?: boolean
@@ -223,12 +228,6 @@ export function resolveChatSettingsHydration<TOverrides extends object>(
     defaultsState = 'unavailable'
     modelDefaults = {}
   }
-
-  modelDefaults = applyEffectiveSessionGenerationDefaults(
-    modelDefaults,
-    sessionConfig,
-    detected?.nativeMtp,
-  )
 
   const partialFailure = Object.values(settled).some(result => result.status === 'rejected')
 

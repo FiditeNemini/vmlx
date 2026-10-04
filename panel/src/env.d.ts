@@ -53,6 +53,7 @@ declare global {
             runtimeScope?: 'text' | 'text+vl';
             nativeCacheType?: string;
             requiresDeterministicSampling?: boolean;
+            defaultMode?: 'auto' | 'off';
             blockedReason?: string;
           };
           description?: string;

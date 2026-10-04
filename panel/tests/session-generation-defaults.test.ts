@@ -227,7 +227,7 @@ describe('session generation-default hydration', () => {
       expect(source).toContain('applyBundleDsv4PoolQuantToSessionConfig')
       if (sourcePath.endsWith('/CreateSession.tsx')) {
         // This surface also reconciles native MTP in the same state update.
-        expect(source).toMatch(/setConfig\(current => \(\{\s*\.\.\.applyBundleDsv4PoolQuantToSessionConfig\(current, det\),\s*nativeMtpMode: resolveNativeMtpStartupMode\(det\?\.family, stored\.nativeMtpMode\),\s*\}\)\)/)
+        expect(source).toMatch(/setConfig\(current => \(\{\s*\.\.\.applyBundleDsv4PoolQuantToSessionConfig\(current, det\),\s*nativeMtpMode: resolveNativeMtpStartupMode\(det\?\.family, stored\.nativeMtpMode, det\?\.nativeMtp\?\.defaultMode\),\s*\}\)\)/)
       } else {
         expect(source).toContain(
           'setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))',

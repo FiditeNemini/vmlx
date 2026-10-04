@@ -6629,6 +6629,35 @@ def _native_mtp_calibration_enabled() -> bool:
 _NATIVE_MTP_CYCLE_TRACE = os.environ.get("VMLX_NATIVE_MTP_CYCLE_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _native_mtp_unseen_start_depth(
+    model_type: Optional[str], *, sampled_profile: bool, depth: int
+) -> Optional[int]:
+    """Start depth for a profile this process has never measured, or None (AR).
+
+    Adaptive policy normally keeps unseen workloads on AR and lets the AR tier
+    probe later.  qwen4_exp (Flash-Next) is the measured exception: live 2L
+    AR/D1/D2/D3 receipts on the installed app showed D3 at 82.6 tok/s vs 35.4
+    AR on predictable output, and sampled novel code still improved to 41.4
+    vs 39.5 tok/s.  Seed unseen qwen4_exp shapes at the configured/capability-
+    clamped depth and let the request-local value controller and the
+    policy-independent AR-safety valve demote it when measured acceptance or
+    wall cost changes.
+
+    Sampled profiles are included only while the shared rejection-sampling
+    acceptance rule is enabled: the product now launches Adaptive MTP with the
+    bundle's own sampler (compatible-only), so with Qwen's T=1.0 defaults every
+    ordinary chat request is a sampled profile.  Keeping those on AR until a
+    later probe made "Adaptive MTP" behave as AR for most short responses.
+    With the kill switch (VMLX_MTP_STOCHASTIC_ACCEPT=0) sampled requests are
+    gated off before this point anyway.  No other family inherits this.
+    """
+    if str(model_type or "").lower() != "qwen4_exp":
+        return None
+    if sampled_profile and not _NATIVE_MTP_STOCHASTIC_ACCEPT:
+        return None
+    return int(depth)
+
+
 def _native_mtp_adaptive_policy() -> bool:
     return _native_mtp_env_flag(
         True, "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH"
@@ -17936,14 +17965,7 @@ class MLLMBatchGenerator:
             "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
             "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
         ):
-            # Adaptive policy normally keeps unseen workloads on AR.  The
-            # qwen4_exp runtime is the narrow measured exception: live 2L
-            # AR/D1/D2/D3 receipts on the installed app showed D3 at 82.6
-            # tok/s vs 35.4 AR on predictable output, while sampled novel code
-            # still improved to 41.4 vs 39.5 tok/s.  Seed unseen qwen4_exp
-            # shapes at the configured/capability-clamped depth and let the
-            # existing request-local value controller demote it when measured
-            # acceptance or wall cost changes.  No other family inherits this.
+            # Unseen-profile start depth: see _native_mtp_unseen_start_depth.
             request_profile_key = native_mtp_profile_key(
                 temperature=float(getattr(request, "temperature", 0.0) or 0.0),
                 restored_prefix=bool(
@@ -17982,12 +18004,10 @@ class MLLMBatchGenerator:
                     tuning_validated=(
                         "vmlx_mtp_tuning" in depth_source and not sampled_profile
                     ),
-                    unseen_start_depth=(
-                        depth
-                        if str(getattr(self, "_model_type", "") or "").lower()
-                        == "qwen4_exp"
-                        and not sampled_profile
-                        else None
+                    unseen_start_depth=_native_mtp_unseen_start_depth(
+                        getattr(self, "_model_type", None),
+                        sampled_profile=sampled_profile,
+                        depth=depth,
                     ),
                     unseen_start_source="qwen4_exp_measured_cold_start",
                 )

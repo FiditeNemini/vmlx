@@ -27,15 +27,18 @@ describe('session request provenance', () => {
 
 describe('generation execution settings', () => {
   it('freezes requested speculation, backend and cache controls without copying secrets', () => {
-    const server = {nativeMtpMode:'auto',nativeMtpDepth:3,nativeMtpDepthOverride:false,speculativeModel:'/models/draft',numDraftTokens:4,omniBackend:'stage1',enableJit:false,apiKey:'SECRET',additionalArgs:'--api-key SECRET'}
+    const server = {nativeMtpMode:'adaptive',nativeMtpAutoSamplingPolicy:'compatible-only',nativeMtpDepth:3,nativeMtpDepthOverride:false,speculativeModel:'/models/draft',numDraftTokens:4,omniBackend:'stage1',enableJit:false,apiKey:'SECRET',additionalArgs:'--api-key SECRET'}
     const body = {model:'alias',skip_prefix_cache:false,cache_salt:'experiment-a'}
     const captured = captureGenerationPass({body,serverConfig:server,wireApi:'responses'})
-    server.nativeMtpMode='off';server.nativeMtpDepth=1;body.skip_prefix_cache=true;body.cache_salt='later'
-    expect(captured.serverSettings).toMatchObject({nativeMtpMode:'auto',nativeMtpDepth:3,nativeMtpDepthOverride:false,speculativeModel:'/models/draft',numDraftTokens:4,omniBackend:'stage1',enableJit:false})
+    server.nativeMtpMode='off';server.nativeMtpAutoSamplingPolicy='deterministic-defaults';server.nativeMtpDepth=1;body.skip_prefix_cache=true;body.cache_salt='later'
+    expect(captured.serverSettings).toMatchObject({nativeMtpMode:'adaptive',speculativeModel:'/models/draft',numDraftTokens:4,omniBackend:'stage1',enableJit:false})
+    // Retired legacy MTP keys are not exported as execution settings.
+    for (const retired of ['nativeMtpAutoSamplingPolicy','nativeMtpDepth','nativeMtpDepthOverride']) expect(captured.serverSettings).not.toHaveProperty(retired)
     expect(captured.requestSettings).toMatchObject({skip_prefix_cache:false,cache_salt:'experiment-a'})
     expect(JSON.stringify(captured)).not.toContain('SECRET')
     const legacy = captureGenerationPass({body:{model:'alias'},serverConfig:{},wireApi:'chat'})
     expect(legacy.serverSettings).not.toHaveProperty('nativeMtpMode')
+    expect(legacy.serverSettings).not.toHaveProperty('nativeMtpAutoSamplingPolicy')
     expect(legacy.requestSettings).not.toHaveProperty('skip_prefix_cache')
   })
 })

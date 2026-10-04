@@ -90,7 +90,7 @@ interface SessionConfig {
     defaultEnableThinking?: boolean
     dsv4PrefixCache?: boolean
     dsv4PoolQuant?: boolean
-    nativeMtpMode?: 'deterministic' | 'auto' | 'off'
+    nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'
     nativeMtpDepth?: number
     nativeMtpDepthOverride?: boolean
     embeddingModel: string
@@ -171,9 +171,8 @@ const DEFAULT_CONFIG: SessionConfig = {
     defaultEnableThinking: undefined,
     dsv4PrefixCache: false,
     dsv4PoolQuant: undefined,
-    nativeMtpMode: 'auto',
-    nativeMtpDepth: 3,
-    nativeMtpDepthOverride: false,
+    // Not chosen: the model-derived default decides at launch.
+    nativeMtpMode: undefined,
     embeddingModel: '',
     additionalArgs: '',
     enableJit: true,
@@ -533,13 +532,9 @@ function buildCommandPreview(
     }
 
     if (!dsv4Active && detected?.nativeMtp?.supported) {
-        const mode = config.nativeMtpMode || 'auto'
         parts.push(...buildNativeMtpLaunchArgs({
             supported: true,
-            detectedDepth: detected.nativeMtp.depth,
-            configuredDepth: config.nativeMtpDepth,
-            depthOverride: config.nativeMtpDepthOverride === true,
-            mode,
+            mode: config.nativeMtpMode,
             modelDefaultMode: detected.nativeMtp.defaultMode,
             externalSpeculativeActive: compatibleExternalSpeculative,
         }))
@@ -1761,7 +1756,7 @@ describe('Speculative Decoding', () => {
         expect(hasFlag(out, '--no-continuous-batching')).toBe(true)
         expect(hasFlag(out, '--continuous-batching')).toBe(false)
         expect(hasFlag(out, '--disable-native-mtp')).toBe(true)
-        expect(hasFlag(out, '--native-mtp-depth')).toBe(false)
+        expect(hasFlag(out, '--native-mtp-depth ')).toBe(false)
     })
 
     it('suppresses external speculative decoding for Nanbeige looped KV', () => {
@@ -1804,18 +1799,16 @@ describe('Native MTP', () => {
         },
     }
 
-    it('defaults native-MTP bundles to adaptive Auto with greedy startup defaults', () => {
+    it('defaults native-MTP bundles to Adaptive with the bundle sampler (compatible-only), no depth', () => {
         const out = preview({}, qwenMtpDetected)
 
-        // Auto mode must NOT pass an explicit depth: the flag becomes the
-        // engine's explicit env override, pinning the start depth and
-        // bypassing the tuning sidecar (which the engine reads itself) and
-        // the session-scoped adaptive profile.
+        // No explicit depth: the flag is the engine's explicit env override and
+        // would pin the start depth, bypassing tuning sidecars/bundle stamps.
         // trailing space: hasFlag is substring-based and the policy flag
         // itself contains "--native-mtp-depth".
         expect(hasFlag(out, '--native-mtp-depth ')).toBe(false)
         expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('deterministic-defaults')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)
@@ -1823,14 +1816,22 @@ describe('Native MTP', () => {
         expect(hasFlag(out, '--default-repetition-penalty')).toBe(false)
     })
 
-    it('lets a manual native-MTP depth override win over the measured default', () => {
-        const out = preview({ nativeMtpDepth: 3, nativeMtpDepthOverride: true }, qwenMtpDetected)
-
-        expect(getFlagValue(out, '--native-mtp-depth')).toBe('3')
-        expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('fixed')
+    it('ignores retired fixed-depth / greedy-only persisted keys: legacy rows launch adaptive', () => {
+        for (const legacy of [
+            { nativeMtpDepth: 3, nativeMtpDepthOverride: true },
+            { nativeMtpMode: 'deterministic', nativeMtpDepth: 2, nativeMtpDepthOverride: true },
+            { nativeMtpMode: 'auto', nativeMtpAutoSamplingPolicy: 'deterministic-defaults' },
+        ]) {
+            const out = preview(legacy as any, qwenMtpDetected)
+            expect(hasFlag(out, '--native-mtp-depth ')).toBe(false)
+            expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
+            expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
+            expect(out).not.toContain('greedy-only')
+            expect(out).not.toContain('deterministic-defaults')
+        }
     })
 
-    it('defaults GLM Auto to AR but keeps an explicit fixed depth selectable', () => {
+    it('starts a measured-off bundle (GLM) in AR unless Adaptive is chosen explicitly', () => {
         const glmDetected: DetectedConfig = {
             ...qwenMtpDetected,
             family: 'glm5-next',
@@ -1841,16 +1842,14 @@ describe('Native MTP', () => {
             },
         }
         expect(hasFlag(preview({}, glmDetected), '--disable-native-mtp')).toBe(true)
+        expect(hasFlag(preview({ nativeMtpMode: 'auto' } as any, glmDetected), '--disable-native-mtp')).toBe(true)
 
-        const explicit = preview({
-            nativeMtpDepth: 3,
-            nativeMtpDepthOverride: true,
-        }, glmDetected)
+        const explicit = preview({ nativeMtpMode: 'adaptive' } as any, glmDetected)
         expect(hasFlag(explicit, '--disable-native-mtp')).toBe(false)
-        expect(getFlagValue(explicit, '--native-mtp-depth')).toBe('3')
+        expect(getFlagValue(explicit, '--native-mtp-depth-policy')).toBe('adaptive')
     })
 
-    it('lets users disable native MTP without leaving deterministic sampling overrides behind', () => {
+    it('lets users choose AR (MTP off) without leaving sampling overrides behind', () => {
         const out = preview({ nativeMtpMode: 'off' }, qwenMtpDetected)
 
         expect(hasFlag(out, '--disable-native-mtp')).toBe(true)
@@ -1859,36 +1858,35 @@ describe('Native MTP', () => {
     })
 
     it('keeps non-MTP models on bundle-owned generation defaults', () => {
-        const out = preview({ nativeMtpMode: 'deterministic', nativeMtpDepth: 3 }, { family: 'qwen3.5', cacheType: 'kv' })
+        const out = preview({ nativeMtpMode: 'adaptive' } as any, { family: 'qwen3.5', cacheType: 'kv' })
 
         expect(hasFlag(out, '--native-mtp-depth')).toBe(false)
         expect(hasFlag(out, '--default-temperature')).toBe(false)
     })
 
-    it('real session launcher and settings form expose native MTP controls', () => {
+    it('real session launcher and settings form expose exactly the two native MTP modes', () => {
         const sessionsSource = readFileSync('src/main/sessions.ts', 'utf8')
         const serverTypesSource = readFileSync('src/main/server.ts', 'utf8')
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
 
-        expect(sessionsSource).toContain('--native-mtp-depth')
-        expect(sessionsSource).toContain('--native-mtp-depth-policy')
-        expect(sessionsSource).toContain('--native-mtp-sampling-policy')
-        expect(sessionsSource).toContain('--disable-native-mtp')
+        expect(sessionsSource).toContain('buildNativeMtpLaunchArgs({')
+        // The launch producer takes only mode/model default/external drafter.
+        const launchStart = sessionsSource.indexOf('args.push(...buildNativeMtpLaunchArgs({')
+        const launch = sessionsSource.slice(launchStart, launchStart + 400)
+        expect(launch).not.toContain('configuredDepth')
+        expect(launch).not.toContain('depthOverride')
+        expect(launch).not.toContain('autoSamplingPolicy')
         expect(sessionsSource).toContain('data?.mtp?.request_policy')
-        // Adoption recovers the live process's policy/depth through the shared
-        // helper; the old inline mapping turned an Auto session's own
-        // deterministic-defaults launch policy into UI 'deterministic', which
-        // the launcher re-emitted as greedy-only after restart.
         expect(sessionsSource).toContain('adoptNativeMtpConfig(proc, detectedFamily')
-        expect(sessionsSource).not.toContain("proc.nativeMtpSamplingPolicy === 'deterministic-defaults'")
         expect(sessionsSource).toContain('data?.mtp?.depth_policy')
         expect(sessionsSource).toContain('data?.mtp?.effective_depth')
         expect(serverTypesSource).toContain("nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only' | 'disabled'")
         expect(serverTypesSource).toContain("nativeMtpDepthPolicy?: 'fixed' | 'adaptive'")
+        expect(serverTypesSource).toContain("nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'")
         expect(formSource).toContain('Native MTP')
-        expect(formSource).toContain('nativeMtpMode')
-        expect(formSource).toContain('nativeMtpDepth')
-        expect(formSource).toContain('nativeMtpDepthPolicy')
+        expect(formSource).toContain('settingKey="nativeMtpMode"')
+        expect(formSource).not.toContain('settingKey="nativeMtpDepth"')
+        expect(formSource).not.toContain('nativeMtpDepthPolicy')
     })
 })
 
@@ -2281,7 +2279,7 @@ describe('Additional Arguments', () => {
         const sessionsSource = readFileSync('src/main/sessions.ts', 'utf8')
         const settingsSource = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
         for (const source of [sessionsSource, settingsSource]) {
-            expect(source).toContain("'--native-mtp-depth'")
+            expect(source).toContain("'--native-mtp-depth-policy'")
             expect(source).toContain("'--native-mtp-sampling-policy'")
             expect(source).toContain("'--disable-native-mtp'")
             expect(source).toContain("'--dsv4-enable-prefix-cache'")
@@ -2386,7 +2384,9 @@ describe('No Hardcoded Values', () => {
         expect(getFlagValue(out, '--max-tokens')).toBeUndefined()
         expect(getFlagValue(out, '--max-prompt-tokens')).toBeUndefined()
         expect(getFlagValue(out, '--num-draft-tokens')).toBeUndefined()
-        expect(getFlagValue(out, '--native-mtp-depth')).toBe('3')
+        // Retired fixed-depth keys never reach argv.
+        expect(hasFlag(out, '--native-mtp-depth ')).toBe(false)
+        expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
     })
 
     it('floors positive decimal output/context launch overrides in the UI preview', () => {
@@ -4579,7 +4579,7 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         'smelt', 'smeltExperts', 'flashMoe', 'flashMoeSlotBank', 'flashMoePrefetch', 'flashMoeIoSplit',
         'defaultTemperature', 'defaultTopP', 'defaultTopK', 'defaultMinP', 'defaultRepetitionPenalty', 'defaultMaxNewTokens', 'defaultEnableThinking',
         'dsv4PrefixCache', 'dsv4PoolQuant',
-        'nativeMtpMode', 'nativeMtpDepth', 'nativeMtpDepthOverride',
+        'nativeMtpMode',
         'embeddingModel', 'additionalArgs',
         'enableJit', 'logLevel', 'corsOrigins', 'maxContextLength',
         'chatTemplate', 'imageTokenBudget', 'videoFps', 'videoMaxFrames',
@@ -4841,8 +4841,9 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         const hydration = readFileSync('src/shared/chatSettingsHydration.ts', 'utf8')
         const toolbar = readFileSync('src/renderer/src/components/layout/ChatModeToolbar.tsx', 'utf8')
         const sessionView = readFileSync('src/renderer/src/components/sessions/SessionView.tsx', 'utf8')
-        expect(hydration).toContain('applyEffectiveSessionGenerationDefaults(')
-        expect(hydration).toContain('detected?.nativeMtp')
+        // Adaptive MTP never rewrites displayed defaults; hydration shows the
+        // bundle/engine defaults as they are.
+        expect(hydration).not.toContain('applyEffectiveSessionGenerationDefaults(')
         expect(source).toContain('session.config')
         expect(toolbar).toContain('config: displaySession.config')
         expect(sessionView).toContain('config: session.config')

@@ -49,7 +49,7 @@ describe('Console settings and responsive layout contract', () => {
     expect(form).not.toContain('DistributedNodeList')
     expect(form).toContain('data-vmlx-section="retired-distributed"')
     expect(form).toContain("onChange('distributedEnabled', false)")
-    for (const field of ['maxNumSeqs', 'prefillBatchSize', 'blockDiskCacheMaxPercent', 'videoFps', 'videoMaxFrames', 'videoMaxPixels', 'videoTokenBudget', 'nativeMtpMode', 'nativeMtpDepth', 'streamInterval', 'maxTokens', 'maxContextLength']) {
+    for (const field of ['maxNumSeqs', 'prefillBatchSize', 'blockDiskCacheMaxPercent', 'videoFps', 'videoMaxFrames', 'videoMaxPixels', 'videoTokenBudget', 'nativeMtpMode', 'streamInterval', 'maxTokens', 'maxContextLength']) {
       expect(form).toContain(`settingKey="${field}"`)
     }
     expect(form).toContain('nativeMtpDetected &&')

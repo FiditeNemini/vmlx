@@ -642,30 +642,23 @@ const nativeMtpModeOverride = (
   || process.env.VMLX_REAL_UI_NATIVE_MTP_MODE
   || ''
 ).trim().toLowerCase() || undefined
-const nativeMtpDepthOverride = envNumber('VMLINUX_REAL_UI_NATIVE_MTP_DEPTH')
+// The product exposes exactly two Native MTP modes: 'adaptive' and 'off'.
+// A fixed D1-D3 depth is an engine benchmark lever the app never emits, so the
+// real-UI harness no longer accepts a depth override.
 if (
   nativeMtpModeOverride
-  && !['auto', 'deterministic', 'off'].includes(nativeMtpModeOverride)
+  && !['adaptive', 'off'].includes(nativeMtpModeOverride)
 ) {
   throw new Error(
-    'Real UI Native MTP mode must be auto, deterministic, or off',
+    'Real UI Native MTP mode must be adaptive or off',
   )
 }
-if (
-  nativeMtpDepthOverride != null
-  && (
-    !Number.isInteger(nativeMtpDepthOverride)
-    || nativeMtpDepthOverride < 1
-    || nativeMtpDepthOverride > 3
-  )
-) {
-  throw new Error('Real UI Native MTP depth must be an integer from 1 through 3')
-}
-if (nativeMtpDepthOverride != null && nativeMtpModeOverride === 'off') {
+if (process.env.VMLINUX_REAL_UI_NATIVE_MTP_DEPTH || process.env.VMLX_REAL_UI_NATIVE_MTP_DEPTH) {
   throw new Error(
-    'Real UI fixed Native MTP depth cannot be combined with MTP Off',
+    'Real UI Native MTP depth is no longer a product control; use VMLINUX_REAL_UI_NATIVE_MTP_MODE=adaptive|off',
   )
 }
+const nativeMtpDepthOverride = null
 const blockDiskCacheMaxPercentOverride = envNumber(
   'VMLINUX_REAL_UI_BLOCK_DISK_CACHE_MAX_PERCENT',
 )
@@ -4937,18 +4930,13 @@ export function validateGenerationDefaultsEvidence(result) {
     : [])
     .filter((record) => record?.values && typeof record.values === 'object')
   const explicit = result?.requestContract?.samplingOverrides || {}
-  const persistedNativeMtpMode = result?.nativeMtpSelection?.persistedMode
-    ?? result?.effectiveSessionConfig?.nativeMtpMode
-    ?? result?.serverCacheControls?.persistedConfig?.nativeMtpMode
-    ?? 'auto'
-  const nativeMtpGreedy = result?.server?.health?.mtp?.runtime_active === true
-    && ['auto', 'deterministic'].includes(persistedNativeMtpMode)
-  if (nativeMtpGreedy) {
-    const expectedPolicy = persistedNativeMtpMode === 'deterministic'
-      ? 'greedy-only' : 'deterministic-defaults'
-    if (result.server.health.mtp.request_policy !== expectedPolicy) {
-      failures.push('Native MTP sampling policy does not match the persisted session mode')
-    }
+  // Adaptive MTP never pins the sampler: an active runtime must report the
+  // compatible-only request policy and the bundle/explicit sampler must be
+  // what the UI shows and the request carries.
+  const nativeMtpGreedy = false
+  if (result?.server?.health?.mtp?.runtime_active === true
+    && result.server.health.mtp.request_policy !== 'compatible-only') {
+    failures.push('Native MTP runtime is active but the engine request policy is not compatible-only')
   }
   const explicitFields = Object.entries(explicit).filter(([, value]) => value != null)
   const turnEvidence = Array.isArray(result?.uiTurnEvidence)
@@ -5548,9 +5536,14 @@ export function validateNativeMtpSurfaceParity(result) {
       failures.push('engine reports MTP weights in the bundle but the UI rendered no Native MTP mode selector')
     }
     const options = Array.isArray(surface.modeOptions) ? surface.modeOptions.map(String) : []
-    for (const mode of ['auto', 'deterministic', 'off']) {
+    for (const mode of ['adaptive', 'off']) {
       if (options.length && !options.includes(mode)) {
         failures.push(`Native MTP mode selector is missing the ${mode} option`)
+      }
+    }
+    for (const legacy of ['auto', 'deterministic']) {
+      if (options.includes(legacy)) {
+        failures.push(`Native MTP mode selector still offers the retired ${legacy} option`)
       }
     }
     if (mtp.runtime_active === true && surface.blockedFallbackNoticeShown === true) {
@@ -5574,32 +5567,8 @@ export function validateNativeMtpSurfaceParity(result) {
       failures.push(`running-session Native MTP mode ${surface?.selectedMode || 'missing'} did not match requested ${requestedMode}`)
     }
   }
-  if (requestedDepth != null) {
-    if (selection?.selectedDepthPolicy !== 'fixed') {
-      failures.push('visible Native MTP depth policy was not fixed before Start')
-    }
-    if (Number(selection?.selectedDepth) !== Number(requestedDepth)) {
-      failures.push(`visible Native MTP depth ${selection?.selectedDepth ?? 'missing'} did not match requested D${requestedDepth}`)
-    }
-    if (
-      selection?.persistedDepthOverride !== true
-      || Number(selection?.persistedDepth) !== Number(requestedDepth)
-    ) {
-      failures.push(`persisted Native MTP depth did not retain fixed D${requestedDepth}`)
-    }
-    if (
-      result?.effectiveSessionConfig?.nativeMtpDepthOverride !== true
-      || Number(result?.effectiveSessionConfig?.nativeMtpDepth) !== Number(requestedDepth)
-    ) {
-      failures.push(`started session did not retain fixed Native MTP D${requestedDepth}`)
-    }
-    if (mtp.runtime_active !== true) {
-      failures.push(`requested fixed Native MTP D${requestedDepth} but /health did not report the runtime active`)
-    }
-    if (Number(mtp.effective_depth) !== Number(requestedDepth)) {
-      failures.push(`/health Native MTP effective depth ${mtp.effective_depth ?? 'missing'} did not match requested D${requestedDepth}`)
-    }
-  }
+  // requestedDepth: retired (no product depth control).
+  void requestedDepth
   return failures
 }
 
@@ -10060,14 +10029,14 @@ async function main() {
               .find((label) => (
                 (label.innerText || '').replace(/\\s+/g, ' ').trim().startsWith(text)
               ));
-            if (!labelFor('Native MTP Mode')) {
+            if (!labelFor('Native MTP')) {
               if (!(nativeSectionButton instanceof HTMLButtonElement)) {
                 throw new Error('Visible Native MTP section was not available before Start');
               }
               nativeSectionButton.scrollIntoView({ block: 'center' });
               nativeSectionButton.click();
               await waitFor(
-                () => labelFor('Native MTP Mode') || null,
+                () => labelFor('Native MTP') || null,
                 'visible Native MTP controls before Start',
               );
             }
@@ -10095,27 +10064,6 @@ async function main() {
             if (requestedMode != null) {
               await setSelect('Native MTP Mode', requestedMode);
             }
-            if (requestedDepth != null) {
-              await setSelect('MTP Depth Policy', 'fixed');
-              const depthSetting = preDrawer?.querySelector(
-                '[data-setting-label="Native MTP Depth"]'
-              );
-              const depthInput = depthSetting?.querySelector('input[type="range"]');
-              if (!(depthInput instanceof HTMLInputElement) || depthInput.disabled) {
-                throw new Error('Visible Native MTP Depth control was not editable');
-              }
-              const setter = Object.getOwnPropertyDescriptor(
-                HTMLInputElement.prototype,
-                'value',
-              )?.set;
-              setter?.call(depthInput, String(requestedDepth));
-              depthInput.dispatchEvent(new Event('input', { bubbles: true }));
-              depthInput.dispatchEvent(new Event('change', { bubbles: true }));
-              await waitFor(
-                () => Number(depthSetting?.getAttribute('data-setting-value')) === requestedDepth,
-                'visible Native MTP depth to update',
-              );
-            }
             const saveCandidates = [...(preDrawer?.querySelectorAll('button') || [])]
               .filter((button) => /^(save|save & restart|save and restart)$/i.test(
                 (button.innerText || '').replace(/\\s+/g, ' ').trim(),
@@ -10139,32 +10087,13 @@ async function main() {
                 'Native MTP mode did not persist: ' + (persisted.nativeMtpMode || 'missing')
               );
             }
-            if (
-              requestedDepth != null
-              && (
-                persisted.nativeMtpDepthOverride !== true
-                || Number(persisted.nativeMtpDepth) !== requestedDepth
-              )
-            ) {
-              throw new Error(
-                'Native MTP fixed depth did not persist: override='
-                  + persisted.nativeMtpDepthOverride
-                  + ' depth=' + persisted.nativeMtpDepth
-              );
-            }
             nativeMtpSelection = {
               requested: true,
               requestedMode,
               requestedDepth,
-              selectedMode: labelFor('Native MTP Mode')?.querySelector('select')?.value || null,
-              selectedDepthPolicy: labelFor('MTP Depth Policy')?.querySelector('select')?.value || null,
-              selectedDepth: Number(preDrawer?.querySelector(
-                '[data-setting-label="Native MTP Depth"]'
-              )?.getAttribute('data-setting-value')),
+              selectedMode: labelFor('Native MTP')?.querySelector('select')?.value || null,
               savedVia: (plainSave.innerText || '').trim(),
               persistedMode: persisted.nativeMtpMode ?? null,
-              persistedDepthOverride: persisted.nativeMtpDepthOverride === true,
-              persistedDepth: persisted.nativeMtpDepth ?? null,
             };
             sessionBeforeStart = reread;
           }
@@ -10766,22 +10695,10 @@ async function main() {
               && current.disabled
               && current.getAttribute('data-vmlx-state') === 'saved';
           }, 'Chat Settings save completion');
-          // Auto and Deterministic both start with greedy defaults. Auto
-          // still honors explicit per-chat sampling through stochastic MTP;
-          // Deterministic enforces greedy values and disables those sliders.
-          const persistedNativeMtpMode = nativeMtpSelection?.persistedMode
-            ?? (() => {
-              try {
-                return JSON.parse(sessionBeforeStart?.config || '{}').nativeMtpMode;
-              } catch (_) {
-                return null;
-              }
-            })();
-          const nativeMtpGreedyUi =
-            preloadHealthBefore?.mtp?.runtime_active === true
-            && ['auto', 'deterministic'].includes(persistedNativeMtpMode ?? 'auto');
-          const explicitUiSampling = persistedNativeMtpMode === 'deterministic'
-            ? {} : samplingOverrides;
+          // Adaptive MTP never pins the sampler: the UI shows the explicit
+          // chat overrides or the bundle defaults, whatever the MTP mode.
+          const nativeMtpGreedyUi = false;
+          const explicitUiSampling = samplingOverrides;
           const expectedUiValues = {
             Temperature: explicitUiSampling.temperature
               ?? (nativeMtpGreedyUi ? 0 : independentBundleDefaults?.temperature),

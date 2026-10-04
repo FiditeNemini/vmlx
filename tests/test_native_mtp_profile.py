@@ -528,7 +528,11 @@ class TestSeedPathIntegration:
         assert state.depth == 3
         assert state.stats.profile_seed == "qwen4_exp_measured_cold_start_d3"
 
-    def test_qwen4_sampled_profile_does_not_trust_coarse_tuning(self, monkeypatch):
+    def test_qwen4_sampled_profile_seeds_measured_cold_start_not_tuning(self, monkeypatch):
+        """A sampled (bundle-sampler) request on Flash-Next seeds at the
+        measured cold start, never through a coarse greedy tuning sidecar.
+        Adaptive MTP launches with compatible-only sampling, so this is the
+        ordinary chat shape; keeping it on AR made Adaptive behave as AR."""
         from vmlx_engine import native_mtp
 
         generator, req, first_token = self._build_generator(monkeypatch)
@@ -540,6 +544,21 @@ class TestSeedPathIntegration:
             lambda: (2, "vmlx_mtp_tuning.json:best_depth"),
         )
 
+        assert generator._seed_native_mtp_from_prefill(
+            req, [object()], first_token, [None]
+        ) is True
+        state = req._native_mtp_state
+        assert state.depth == 2
+        assert state.stats.profile_seed == "qwen4_exp_measured_cold_start_d2"
+        assert state.stats.profile_key_label.startswith("sampled|")
+
+    def test_qwen4_sampled_profile_stays_ar_without_rejection_sampling(self, monkeypatch):
+        from vmlx_engine import mllm_batch_generator as gen
+
+        generator, req, first_token = self._build_generator(monkeypatch)
+        generator._model_type = "qwen4_exp"
+        req.temperature = 1.0
+        monkeypatch.setattr(gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", False)
         assert generator._seed_native_mtp_from_prefill(
             req, [object()], first_token, [None]
         ) is False
@@ -589,3 +608,31 @@ class TestStateIntegration:
         )
         assert payload["profile_seed"] == "profile_validated_d2"
         assert payload["profile_key"] == "greedy|False|short|False"
+
+
+class TestUnseenStartDepthPolicy:
+    """Adaptive MTP must seed unseen Flash-Next profiles — greedy AND sampled —
+    at the ceiling; the AR-safety valve, not an AR start, owns protection."""
+
+    def test_qwen4_exp_greedy_and_sampled_seed_at_depth(self, monkeypatch):
+        from vmlx_engine import mllm_batch_generator as gen
+
+        monkeypatch.setattr(gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", True)
+        assert gen._native_mtp_unseen_start_depth("qwen4_exp", sampled_profile=False, depth=3) == 3
+        assert gen._native_mtp_unseen_start_depth("qwen4_exp", sampled_profile=True, depth=3) == 3
+        assert gen._native_mtp_unseen_start_depth("QWEN4_EXP", sampled_profile=True, depth=2) == 2
+
+    def test_sampled_stays_ar_without_rejection_sampling(self, monkeypatch):
+        from vmlx_engine import mllm_batch_generator as gen
+
+        monkeypatch.setattr(gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", False)
+        assert gen._native_mtp_unseen_start_depth("qwen4_exp", sampled_profile=True, depth=3) is None
+        assert gen._native_mtp_unseen_start_depth("qwen4_exp", sampled_profile=False, depth=3) == 3
+
+    def test_other_families_keep_unseen_ar(self, monkeypatch):
+        from vmlx_engine import mllm_batch_generator as gen
+
+        monkeypatch.setattr(gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", True)
+        for family in ("qwen3_5", "glm5_next", "hy_v3", None, ""):
+            assert gen._native_mtp_unseen_start_depth(family, sampled_profile=False, depth=3) is None
+            assert gen._native_mtp_unseen_start_depth(family, sampled_profile=True, depth=3) is None

@@ -1,23 +1,19 @@
+import { normalizeNativeMtpMode } from './nativeMtpLaunchArgs'
+
 /**
- * Explain how the selected native-MTP mode affects sampling.
+ * Explain how Adaptive MTP relates to the displayed sampling temperature.
  *
- * Auto uses greedy startup defaults but honors explicit request sampling.
- * Deterministic intentionally pins greedy values for every request.
- * Off preserves sampling too, but disables native MTP entirely.
- *
- * States worth surfacing, all keyed on the model ACTUALLY having MTP:
- *  - `default`  Auto currently shows greedy, without enforcing it.
- *  - `pinned`   Deterministic mode forces greedy sampling.
- *  - `active`   Auto mode is using the displayed sampling temperature.
- *  - `inactive` a stale nonzero value contradicts Deterministic mode.
+ * Adaptive MTP never changes the sampler: greedy requests verify by identity,
+ * sampled requests verify by rejection sampling. The only thing worth telling
+ * the user is therefore that a nonzero temperature is honored and verified
+ * stochastically. Off and non-MTP bundles say nothing.
  */
 
-export type MtpTemperatureNoticeKind = 'default' | 'pinned' | 'active' | 'inactive'
+export type MtpTemperatureNoticeKind = 'active'
 
 export interface MtpTemperatureNotice {
   kind: MtpTemperatureNoticeKind
-  /** The temperature that caused an `inactive` verdict. */
-  temperature?: number
+  temperature: number
 }
 
 export interface MtpTemperatureNoticeInput {
@@ -25,52 +21,45 @@ export interface MtpTemperatureNoticeInput {
   isRemote?: boolean
   /** True only when the bundle really carries native MTP heads. */
   nativeMtpSupported: boolean
-  /** Session `nativeMtpMode`: 'auto' | 'deterministic' | 'off'. */
+  /** Session `nativeMtpMode` (new or legacy spelling). */
   mode: string | undefined
+  /** Bundle-level measured default from model detection. */
+  modelDefaultMode?: 'auto' | 'off'
   /** Effective temperature shown in the box. */
   temperature: number | undefined
 }
 
 /**
- * Read `nativeMtpMode` out of a session config (stored as a JSON string).
- * Anything unreadable or absent means the app default, which is `auto`.
+ * Read `nativeMtpMode` out of a session config (stored as a JSON string) and
+ * normalize legacy spellings. Absent/unreadable means "not chosen".
  */
 export function parseSessionNativeMtpMode(
   sessionConfig: string | Record<string, unknown> | undefined,
-): string {
-  if (!sessionConfig) return 'auto'
+): 'adaptive' | 'off' | undefined {
+  if (!sessionConfig) return undefined
   let parsed: unknown = sessionConfig
   if (typeof sessionConfig === 'string') {
     try {
       parsed = JSON.parse(sessionConfig)
     } catch {
-      return 'auto'
+      return undefined
     }
   }
-  if (!parsed || typeof parsed !== 'object') return 'auto'
-  const mode = (parsed as Record<string, unknown>).nativeMtpMode
-  return typeof mode === 'string' && mode ? mode : 'auto'
+  if (!parsed || typeof parsed !== 'object') return undefined
+  return normalizeNativeMtpMode((parsed as Record<string, unknown>).nativeMtpMode)
 }
 
 export function resolveMtpTemperatureNotice(
   input: MtpTemperatureNoticeInput,
 ): MtpTemperatureNotice | null {
-  // No MTP heads -> temperature has nothing to do with MTP. Say nothing.
   if (input.isRemote || !input.nativeMtpSupported) return null
-
-  const mode = typeof input.mode === 'string' && input.mode ? input.mode : 'auto'
-  // Explicitly disabled by the user: temperature is unrelated to MTP.
+  const mode = input.mode === 'off'
+    ? 'off'
+    : input.mode === 'adaptive' || input.mode === 'deterministic'
+      ? 'adaptive'
+      : input.modelDefaultMode === 'off' ? 'off' : 'adaptive'
   if (mode === 'off') return null
-
   const temperature = input.temperature
-  if (temperature == null) return null
-  if (mode === 'deterministic') {
-    if (temperature > 0) return { kind: 'inactive', temperature }
-    return { kind: 'pinned' }
-  }
-  // Auto launches with the deterministic-defaults policy: the STARTUP
-  // DEFAULT is pinned to greedy, but an explicit nonzero temperature the
-  // user set is still honored by the engine (API kwargs win).
-  if (temperature > 0) return { kind: 'active', temperature }
-  return { kind: 'default' }
+  if (temperature == null || !(temperature > 0)) return null
+  return { kind: 'active', temperature }
 }

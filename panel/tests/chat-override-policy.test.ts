@@ -712,10 +712,10 @@ describe('new-chat override inheritance policy', () => {
       'utf8',
     )
 
-    // Deterministic native-MTP enforcement can pin the displayed value; the
-    // user/model fallback chain is the ternary's non-enforced arm.
-    expect(source).toContain('const displayedTopKValue = mtpGreedyEnforced')
-    expect(source).toContain(': displayedOverrides.topK ?? displayedModelDefaults.topK')
+    // Adaptive MTP never pins the displayed sampler: the user/model fallback
+    // chain is the whole expression.
+    expect(source).toContain('const displayedTopKValue = displayedOverrides.topK ?? displayedModelDefaults.topK')
+    expect(source).not.toContain('mtpGreedyEnforced')
     expect(source).toContain('Math.max(0, Math.round(displayedTopKValue))')
     expect(source).toContain('const topKSliderMax = Math.min(')
     expect(source).toContain('Math.max(CHAT_TOP_K_SLIDER_DEFAULT_MAX, displayedTopK ?? 0)')

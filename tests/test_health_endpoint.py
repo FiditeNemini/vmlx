@@ -1850,3 +1850,41 @@ class TestHealthBusySnapshot:
             assert result["model_loaded"] is True
         finally:
             server._health_snapshot_cache["result"] = None
+
+
+class TestNativeMtpHealthMode:
+    """`/health` publishes the product's two-mode MTP contract.
+
+    The app exposes exactly "AR (MTP off)" and "Adaptive MTP"; the panel labels
+    the live state from `mtp.mode` instead of inferring it from argv. "fixed"
+    exists only when a benchmark pins --native-mtp-depth-policy fixed.
+    """
+
+    def _status(self, monkeypatch, env):
+        from vmlx_engine import server
+
+        for name in (
+            "VMLINUX_NATIVE_MTP", "VMLX_NATIVE_MTP",
+            "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        with patch.object(server, "_model_mtp_status", return_value={"status": "native_runtime_ready", "runtime_available": True}):
+            with patch.object(server, "_get_raw_model_from_engine", return_value=None):
+                return server._model_mtp_status_with_loaded_runtime(None)
+
+    def test_default_is_adaptive(self, monkeypatch):
+        status = self._status(monkeypatch, {})
+        assert status["mode"] == "adaptive"
+        assert status["depth_policy"] == "adaptive"
+
+    def test_disabled_reports_ar(self, monkeypatch):
+        status = self._status(monkeypatch, {"VMLINUX_NATIVE_MTP": "0"})
+        assert status["mode"] == "ar"
+        assert status["request_policy"] == "disabled"
+
+    def test_benchmark_fixed_override_is_visible_not_hidden(self, monkeypatch):
+        status = self._status(monkeypatch, {"VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH": "0"})
+        assert status["mode"] == "fixed"
+        assert status["depth_policy"] == "fixed"

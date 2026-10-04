@@ -514,17 +514,12 @@ function buildCommandPreview(
     }
   }
 
-  // Native in-model MTP mirrors sessions.ts. Auto preserves bundle sampling;
-  // Deterministic alone pins omitted request sampling to greedy defaults.
+  // Native in-model MTP mirrors sessions.ts, including adopted sampling policy.
   const nativeMtp = detected?.nativeMtp
   if (!dsv4Active && nativeMtp?.supported) {
-    const mode = (config as any).nativeMtpMode || 'auto'
     parts.push(...buildNativeMtpLaunchArgs({
       supported: true,
-      detectedDepth: nativeMtp.depth,
-      configuredDepth: (config as any).nativeMtpDepth,
-      depthOverride: (config as any).nativeMtpDepthOverride === true,
-      mode,
+      mode: (config as any).nativeMtpMode,
       modelDefaultMode: nativeMtp.defaultMode,
       externalSpeculativeActive: compatibleExternalSpeculative,
     }))
@@ -744,7 +739,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         const detected = await window.api.models.detectConfig(session.modelPath)
         if (!resetStillCurrent()) return
         if (detected && detected.family !== 'unknown') {
-          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family)
+          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family, undefined, detected.nativeMtp?.defaultMode)
           // Reset restores model-derived Auto, not a sticky explicit On/Off.
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {

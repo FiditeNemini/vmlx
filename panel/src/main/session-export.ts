@@ -19,7 +19,7 @@ const SERVER_SETTINGS = [
   'enableThinking', 'thinkingMode', 'reasoningEffort', 'imageTokenBudget', 'videoFps', 'videoMaxFrames',
   'videoMaxPixels', 'videoTokenBudget',
   // These are requested execution controls, not a claim that an accelerator ran.
-  'nativeMtpMode', 'nativeMtpDepth', 'nativeMtpDepthOverride',
+  'nativeMtpMode',
   'speculativeModel', 'numDraftTokens', 'omniBackend', 'enableJit',
 ] as const
 

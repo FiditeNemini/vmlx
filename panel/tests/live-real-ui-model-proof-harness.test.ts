@@ -575,10 +575,10 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).toContain(
       "current.getAttribute('data-vmlx-state') === 'saved'",
     );
-    expect(harnessSource).toContain(
-      'const persistedNativeMtpMode = nativeMtpSelection?.persistedMode',
-    );
-    expect(harnessSource).toContain("['auto', 'deterministic'].includes(persistedNativeMtpMode ?? 'auto')");
+    // Adaptive MTP never pins the sampler; the harness must not expect greedy
+    // UI values from the MTP mode any more.
+    expect(harnessSource).toContain('const nativeMtpGreedyUi = false;');
+    expect(harnessSource).not.toContain("['auto', 'deterministic'].includes(");
     expect(harnessSource).toContain("'Top P': explicitUiSampling.topP");
     expect(harnessSource).toContain("'Top K': explicitUiSampling.topK");
     expect(harnessSource).toContain("'Min P': explicitUiSampling.minP");
@@ -3792,50 +3792,27 @@ describe("real UI model proof harness", () => {
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
   });
 
-  it.each(["auto", "deterministic"])("grades Native-MTP %s effective greedy startup values separately from bundle defaults", (mode) => {
+  it("requires an active Native MTP runtime to report the compatible-only sampling policy", () => {
     const result = structuredClone(goodResult());
     result.server.health.mtp.runtime_active = true;
-    result.nativeMtpSelection = { persistedMode: mode };
-    result.effectiveSessionConfig = { nativeMtpMode: mode };
-    result.server.health.mtp.request_policy = mode === "auto" ? "deterministic-defaults" : "greedy-only";
-    result.server.health.effective_defaults = {
-      ...result.server.health.effective_defaults, temperature: 0, top_p: 1, top_k: 0, min_p: 0,
-    };
-    result.chatSettingsDom.values = {
-      ...result.chatSettingsDom.values,
-      temperature: 0,
-      topP: 1,
-      topK: 0,
-      minP: 0,
-    };
-    result.resolvedSamplingKwargs = {
-      ...result.resolvedSamplingKwargs,
-      temperature: 0,
-      top_p: 1,
-    };
-    delete result.resolvedSamplingKwargs.top_k;
-    delete result.resolvedSamplingKwargs.min_p;
-    for (const record of result.resolvedSamplingRecords) {
-      record.values = {
-        ...record.values,
-        temperature: 0,
-        top_p: 1,
-      };
-      delete record.values.top_k;
-      delete record.values.min_p;
-    }
+    result.nativeMtpSelection = { persistedMode: "adaptive" };
+    result.effectiveSessionConfig = { nativeMtpMode: "adaptive" };
+    result.server.health.mtp.request_policy = "compatible-only";
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+    for (const retired of ["deterministic-defaults", "greedy-only"]) {
+      result.server.health.mtp.request_policy = retired;
+      expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/compatible-only/);
+    }
   });
 
-  it("preserves explicit Auto sampling while checking greedy engine startup defaults", () => {
+  it("never expects greedy UI/engine defaults from the MTP mode: bundle sampling stays authoritative", () => {
     const result = structuredClone(goodResult());
     result.server.health.mtp.runtime_active = true;
-    result.server.health.mtp.request_policy = "deterministic-defaults";
-    result.nativeMtpSelection = { persistedMode: "auto" };
-    result.effectiveSessionConfig = { nativeMtpMode: "auto" };
-    result.server.health.effective_defaults = {
-      ...result.server.health.effective_defaults, temperature: 0, top_p: 1, top_k: 0, min_p: 0,
-    };
+    result.server.health.mtp.request_policy = "compatible-only";
+    result.nativeMtpSelection = { persistedMode: "adaptive" };
+    result.effectiveSessionConfig = { nativeMtpMode: "adaptive" };
+    // goodResult() already carries bundle-default sampling on every surface.
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
     const explicit = { temperature: 0.25, topP: 0.8, topK: 10, minP: 0.02 };
     result.requestContract.samplingOverrides = explicit;
     Object.assign(result.chatOverrides, explicit);
@@ -3844,11 +3821,6 @@ describe("real UI model proof harness", () => {
     Object.assign(result.resolvedSamplingKwargs, wire);
     for (const record of result.resolvedSamplingRecords) Object.assign(record.values, wire);
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
-    result.server.health.effective_defaults.temperature = 1;
-    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/effective startup default/);
-    result.server.health.effective_defaults.temperature = 0;
-    result.server.health.mtp.request_policy = "compatible-only";
-    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(/sampling policy/);
   });
 
   it("allows an exact one-token reasoning segment to arrive in one delta", () => {
@@ -6452,10 +6424,10 @@ describe("native MTP surface / engine parity", () => {
       nativeMtpControl: {
         labelVisible: true,
         labelText:
-          "Native MTP Mode ? Auto (detected MTP) Deterministic override Off",
+          "Native MTP ? Adaptive MTP AR (MTP off)",
         modeSelectPresent: true,
-        selectedMode: "auto",
-        modeOptions: ["auto", "deterministic", "off"],
+        selectedMode: "adaptive",
+        modeOptions: ["adaptive", "off"],
         blockedFallbackNoticeShown: false,
         mentionedInDrawer: true,
       },
@@ -6557,83 +6529,46 @@ describe("native MTP surface / engine parity", () => {
     },
   );
 
-  it("accepts a visibly selected and persisted fixed D2 runtime", () => {
+  it("accepts a visibly selected and persisted adaptive runtime", () => {
     const result: any = mtpBundleResult();
-    result.requestContract = {
-      nativeMtpMode: "deterministic",
-      nativeMtpDepth: 2,
-    };
+    result.requestContract = { nativeMtpMode: "adaptive" };
     result.nativeMtpSelection = {
       requested: true,
-      requestedMode: "deterministic",
-      requestedDepth: 2,
-      selectedMode: "deterministic",
-      selectedDepthPolicy: "fixed",
-      selectedDepth: 2,
-      persistedMode: "deterministic",
-      persistedDepthOverride: true,
-      persistedDepth: 2,
+      requestedMode: "adaptive",
+      selectedMode: "adaptive",
+      persistedMode: "adaptive",
     };
-    result.serverCacheControls.nativeMtpControl.selectedMode = "deterministic";
-    result.effectiveSessionConfig = {
-      nativeMtpMode: "deterministic",
-      nativeMtpDepthOverride: true,
-      nativeMtpDepth: 2,
-    };
+    result.serverCacheControls.nativeMtpControl.selectedMode = "adaptive";
+    result.effectiveSessionConfig = { nativeMtpMode: "adaptive" };
     expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
   });
 
-  it("accepts sampled Auto with a visibly selected and persisted fixed D3 runtime", () => {
+  it("accepts a visibly selected and persisted AR (off) runtime", () => {
     const result: any = mtpBundleResult();
-    result.requestContract = {
-      nativeMtpMode: "auto",
-      nativeMtpDepth: 3,
-    };
+    result.requestContract = { nativeMtpMode: "off" };
     result.nativeMtpSelection = {
       requested: true,
-      requestedMode: "auto",
-      requestedDepth: 3,
-      selectedMode: "auto",
-      selectedDepthPolicy: "fixed",
-      selectedDepth: 3,
-      persistedMode: "auto",
-      persistedDepthOverride: true,
-      persistedDepth: 3,
+      requestedMode: "off",
+      selectedMode: "off",
+      persistedMode: "off",
     };
-    result.serverCacheControls.nativeMtpControl.selectedMode = "auto";
-    result.effectiveSessionConfig = {
-      nativeMtpMode: "auto",
-      nativeMtpDepthOverride: true,
-      nativeMtpDepth: 3,
-    };
-    result.server.health.mtp.effective_depth = 3;
+    result.serverCacheControls.nativeMtpControl.selectedMode = "off";
+    result.effectiveSessionConfig = { nativeMtpMode: "off" };
     expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
   });
 
-  it("rejects a fixed D2 request that silently runs adaptive D1", () => {
+  it("rejects a requested mode that the UI or the persisted session silently changed", () => {
     const result: any = mtpBundleResult();
-    result.requestContract = {
-      nativeMtpMode: "deterministic",
-      nativeMtpDepth: 2,
-    };
+    result.requestContract = { nativeMtpMode: "off" };
     result.nativeMtpSelection = {
       requested: true,
-      selectedMode: "deterministic",
-      selectedDepthPolicy: "adaptive",
-      selectedDepth: 1,
-      persistedMode: "deterministic",
-      persistedDepthOverride: false,
-      persistedDepth: 1,
+      selectedMode: "adaptive",
+      persistedMode: "adaptive",
     };
-    result.serverCacheControls.nativeMtpControl.selectedMode = "deterministic";
-    result.effectiveSessionConfig = {
-      nativeMtpMode: "deterministic",
-      nativeMtpDepthOverride: false,
-      nativeMtpDepth: 1,
-    };
-    result.server.health.mtp.effective_depth = 1;
+    result.serverCacheControls.nativeMtpControl.selectedMode = "adaptive";
+    result.effectiveSessionConfig = { nativeMtpMode: "adaptive" };
     expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
-      /depth policy was not fixed|did not retain fixed D2|did not match requested D2/,
+      /did not match requested off/,
     );
   });
 
@@ -6660,11 +6595,15 @@ describe("native MTP surface / engine parity", () => {
     );
   });
 
-  it("rejects a mode selector missing one of the three modes", () => {
+  it("rejects a mode selector missing one of the two modes or still offering a retired one", () => {
     const result = mtpBundleResult();
-    result.serverCacheControls.nativeMtpControl.modeOptions = ["auto", "off"];
+    result.serverCacheControls.nativeMtpControl.modeOptions = ["adaptive"];
     expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
-      /missing the deterministic option/,
+      /missing the off option/,
+    );
+    result.serverCacheControls.nativeMtpControl.modeOptions = ["adaptive", "deterministic", "off"];
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
+      /retired deterministic option/,
     );
   });
 

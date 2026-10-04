@@ -283,7 +283,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         const detected = await window.api.models.detectConfig(session.modelPath)
         if (!resetStillCurrent()) return
         if (detected && detected.family !== 'unknown') {
-          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family)
+          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family, undefined, detected.nativeMtp?.defaultMode)
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true

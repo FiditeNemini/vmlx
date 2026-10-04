@@ -320,27 +320,16 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
       detectedFamily,
       detected.reasoningParser,
     )
-    // Flash Next now starts with MTP Off unless a mode was explicitly saved.
-    // Do not migrate an existing Auto/Deterministic/Off choice on restart.
-    if (effectiveFamily === 'qwen4-exp' && (config as any).nativeMtpMode === undefined) {
-      ;(config as any).nativeMtpMode = resolveNativeMtpStartupMode(effectiveFamily)
+    // Native MTP: fill ONLY a missing mode with the model-derived default
+    // (Adaptive, or AR for a bundle whose measured verifier declares
+    // defaultMode 'off'). An explicit saved choice always survives. Legacy
+    // depth/override/sampling keys are never written and never read.
+    const detectedNativeMtp = (detected as any).nativeMtp
+    if (detectedNativeMtp?.supported && (config as any).nativeMtpMode === undefined) {
+      ;(config as any).nativeMtpMode = resolveNativeMtpStartupMode(
+        effectiveFamily, undefined, detectedNativeMtp.defaultMode,
+      )
       changed = true
-    }
-    // Native MTP ceiling: FIXED depth 3 for the Qwen3.8 MTP families
-    // (Flash-Next qwen4-exp — every JANG tier and CRACK variant — and the
-    // Qwen3.8-27B qwen3.5 D-series). Adaptive proved a wrong default for
-    // fresh sessions. Flash Next's Off mode leaves this ceiling dormant until
-    // the user opts in. Fill ONLY missing values: an explicit user
-    // choice (including turning the override off) always survives.
-    if (effectiveFamily === 'qwen4-exp' || effectiveFamily === 'qwen3.5') {
-      if ((config as any).nativeMtpDepthOverride === undefined) {
-        ;(config as any).nativeMtpDepthOverride = true
-        changed = true
-      }
-      if ((config as any).nativeMtpDepth === undefined) {
-        ;(config as any).nativeMtpDepth = 3
-        changed = true
-      }
     }
     if (
       effectiveFamily === 'deepseek-v4' &&
@@ -3854,7 +3843,7 @@ export class SessionManager extends EventEmitter {
     'mcpEnabledServers', 'mcpDisabledServers', 'mcpEnabledTools', 'mcpDisabledTools',
     'servedModelName',
     'speculativeModel', 'numDraftTokens', 'smelt', 'smeltExperts',
-    'nativeMtpMode', 'nativeMtpDepth', 'nativeMtpDepthOverride',
+    'nativeMtpMode',
     'omniBackend',
     'flashMoe', 'flashMoeSlotBank', 'flashMoePrefetch', 'flashMoeIoSplit',
     'distributedEnabled', 'distributedMode', 'distributedSecret',
@@ -4151,12 +4140,8 @@ export class SessionManager extends EventEmitter {
           dsv4ActivationQat: false,
           defaultEnableThinking: undefined,
           ...(() => {
-            const adopted = adoptNativeMtpConfig(proc, detectedFamily, (detected as any).nativeMtp?.depth)
-            return {
-              nativeMtpMode: adopted.nativeMtpMode,
-              nativeMtpDepth: adopted.nativeMtpDepth,
-              nativeMtpDepthOverride: adopted.nativeMtpDepthOverride,
-            }
+            const adopted = adoptNativeMtpConfig(proc, detectedFamily, (detected as any).nativeMtp?.defaultMode)
+            return { nativeMtpMode: adopted.nativeMtpMode }
           })(),
           enableAutoToolChoice: detected.enableAutoToolChoice
         }
@@ -4179,8 +4164,14 @@ export class SessionManager extends EventEmitter {
         }
         db.createSession(session)
       } else {
-        // Update existing session with live process info (also normalize stored path)
+        // Update existing session with live process info (also normalize stored
+        // path). Saved and pending configs are preserved verbatim: the only
+        // MTP setting is the mode, and the saved row already owns it.
+        const adoptedConfig = session.config
+        const adoptedPendingConfig = session.pendingConfig
         db.updateSession(session.id, {
+          config: adoptedConfig,
+          pendingConfig: adoptedPendingConfig,
           status: adoptStatus,
           standbyDepth: adoptStandbyDepth,
           pid: proc.pid,
@@ -5485,13 +5476,13 @@ export class SessionManager extends EventEmitter {
     }
 
     // Native in-model MTP. This is separate from external speculative decoding:
-    // Qwen preserved-MTP bundles carry their own draft head. Auto preserves the
-    // request/bundle sampler and uses rejection-sampling verification for
-    // stochastic requests. Deterministic is the explicit greedy fast path.
-    // Off restores ordinary AR with the same request/bundle sampler.
+    // preserved-MTP bundles carry their own draft head. Adaptive runs the
+    // engine's measured ladder (ceiling -> D1 -> AR with re-entry) and keeps
+    // the request/bundle sampler (identity verify for greedy, rejection
+    // sampling for stochastic). Off is ordinary AR with the same sampler.
     const nativeMtp = (detected as any).nativeMtp
     if (!dsv4Active && nativeMtp?.supported) {
-      const mode = (config as any).nativeMtpMode || 'auto'
+      const mode = (config as any).nativeMtpMode
       if (compatibleExternalSpeculative) {
         // An external drafter and the bundle's own MTP heads are two
         // speculative decoders bidding for the same decode step. Shipping both
@@ -5509,15 +5500,10 @@ export class SessionManager extends EventEmitter {
       }
       args.push(...buildNativeMtpLaunchArgs({
         supported: true,
-        detectedDepth: nativeMtp.depth,
-        configuredDepth: (config as any).nativeMtpDepth,
-        depthOverride: (config as any).nativeMtpDepthOverride === true,
         mode,
         modelDefaultMode: nativeMtp.defaultMode,
         externalSpeculativeActive: compatibleExternalSpeculative,
       }))
-      // Auto emits `compatible-only`; Deterministic emits `greedy-only`.
-      // Depth remains independently adaptive unless the user selects Fixed.
     }
 
     // Generation defaults are intentionally not passed as --default-* from the

@@ -25,6 +25,8 @@ from .format import codebook
 import os
 
 SORT_THRESHOLD = 64
+# generic fused weighted unsort for prefill (any D / k; fp32 accumulate). JANGH_WEIGHTED_UNSORT=0 to disable.
+from .runtime_identity import WEIGHTED_UNSORT  # default off; Qwen opts in per module
 ROTATIONS = ("none", "hadamard32")
 # Where decode applies the Hadamard-32: "host" = once per activation row (x once per token, h once per expert-token)
 # then the unrotated fast kernels; "kernel" = in-register inside every threadgroup (redundant: measured 1.05-1.15x).
@@ -64,7 +66,7 @@ def rotate_rows(x: mx.array, lin: TQSwitchLinear) -> mx.array:
     """Host-side activation rotation (prefill path): blockwise normalized Hadamard-32 in float32, back to x.dtype."""
     if not lin.rotated:
         return x
-    if H32_ROWS == "1":
+    if H32_ROWS == "1" or getattr(lin, "use_h32_rows", False):
         # Preserve the existing output dtype and rounding boundary.
         return K.h32_rows(x, x.dtype)
     shp = x.shape
@@ -132,6 +134,10 @@ class TQSwitchGLU(nn.Module):
             fused = K.prefill_weighted_unsort(y, inv, scores, enabled=PREFILL_REDUCE == "1")
             if fused is not None:
                 return fused
+            if WEIGHTED_UNSORT == "1" or getattr(self, "use_weighted_unsort", False):
+                fused = K.weighted_unsort(y, inv, scores)
+                if fused is not None:
+                    return fused
             y = y[inv].reshape(x.shape[0], kk, y.shape[-1])
             return (y * scores[..., None].astype(y.dtype)).sum(axis=-2)
         return y[inv]
@@ -164,6 +170,9 @@ class TQSwitchGLU(nn.Module):
                     raise ValueError("JANGH routed indices/scores shape differs from input rows")
                 y = self._prefill(x.reshape(-1, D), indices.reshape(-1).astype(mx.uint32),
                                   kk, scores.reshape(-1, kk))
+                return y.reshape(*lead, D)
+            if WEIGHTED_UNSORT == "1" or getattr(self, "use_weighted_unsort", False):
+                y = self._prefill(x.reshape(-1, D), indices.reshape(-1).astype(mx.uint32), kk, scores.reshape(-1, kk))
                 return y.reshape(*lead, D)
             y = self._experts(x, indices)
             return (y * scores[..., None].astype(y.dtype)).sum(axis=-2)

@@ -5,6 +5,17 @@ import os
 from pathlib import Path
 
 # Freeze diagnostic routing controls alongside persisted-state identity.
+# Preserve producer flag semantics: only the exact string "1" enables these
+# routes. Empty, whitespace, aliases and other values remain disabled. Store
+# effective values so equivalent disabled spellings share one cache identity.
+def _producer_binary_flag(name: str, default: str) -> str:
+    return "1" if os.environ.get(name, default) == "1" else "0"
+
+
+QWEN4_PREFILL_FUSED = _producer_binary_flag("JANGH_QWEN4_PREFILL_FUSED", "1")
+WEIGHTED_UNSORT = _producer_binary_flag("JANGH_WEIGHTED_UNSORT", "0")
+TAIL_SPLIT = _producer_binary_flag("JANGH_TAIL_SPLIT", "1")
+
 DECODE_ROT = os.environ.get("JANGTQ2_DECODE_ROT", "host").strip().lower()
 PREFILL = os.environ.get("JANGTQ2_PREFILL", "").strip().lower()
 EXPERT_TILES = os.environ.get("JANGH_EXPERT_TILES", "0").strip()
@@ -38,4 +49,7 @@ def runtime_identity() -> str:
         + ";gateup_h32=" + GATEUP_H32
         + ";h32_rows=" + H32_ROWS
         + ";prefill_reduce=" + PREFILL_REDUCE
+        + ";qwen4_prefill_fused=" + QWEN4_PREFILL_FUSED
+        + ";weighted_unsort=" + WEIGHTED_UNSORT
+        + ";tail_split=" + TAIL_SPLIT
     )

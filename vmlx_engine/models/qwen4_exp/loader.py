@@ -6,6 +6,7 @@ import copy
 import glob
 import json
 import logging
+import os
 import re
 import struct
 from collections.abc import Mapping
@@ -238,7 +239,7 @@ def _normalize_jang_runtime_compute_dtypes(
         if source_key is None:
             continue
         summary[source_key] += 1
-        if not cast_predicate(name):
+        if not cast_predicate(name) or name.endswith(".tq2_scales"):
             summary["preserved"] += 1
             continue
         if value.dtype != target_dtype:
@@ -508,6 +509,35 @@ def _validate_ple_hash_buffers(model, ple_buffers: dict[str, mx.array]) -> None:
             raise ValueError(f"qwen4_exp PLE hash buffer mismatch: {suffix}")
 
 
+def _install_jangh_routed_experts(model, config: dict) -> int:
+    """Replace the 48 backbone SwitchGLU modules with JANGH TQSwitchGLU when the bundle declares
+    config["jangtq"] (format v2, mode jangtq2 per routed projection). MTP experts stay affine
+    (install_jangh skips paths containing "mtp"). Fail closed: a declared JANGH bundle whose
+    contract does not match the model raises instead of loading affine garbage."""
+    from vmlx_engine.jangh.contract import validate_format
+
+    if not validate_format(config):
+        return 0
+    from vmlx_engine.jangh.install import install_jangh
+
+    installed = install_jangh(model, config)
+    if installed <= 0:
+        raise ValueError("qwen4_exp declares JANGH routed experts but none were installed")
+    # qwen4_exp prefill speed options (measured one MoE layer, D=2560 I=640 E=512 k=10, f16: JANGH/affine 1.235 ->
+    # 0.995 at 4k tokens): single-launch Hadamard-32 row rotation + fused fp32 weighted unsort. Scoped to this family
+    # so GLM/Naive keep their qualified numerics. Env JANGH_QWEN4_PREFILL_FUSED=0 restores the generic path.
+    from vmlx_engine.jangh.runtime_identity import QWEN4_PREFILL_FUSED
+
+    if QWEN4_PREFILL_FUSED == "1":
+        for _path, mod in model.named_modules():
+            if getattr(mod, "is_jangtq2", False):
+                mod.use_weighted_unsort = True
+                for lin in (mod.gate_proj, mod.up_proj, mod.down_proj):
+                    lin.use_h32_rows = True
+    logger.info("qwen4_exp: %d JANGH routed expert banks installed", installed)
+    return installed
+
+
 def _normalize_runtime_weight_names(
     weights: dict[str, mx.array],
 ) -> dict[str, mx.array]:
@@ -541,6 +571,10 @@ def _normalize_runtime_weight_names(
             runtime_key = runtime_key.replace(
                 "lm_head.", "language_model.lm_head.", 1
             )
+        elif runtime_key.startswith("model.layers.") and ".mlp.switch_mlp." in runtime_key:
+            # JANGH routed experts: on-disk model.layers.L.mlp.switch_mlp.*_proj.tq2_* (the namespace the
+            # vmlx-swift JANGH partition and the MLX named-mmap regex require) -> the VLM tree.
+            runtime_key = f"language_model.{runtime_key}"
         elif runtime_key.startswith("language_model.") and not runtime_key.startswith(
             ("language_model.model.", "language_model.mtp.", "language_model.lm_head.")
         ):
@@ -797,6 +831,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         model_config, model_class, config, ["text", "vision"]
     )
     model = model_class.Model(model_config)
+    jangh_modules = _install_jangh_routed_experts(model, config)
 
     weights, is_mlx_format, ple_buffers = _load_non_table_weights(
         model_path, affine1_modules
@@ -819,6 +854,11 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
             runtime_dtype,
         )
     _quantize_model(model, config, weights, bit_map)
+    if jangh_modules:
+        from vmlx_engine.jangh.payload import validate_complete_payload, validate_payload
+
+        # strict load checks shapes, not dtypes: tq2_packed must stay U32 and tq2_scales F16
+        validate_complete_payload(model, validate_payload(model, weights.items()))
     # The PLE table and its three hash buffers were intentionally removed from
     # the ordinary parameter tree above.  Everything else, including MTP and
     # vision, must match exactly; a permissive load previously allowed an

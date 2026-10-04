@@ -6,7 +6,13 @@ CUBIC_PARAMS = {
     2: (0.8929999999999999, 0.05065),
     3: (0.47124999999999995, 0.011599999999999997),
     4: (0.2405, 0.002100000000000002),
+    # Wide widths: uniform (beta = 0) MSE-optimal steps for N(0,1); kernels and packing support them.
+    6: (0.10413533834586466, 0.0),
+    8: (0.030780075187969925, 0.0),
 }
+# Every v2 bundle declares 2/3/4; 6 and 8 are declared only when a projection uses them.
+REQUIRED_WIDTHS = frozenset({"2", "3", "4"})
+WIDTHS = frozenset(str(b) for b in CUBIC_PARAMS)
 ROTATIONS = ("none", "hadamard32")
 PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 
@@ -52,10 +58,12 @@ def validate_format(config):
     if declaration.get("rotation", "none") not in ROTATIONS:
         _fail("unsupported default rotation")
     books = declaration.get("codebooks")
-    if not isinstance(books, dict) or set(books) != {"2", "3", "4"}:
-        _fail("codebooks must declare supported widths 2, 3 and 4")
-    for bits, (alpha, beta) in CUBIC_PARAMS.items():
-        book = books[str(bits)]
+    if not isinstance(books, dict) or not REQUIRED_WIDTHS <= set(books) or not set(books) <= WIDTHS:
+        _fail("codebooks must declare widths 2, 3 and 4, plus only 6 or 8")
+    for key in sorted(books, key=int):
+        bits = int(key)
+        alpha, beta = CUBIC_PARAMS[bits]
+        book = books[key]
         if not isinstance(book, dict):
             _fail("codebook must be an object")
         for key, expected in (("alpha", alpha), ("beta", beta)):
@@ -100,6 +108,8 @@ def projection_contract(config):
         rotation = entry.get("rotation", default_rotation)
         if type(bits) is not int or bits not in CUBIC_PARAMS or rotation not in ROTATIONS:
             _fail("unsupported projection bits or rotation")
+        if str(bits) not in config["jangtq"]["codebooks"]:
+            _fail("projection bits have no declared codebook")
         normalized = {"bits": bits, "rotation": rotation}
         prior = stacks.setdefault(stack, {}).get(projection)
         if prior is not None and prior != normalized:

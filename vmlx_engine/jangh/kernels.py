@@ -558,6 +558,13 @@ def _qdot(bits: int, wr: str, acc: str) -> str:
           {UNROLL} for (uint t = 0; t < 8u; t++) {acc} = fma(xt[8u + t], tq_level<3>((g1 >> (3u * t)) & 7u), {acc}); }}'''
 
 
+# Unguarded main blocks + one guarded tail block when K % BLOCK != 0 but rows are aligned (qwen4_exp down K=640).
+# JANGH_TAIL_SPLIT=0 restores the fully guarded form for A/B.
+from .runtime_identity import TAIL_SPLIT as _TAIL_SPLIT
+
+TAIL_SPLIT = _TAIL_SPLIT == "1"
+
+
 def _ptype(bits: int) -> tuple[str, int]:
     """Element type used to address packed weights (alignment-provable) and its size in bytes."""
     return ("uint16_t", 2) if bits == 3 else ("uint32_t", 4)
@@ -612,8 +619,51 @@ def _load_x(aligned: bool, rotate: bool = False) -> str:
     return base + (_HAD32 if rotate else "")
 
 
+def _tail_mode(K: int, N: int) -> str:
+    """"al": K % BLOCK == 0 and rows aligned (unguarded); "tl": rows aligned, K % BLOCK != 0 -> unguarded main blocks
+    + ONE guarded tail block (qwen4_exp down_proj K=640 = 512 + 128); "gd": rows not aligned (fully guarded)."""
+    if N % (NSG * RPS):
+        return "gd"
+    return "al" if K % BLOCK == 0 else "tl"
+
+
+def _k_loop(mode: str, rotate: bool, body_al: str, body_gd: str, advance: str) -> str:
+    if mode == "al":
+        return f"for (uint k0 = 0; k0 < K; k0 += {BLOCK}u) {{ {_load_x(True, rotate)} {body_al} {advance} }}"
+    if mode == "gd":
+        return f"for (uint k0 = 0; k0 < K; k0 += {BLOCK}u) {{ {_load_x(False, rotate)} {body_gd} {advance} }}"
+    return (f"uint Kmain = K - (K % {BLOCK}u);\n"
+            f"    for (uint k0 = 0; k0 < Kmain; k0 += {BLOCK}u) {{ {_load_x(True, rotate)} {body_al} {advance} }}\n"
+            f"    if (Kmain < K) {{ uint k0 = Kmain; {_load_x(False, rotate)} {body_gd} }}")
+
+
 @functools.lru_cache(maxsize=None)
-def _qmv_kernel(bits: int, fused: bool, xname: str, aligned: bool, rotate: bool = False):
+def _qmv_kernel(bits: int, fused: bool, xname: str, aligned, rotate: bool = False):
+    mode = aligned if isinstance(aligned, str) else ("al" if aligned else "gd")
+    return _qmv_kernel_mode(bits, fused, xname, mode, rotate)
+
+
+def _qmv_rows(bits: int, fused: bool, guard: str) -> str:
+    rows = f'''
+      {UNROLL} for (uint r = 0; r < {RPS}u; r++) {{
+        {guard}
+        const device {_ptype(bits)[0]}* wr = wp + r * (RB / {_ptype(bits)[1]}u); float a = 0.0f;
+        {_qdot(bits, "wr", "a")}
+        accg[r] += a;'''
+    if fused:
+        rows += f'''
+        const device {_ptype(bits)[0]}* ur = up + r * (RB / {_ptype(bits)[1]}u); float b2 = 0.0f;
+        {_qdot(bits, "ur", "b2")}
+        accu[r] += b2;'''
+    return rows + "\n      }"
+
+
+@functools.lru_cache(maxsize=None)
+def _qmv_kernel_mode(bits: int, fused: bool, xname: str, mode: str, rotate: bool = False):
+    aligned = mode == "al"
+    guard_rows = "if (!active) continue;" if mode == "tl" else "if (row0 + r >= N || !active) continue;"
+    loop = _k_loop(mode, rotate, _qmv_rows(bits, fused, ""), _qmv_rows(bits, fused, guard_rows),
+                   f"wp += {BLOCK * bits // 8 // _ptype(bits)[1]}u; up += {BLOCK * bits // 8 // _ptype(bits)[1]}u; xp += {BLOCK}u;")
     guard = "" if aligned else "if (row0 + r >= N || !active) continue;"
     rows = f'''
       {UNROLL} for (uint r = 0; r < {RPS}u; r++) {{
@@ -654,15 +704,11 @@ def _qmv_kernel(bits: int, fused: bool, xname: str, aligned: bool, rotate: bool 
     auto xp = x + (size_t)(disp / xdiv) * K + lane * {VPT}u;
     float accg[{RPS}]; float accu[{RPS}];
     {UNROLL} for (uint r = 0; r < {RPS}u; r++) {{ accg[r] = 0.0f; accu[r] = 0.0f; }}
-    for (uint k0 = 0; k0 < K; k0 += {BLOCK}u) {{
-      {_load_x(aligned, rotate)}
-      {rows}
-      wp += {BLOCK * bits // 8 // _ptype(bits)[1]}u; up += {BLOCK * bits // 8 // _ptype(bits)[1]}u; xp += {BLOCK}u;
-    }}
+    {loop}
     {store}
 '''
     return mx.fast.metal_kernel(
-        name=f"jangtq2t_qmv_b{bits}_{'fused' if fused else 'single'}_{xname}_{'al' if aligned else 'gd'}{'_h32' if rotate else ''}",
+        name=f"jangtq2t_qmv_b{bits}_{'fused' if fused else 'single'}_{xname}_{mode}{'_h32' if rotate else ''}",
         input_names=["x", "wg", "sg", "wu", "su", "idx", "meta", "lim"],
         output_names=["out"], header=_cb_header(), source=src)
 
@@ -679,7 +725,7 @@ def gather_qmv(x, packed, scales, cb_unused, idx, bits, *, x_per_dispatch: bool,
         raise ValueError("jangtq2 requires K % 32 == 0")
     xdiv = 1 if x_per_dispatch else ndisp // nx
     fused = packed_u is not None
-    k = _qmv_kernel(bits, fused, _TNAME[x.dtype], K % BLOCK == 0 and N % (NSG * RPS) == 0, rotate)
+    k = _qmv_kernel(bits, fused, _TNAME[x.dtype], _tail_mode(K, N) if TAIL_SPLIT else (K % BLOCK == 0 and N % (NSG * RPS) == 0), rotate)
     return k(inputs=[x, packed, scales, packed_u if fused else packed, scales_u if fused else scales,
                      idx.astype(mx.uint32).reshape(-1), _consts(K, N, xdiv, dtype=mx.uint32),
                      _consts(float(limit), dtype=mx.float32)],
@@ -687,10 +733,25 @@ def gather_qmv(x, packed, scales, cb_unused, idx, bits, *, x_per_dispatch: bool,
              output_shapes=[(ndisp, N)], output_dtypes=[mx.float32])[0]
 
 
+def _wdown_rows(bits: int, guard: str) -> str:
+    return f'''
+        {UNROLL} for (uint r = 0; r < {RPS}u; r++) {{
+          {guard}
+          const device {_ptype(bits)[0]}* wr = wp + r * (RB / {_ptype(bits)[1]}u); float a = 0.0f;
+          {_qdot(bits, "wr", "a")}
+          acc[r] += a;
+        }}'''
+
+
 @functools.lru_cache(maxsize=None)
-def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned: bool, rotate: bool = False):
+def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned, rotate: bool = False):
     """Decode down projection fused with the router-weighted sum over the k selected experts:
     y[t, r] = sum_k w[t,k] * scale[e_k, r] * dot(h[t,k,:], level(q[e_k, r, :]))."""
+    mode = aligned if isinstance(aligned, str) else ("al" if aligned else "gd")
+    aligned = mode == "al"
+    wloop = _k_loop(mode, rotate, _wdown_rows(bits, ""),
+                    _wdown_rows(bits, "if (!active) continue;" if mode == "tl" else "if (row0 + r >= N || !active) continue;"),
+                    f"wp += {BLOCK * bits // 8 // _ptype(bits)[1]}u; xp += {BLOCK}u;")
     src = f'''
     uint K = meta[0], N = meta[1], KT = meta[2];
     {_prologue(bits)}
@@ -703,16 +764,7 @@ def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned: bool, 
       const device {_ptype(bits)[0]}* wp = {_wptr(bits, "wg", "e")};
       auto xp = x + (size_t)disp * K + lane * {VPT}u;
       float acc[{RPS}]; {UNROLL} for (uint r = 0; r < {RPS}u; r++) acc[r] = 0.0f;
-      for (uint k0 = 0; k0 < K; k0 += {BLOCK}u) {{
-        {_load_x(aligned, rotate)}
-        {UNROLL} for (uint r = 0; r < {RPS}u; r++) {{
-          {"" if aligned else "if (row0 + r >= N || !active) continue;"}
-          const device {_ptype(bits)[0]}* wr = wp + r * (RB / {_ptype(bits)[1]}u); float a = 0.0f;
-          {_qdot(bits, "wr", "a")}
-          acc[r] += a;
-        }}
-        wp += {BLOCK * bits // 8 // _ptype(bits)[1]}u; xp += {BLOCK}u;
-      }}
+      {wloop}
       {UNROLL} for (uint r = 0; r < {RPS}u; r++) {{
         float sres = simd_sum(acc[r]);
         if (row0 + r < N) out_acc[r] += wk * sres * float(sg[(size_t)e * N + row0 + r]);
@@ -721,7 +773,7 @@ def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned: bool, 
     {UNROLL} for (uint r = 0; r < {RPS}u; r++)
       if (lane == 0 && row0 + r < N) out[(size_t)t * N + row0 + r] = static_cast<{tname}>(out_acc[r]);
 '''
-    return mx.fast.metal_kernel(name=f"jangtq2t_qmv_wdown_b{bits}_{tname}_{xname}_{'al' if aligned else 'gd'}{'_h32' if rotate else ''}",
+    return mx.fast.metal_kernel(name=f"jangtq2t_qmv_wdown_b{bits}_{tname}_{xname}_{mode}{'_h32' if rotate else ''}",
                                 input_names=["x", "wg", "sg", "idx", "wts", "meta"],
                                 output_names=["out"], header=_cb_header(), source=src)
 
@@ -731,7 +783,8 @@ def gather_qmv_weighted_down(h, packed, scales, cb_unused, idx, weights, bits, o
     T, kt = idx.shape
     K = h.shape[-1]
     N = packed.shape[1]
-    k = _qmv_weighted_down_kernel(bits, _TNAME[out_dtype], _TNAME[h.dtype], K % BLOCK == 0 and N % (NSG * RPS) == 0, rotate)
+    k = _qmv_weighted_down_kernel(bits, _TNAME[out_dtype], _TNAME[h.dtype],
+                                  _tail_mode(K, N) if TAIL_SPLIT else (K % BLOCK == 0 and N % (NSG * RPS) == 0), rotate)
     return k(inputs=[h, packed, scales, idx.astype(mx.uint32).reshape(-1), weights.astype(mx.float32).reshape(-1),
                      _consts(K, N, kt, dtype=mx.uint32)],
              grid=(NSG * 32, (N + NSG * RPS - 1) // (NSG * RPS), T), threadgroup=(NSG * 32, 1, 1),
@@ -802,3 +855,42 @@ def prefill_weighted_unsort(y, inverse, scores, *, enabled=False):
         inputs=[y, inverse, scores], template=[("ROWS", scores.shape[0])],
         grid=(scores.shape[0]*4096, 1, 1), threadgroup=(256, 1, 1),
         output_shapes=[(scores.shape[0], 4096)], output_dtypes=[mx.bfloat16])[0]
+
+
+# ------------------------------------------------------------------ generic prefill weighted unsort (any D, any k)
+@functools.lru_cache(maxsize=None)
+def _weighted_unsort_kernel(tname: str):
+    """OUT[t, d] = sum_k S[t,k] * Y[INV[t*k + j], d], fp32 accumulation, one thread per (t, d4) handling 4 columns.
+    Replaces the unfused y[inv].reshape(T,k,D) * scores -> sum (three passes over T*k*D) with one pass.
+    Not bit-identical to MLX's bf16 reduction order (fp32 accumulate): exactness gate = greedy byte identity."""
+    return mx.fast.metal_kernel(
+        name=f"vmlx_jangh_weighted_unsort_{tname}",
+        input_names=["Y", "INV", "S"], output_names=["OUT"],
+        source=f'''
+const uint d4 = thread_position_in_grid.x;            // column quad
+const uint t = thread_position_in_grid.y;             // token
+if (d4 * 4u >= D || t >= ROWS) return;
+float4 acc = float4(0.0f);
+for (uint j = 0; j < KK; ++j) {{
+  const uint row = INV[t * KK + j];
+  const float w = float(S[t * KK + j]);
+  const device {tname}* yr = Y + (size_t)row * D + d4 * 4u;
+  acc += w * float4(float(yr[0]), float(yr[1]), float(yr[2]), float(yr[3]));
+}}
+device {tname}* o = OUT + (size_t)t * D + d4 * 4u;
+o[0] = {tname}(acc.x); o[1] = {tname}(acc.y); o[2] = {tname}(acc.z); o[3] = {tname}(acc.w);
+''')
+
+
+def weighted_unsort(y, inv, scores, out_dtype=None):
+    """y (T*k, D) sorted expert outputs, inv (T*k,) inverse permutation, scores (T, k) -> (T, D)."""
+    T, kk = scores.shape
+    D = y.shape[-1]
+    if D % 4:
+        return None
+    dt = out_dtype or y.dtype
+    k = _weighted_unsort_kernel(_TNAME[y.dtype])
+    return k(inputs=[y, inv.astype(mx.uint32).reshape(-1), scores.astype(mx.float32).reshape(-1)],
+             template=[("D", D), ("KK", kk), ("ROWS", T)],
+             grid=(D // 4, T, 1), threadgroup=(min(256, D // 4), 1, 1),
+             output_shapes=[(T, D)], output_dtypes=[y.dtype])[0].astype(dt)

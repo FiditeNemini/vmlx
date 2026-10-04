@@ -322,11 +322,11 @@ describe('an unidentifiable model still yields a usable estimate', () => {
 })
 
 describe('qwen4_exp SSD-backed PLE residency profile', () => {
-  it('discounts the SSD-resident PLE from the launch estimate', () => {
+  it('uses header accounting rather than a fixed PLE fraction', () => {
     const profile = launchResidentProfileForModelType('qwen4_exp')
     expect(profile.streamsWeights).toBe(true)
-    expect(profile.ratio).toBe(0.85)
-    expect(profile.admissionRatio).toBe(0.78)
+    expect(profile.ratio).toBe(1)
+    expect(profile.admissionRatio).toBe(1)
     expect(profile.admissionRatio).toBeLessThanOrEqual(profile.ratio)
   })
 

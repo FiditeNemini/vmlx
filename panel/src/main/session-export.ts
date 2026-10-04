@@ -1,4 +1,5 @@
 import type { Chat, Message } from './database'
+import type { AssistantDisplayTimeline } from '../shared/assistantDisplayTimeline'
 
 const REQUEST_SETTINGS = [
   'temperature', 'top_p', 'top_k', 'min_p', 'max_tokens', 'max_output_tokens',
@@ -33,6 +34,7 @@ export interface GenerationRecord {
   finishReason?: string
   toolExchange?: unknown[]
   nativeFinalContent?: string
+  displayTimeline?: AssistantDisplayTimeline
   passes: ReturnType<typeof captureGenerationPass>[]
 }
 

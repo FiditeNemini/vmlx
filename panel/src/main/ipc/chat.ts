@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
 import { captureGenerationPass, type GenerationRecord } from "../session-export";
+import { AssistantDisplayTimelineRecorder } from "../../shared/assistantDisplayTimeline";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
 import {
   readDetectedModelConfig,
@@ -2090,6 +2091,7 @@ export function registerChatHandlers(
       let fullContent = "";
       let reasoningContent = "";
       let reasoningSegments: string[] = [];
+      const displayTimeline = new AssistantDisplayTimelineRecorder();
       const currentReasoningContent = () =>
         joinReasoningSegments(reasoningSegments) || reasoningContent;
       const currentReasoningSegments = () =>
@@ -2150,8 +2152,9 @@ export function registerChatHandlers(
       let periodicSaveInterval: ReturnType<typeof setInterval> | null = null;
 
       const generationRecord: GenerationRecord = { version: 1, status: 'in_progress', passes: [] };
-      const saveGenerationRecord = () => {
+      const saveGenerationRecord = (displayContent = assistantMessage.content) => {
         generationRecord.toolExchange = JSON.parse(JSON.stringify(requestMessages.slice(currentTurnToolStart)));
+        generationRecord.displayTimeline = displayTimeline.finalize(displayContent, reasoningSegments);
         assistantMessage.generationRecordJson = JSON.stringify(generationRecord);
         db.updateMessageGenerationRecord(assistantMessage.id, assistantMessage.generationRecordJson);
       };
@@ -2169,7 +2172,7 @@ export function registerChatHandlers(
               : allGeneratedContent
             : fullContent;
           const saveReasoning = currentReasoningContent();
-          try { saveGenerationRecord(); }
+          try { saveGenerationRecord(saveContent); }
           catch (error) { console.warn('[CHAT] Could not checkpoint generation record', error); }
           if (saveContent || saveReasoning) {
             try {
@@ -2177,8 +2180,8 @@ export function registerChatHandlers(
                 assistantMessage.id,
                 saveContent,
                 saveReasoning || undefined,
-                currentReasoningSegments().length > 0
-                  ? JSON.stringify(currentReasoningSegments())
+                reasoningSegments.length > 0
+                  ? JSON.stringify(reasoningSegments)
                   : undefined,
               );
             } catch (_) {}
@@ -2708,6 +2711,7 @@ export function registerChatHandlers(
           iteration?: number,
           toolCallId?: string,
         ) => {
+          if (phase === "calling") displayTimeline.tool(toolCallId);
           const contentOffset =
             phase === "calling" ? lastEmittedContentLength : undefined;
           // Collect for persistence — include detail for calling, result, and error phases
@@ -2739,6 +2743,7 @@ export function registerChatHandlers(
                 detail,
                 iteration,
                 contentOffset,
+                displayTimeline: displayTimeline.snapshot(),
               });
             }
           } catch (_) {}
@@ -2928,7 +2933,8 @@ export function registerChatHandlers(
                     chatId,
                     messageId: assistantMessage.id,
                     reasoningContent: currentReasoningContent(),
-                    reasoningSegments: currentReasoningSegments(),
+                    reasoningSegments: [...reasoningSegments],
+                    displayTimeline: displayTimeline.snapshot(),
                   });
                 }
               } catch (_) {}
@@ -2980,6 +2986,8 @@ export function registerChatHandlers(
           // a tool-only pass will discard. Preserve meaningful leading whitespace
           // once the first visible character arrives, including code indentation.
           if (displayContent === null) return;
+          if (isReasoningDelta) displayTimeline.observeReasoning(reasoningSegments);
+          else displayTimeline.observeContent(displayContent);
           if (!isReasoningDelta) lastEmittedContentLength = displayContent.length;
 
           // === IPC emission — every token emitted immediately ===
@@ -3006,8 +3014,9 @@ export function registerChatHandlers(
                 messageId: assistantMessage.id,
                 fullContent: displayContent,
                 isReasoning: isReasoningDelta,
+                displayTimeline: displayTimeline.snapshot(),
                 reasoningSegments: isReasoningDelta
-                  ? currentReasoningSegments()
+                  ? [...reasoningSegments]
                   : undefined,
                 metrics: {
                   tokenCount: cumulativeTokenOffset + iterationTokenCount,
@@ -3123,6 +3132,7 @@ export function registerChatHandlers(
                   reasoningSegments,
                   parsed.text,
                 );
+                displayTimeline.observeReasoning(reasoningSegments);
                 const visibleSegments = currentReasoningSegments();
                 reasoningContent =
                   visibleSegments.length > 0
@@ -3138,7 +3148,8 @@ export function registerChatHandlers(
                         chatId,
                         messageId: assistantMessage.id,
                         reasoningContent: currentReasoningContent(),
-                        reasoningSegments: currentReasoningSegments(),
+                        reasoningSegments: [...reasoningSegments],
+                        displayTimeline: displayTimeline.snapshot(),
                       });
                     }
                   } catch (_) {}
@@ -4367,9 +4378,11 @@ export function registerChatHandlers(
                 !win.isDestroyed() &&
                 (allGeneratedContent.trim() || clearedRedundantToolPreview)
               ) {
+                displayTimeline.observeContent(allGeneratedContent);
                 win.webContents.send("chat:stream", {
                   chatId,
                   messageId: assistantMessage.id,
+                  displayTimeline: displayTimeline.snapshot(),
                   fullContent: allGeneratedContent,
                   isReasoning: false,
                   metrics: {
@@ -4440,7 +4453,8 @@ export function registerChatHandlers(
                     chatId,
                     messageId: assistantMessage.id,
                     reasoningContent: currentReasoningContent(),
-                    reasoningSegments: currentReasoningSegments(),
+                    reasoningSegments: [...reasoningSegments],
+                    displayTimeline: displayTimeline.snapshot(),
                   });
                 }
               } catch (_) {}
@@ -4551,7 +4565,8 @@ export function registerChatHandlers(
                     chatId,
                     messageId: assistantMessage.id,
                     reasoningContent: currentReasoningContent(),
-                    reasoningSegments: currentReasoningSegments(),
+                    reasoningSegments: [...reasoningSegments],
+                    displayTimeline: displayTimeline.snapshot(),
                   });
                 }
               } catch (_) {}
@@ -4626,7 +4641,8 @@ export function registerChatHandlers(
                 chatId,
                 messageId: assistantMessage.id,
                 reasoningContent: currentReasoningContent(),
-                reasoningSegments: currentReasoningSegments(),
+                reasoningSegments: [...reasoningSegments],
+                displayTimeline: displayTimeline.snapshot(),
               });
             }
           } catch (_) {}
@@ -4797,7 +4813,7 @@ export function registerChatHandlers(
           ? []
           : rawFinalReasoningSegments;
         // Preserve empty tool-boundary slots in SQLite for exact model-history
-        // replay. The renderer receives only visible segments, but an empty
+        // replay and display. An empty
         // slot records that a tool iteration produced no reasoning and prevents
         // later segments from being attached to the wrong assistant turn.
         const replayReasoningSegments = reasoningDuplicatesVisibleContent
@@ -5007,9 +5023,10 @@ export function registerChatHandlers(
               content: fullContent,
               reasoningContent: finalReasoningContent || undefined,
               reasoningSegments:
-                finalReasoningSegments.length > 0
-                  ? finalReasoningSegments
+                replayReasoningSegments.length > 0
+                  ? replayReasoningSegments
                   : undefined,
+              displayTimeline: generationRecord.displayTimeline,
               warnings: finalResponseWarnings || undefined,
               finishReason: lastFinishReason,
               metrics: {
@@ -5096,7 +5113,8 @@ export function registerChatHandlers(
                 chatId,
                 messageId: assistantMessage.id,
                 reasoningContent: currentReasoningContent(),
-                reasoningSegments: currentReasoningSegments(),
+                reasoningSegments: [...reasoningSegments],
+                displayTimeline: displayTimeline.snapshot(),
               });
             }
           } catch (_) {}
@@ -5131,7 +5149,7 @@ export function registerChatHandlers(
           ? (remoteMetrics.snapshot(Date.now()).outputTokens ?? 0)
           : cumulativeTokenOffset + iterationTokenCount;
         const abortReasoningContent = currentReasoningContent();
-        const abortReasoningSegments = currentReasoningSegments();
+        const abortReasoningSegments = [...reasoningSegments];
         const hadVisibleActivity =
           partialContent ||
           abortReasoningContent.trim() ||
@@ -5226,6 +5244,7 @@ export function registerChatHandlers(
                   abortReasoningSegments.length > 0
                     ? abortReasoningSegments
                     : undefined,
+                displayTimeline: generationRecord.displayTimeline,
                 finishReason: abortFinishReason,
                 warnings: abortWarnings.length > 0 ? abortWarnings : undefined,
                 metrics: abortMetrics,

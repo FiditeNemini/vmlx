@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { extractResponsesWarnings } from '../src/renderer/src/lib/responsesWarnings'
+import { readAssistantDisplayTimeline } from '../src/shared/assistantDisplayTimeline'
 
 // Execute the production effect and helpers with deferred IPC promises. The
 // real navigation/rendering counterpart is exercised in the Electron proof.
@@ -56,7 +57,7 @@ function mount() {
       return () => { delete listeners[event] }
     }
   }
-  const env: Record<string, unknown> = { chatId: 'chat', chatIdRef, window: { api: { chat } }, extractResponsesWarnings }
+  const env: Record<string, unknown> = { chatId: 'chat', chatIdRef, window: { api: { chat } }, extractResponsesWarnings, readAssistantDisplayTimeline }
   for (const key of Object.keys(state)) {
     env[`set${key[0].toUpperCase()}${key.slice(1)}`] = (value: any) => {
       state[key] = typeof value === 'function' ? value(state[key]) : value
@@ -71,6 +72,25 @@ function mount() {
 }
 
 describe('ChatInterface stream ownership across navigation', () => {
+  it('hydrates recorded chronology and keeps newer live snapshots through completion', async () => {
+    const saved = { version: 1, items: [{ kind: 'reasoning', segment: 0, start: 0, end: 5 }] }
+    const live = { version: 1, items: [...saved.items, { kind: 'tool', callId: 'call1' }] }
+    const final = { version: 1, items: [...live.items, { kind: 'content', start: 0, end: 12 }] }
+    const f = mount()
+    f.messages.resolve([{ ...pending, reasoningContent: 'First', reasoningSegmentsJson: '["First",""]', generationRecordJson: JSON.stringify({ displayTimeline: saved }) }])
+    await flush()
+    expect(f.state.messages[0].displayTimeline).toEqual(saved)
+    expect(f.state.reasoningSegmentMap.reply).toEqual(['First', ''])
+    f.emit('ToolStatus', { phase: 'calling', toolName: 'read_file', toolCallId: 'call1', displayTimeline: live })
+    expect(f.state.messages[0].displayTimeline).toEqual(live)
+    f.emit('Complete', { ...completion, displayTimeline: final })
+    expect(f.state.messages[0].displayTimeline).toEqual(final)
+    f.emit('Typing', { messageId: 'next' })
+    f.emit('Stream', { messageId: 'next', isReasoning: true, fullContent: 'First', reasoningSegments: ['First'], displayTimeline: saved })
+    expect(f.state.messages.at(-1).displayTimeline).toEqual(saved)
+    f.emit('Stream', { messageId: 'next', fullContent: 'Changed', displayTimeline: undefined })
+    expect(f.state.messages.at(-1).displayTimeline).toBeUndefined()
+  })
   it('settles the remounted instance on terminal completion without its own send promise', async () => {
     const f = mount()
     await f.active()

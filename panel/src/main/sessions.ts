@@ -59,10 +59,8 @@ import {
 } from './session-model-path'
 import {
   estimateModelFileBytes,
-  estimateModelLaunchAdmissionBytes,
-  estimateModelLaunchResidentBytes,
+  estimateModelLaunchMemory,
   formatGb,
-  launchResidentProfileForModel,
   estimateMacReclaimableMemoryBytes,
   effectiveLaunchAvailableBytes,
   unsafeModelLaunchReason,
@@ -1916,7 +1914,7 @@ export class SessionManager extends EventEmitter {
   private beginWakeProgress(session: Session, logLine: string): void {
     const sessionId = session.id
     const modelFileBytes = estimateModelFileBytes(session.modelPath)
-    const wakeProfile = launchResidentProfileForModel(session.modelPath)
+    const wakeEstimate = estimateModelLaunchMemory(session.modelPath, modelFileBytes, 0)
     this.loadProgressState.delete(sessionId)
     this.loadProgressMeta.delete(sessionId)
     this.stopLoadResidentMonitor(sessionId)
@@ -1924,8 +1922,8 @@ export class SessionManager extends EventEmitter {
     const meta = modelFileBytes > 0
       ? {
           modelBytes: modelFileBytes,
-          expectedResidentBytes: Math.round(modelFileBytes * wakeProfile.ratio),
-          lazyResident: wakeProfile.streamsWeights,
+          expectedResidentBytes: wakeEstimate.expectedResidentBytes,
+          lazyResident: wakeEstimate.streamsWeights,
         }
       : {}
     if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
@@ -3179,7 +3177,8 @@ export class SessionManager extends EventEmitter {
     // applied for every launch.
     const modelFileBytes = estimateModelFileBytes(config.modelPath)
     const totalBytes = totalmem()
-    const modelSizeBytes = estimateModelLaunchResidentBytes(config.modelPath, modelFileBytes, totalBytes)
+    const launchEstimate = estimateModelLaunchMemory(config.modelPath, modelFileBytes, totalBytes)
+    const modelSizeBytes = launchEstimate.launchResidentBytes
     if (modelSizeBytes > 0) {
       const availableBytes = effectiveLaunchAvailableBytes(freemem(), {
         reclaimableBytes: estimateMacReclaimableMemoryBytes(),
@@ -3191,6 +3190,13 @@ export class SessionManager extends EventEmitter {
       const totalGB = (totalBytes / 1e9).toFixed(0)
       console.log(`[SESSION] Model estimate: ~${modelGB} GB | RAM: ${availGB} GB free / ${totalGB} GB total (${usagePercent.toFixed(0)}% used)`)
       this.emit('session:log', { sessionId, data: `Model estimate: ~${modelGB} GB | RAM: ${availGB} GB free / ${totalGB} GB total\n` })
+      if (launchEstimate.source === 'indexed-tensor-headers' || launchEstimate.source === 'full-file-fallback') {
+        const estimateDetail = launchEstimate.source === 'indexed-tensor-headers'
+          ? `indexed weight headers; ${formatGb(launchEstimate.fileBackedPleBytes)} GB file-backed PLE excluded; ${formatGb(launchEstimate.proposalHeadReserveBytes)} GB proposal-head reserve`
+          : `conservative full-file fallback (${launchEstimate.reason || 'weight metadata unavailable'})`
+        console.log(`[SESSION] Model estimate source: ${estimateDetail}`)
+        this.emit('session:log', { sessionId, data: `Model estimate source: ${estimateDetail}\n` })
+      }
       // Admission ran on classifyLargeModelMemoryPreflight alone, whose block
       // arm needs modelSizeBytes >= 50GB AND availableBytes < 2GB AND >= 98%
       // used — by which point the machine is already dying, so in practice it
@@ -3208,11 +3214,7 @@ export class SessionManager extends EventEmitter {
       // bound. On 0.7, a 96 GB DSV4-Flash bundle estimated 69.2 GB and was
       // turned away on a box where it measures ~25 GB resident and runs fine.
       // The graded warnings below still use the conservative number.
-      const admissionBytes = estimateModelLaunchAdmissionBytes(
-        config.modelPath,
-        modelFileBytes,
-        totalBytes,
-      )
+      const admissionBytes = launchEstimate.launchAdmissionBytes
       // 2026-08-17: this used to REFUSE the launch. It is now advisory only.
       //
       // The refusal turned users away from the exact models this app exists to
@@ -3287,11 +3289,10 @@ export class SessionManager extends EventEmitter {
     this.contractSessions.delete(sessionId)
     this.lastLoadProgressEvents.delete(sessionId)
     if (modelFileBytes > 0) {
-      const residentProfile = launchResidentProfileForModel(config.modelPath)
       const meta = {
         modelBytes: modelFileBytes,
-        expectedResidentBytes: Math.round(modelFileBytes * residentProfile.ratio),
-        lazyResident: residentProfile.streamsWeights,
+        expectedResidentBytes: launchEstimate.expectedResidentBytes,
+        lazyResident: launchEstimate.streamsWeights,
       }
       this.loadProgressMeta.set(sessionId, meta)
       this.loadProgressState.set(sessionId, 0)

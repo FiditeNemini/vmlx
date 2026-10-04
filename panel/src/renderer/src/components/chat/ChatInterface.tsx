@@ -8,6 +8,7 @@ import { useSessionsContext } from '../../contexts/SessionsContext'
 import { formatResidentLoad } from '../sessions/loadProgressFormat'
 import { extractResponsesWarnings } from '../../lib/responsesWarnings'
 import { restoreUserMessageContent } from './messageReplay'
+import { readAssistantDisplayTimeline, type AssistantDisplayTimeline } from '../../../../shared/assistantDisplayTimeline'
 
 interface MessageMetrics {
   tokenCount: number
@@ -37,6 +38,8 @@ interface Message {
   reasoningContent?: string
   reasoningSegmentsJson?: string
   reasoningDone?: boolean
+  generationRecordJson?: string
+  displayTimeline?: AssistantDisplayTimeline
 }
 
 interface ToolStatusEntry {
@@ -68,6 +71,12 @@ function mergeToolStatusHistory(saved: ToolStatusEntry[], live: ToolStatusEntry[
 function hydrateMessages(msgs: Message[]): Message[] {
   return msgs.map(m => {
     let hydrated: Message = m
+    if (m.generationRecordJson && !m.displayTimeline) {
+      try {
+        const displayTimeline = readAssistantDisplayTimeline(JSON.parse(m.generationRecordJson).displayTimeline)
+        if (displayTimeline) hydrated = { ...hydrated, displayTimeline }
+      } catch { /* Unknown/legacy records retain their existing display. */ }
+    }
     if (m.metricsJson && !m.metrics) {
       try {
         hydrated = { ...hydrated, metrics: JSON.parse(m.metricsJson) }
@@ -232,6 +241,9 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     let terminalObserved = false
     const liveMessageIds = new Set<string>()
     const isCurrentChat = () => !disposed && chatIdRef.current === chatId
+    const timelineUpdate = (data: any) => Object.prototype.hasOwnProperty.call(data, 'displayTimeline')
+      ? { displayTimeline: readAssistantDisplayTimeline(data.displayTimeline) }
+      : {}
 
     // Load existing messages (hydrate persisted metrics, tool calls, reasoning)
     window.api.chat.getMessages(chatId).then(msgs => {
@@ -337,6 +349,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     const handleStream = (data: any) => {
       if (data.chatId !== chatId || !isCurrentChat()) return
+      setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, ...timelineUpdate(data) } : m))
       liveMessageIds.add(data.messageId)
       setLoading(true)
       setStreamingMessageId(data.messageId)
@@ -365,6 +378,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
               role: 'assistant' as const,
               content: '',
               timestamp: Date.now(),
+              ...timelineUpdate(data),
               metrics: data.metrics
             }]
           }
@@ -383,7 +397,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         if (existing) {
           return prev.map(m =>
             m.id === data.messageId
-              ? { ...m, content: data.fullContent, metrics: data.metrics }
+              ? { ...m, content: data.fullContent, metrics: data.metrics, ...timelineUpdate(data) }
               : m
           )
         }
@@ -393,6 +407,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
           role: 'assistant' as const,
           content: data.fullContent,
           timestamp: Date.now(),
+          ...timelineUpdate(data),
           metrics: data.metrics
         }]
       })
@@ -410,6 +425,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         const completed: Message = {
           ...(existing ?? { id: data.messageId, chatId, role: 'assistant', timestamp: Date.now() }),
           content: data.content || existing?.content || '',
+          ...timelineUpdate(data),
           tokens: data.metrics?.tokenCount,
           metrics: data.metrics,
           warnings: responseWarnings ?? existing?.warnings
@@ -432,6 +448,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     const handleReasoningDone = (data: any) => {
       if (data.chatId !== chatId || !isCurrentChat()) return
+      setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, ...timelineUpdate(data) } : m))
       setReasoningDoneMap(prev => ({ ...prev, [data.messageId]: true }))
       // Also store the final reasoning content
       if (data.reasoningContent) {
@@ -449,6 +466,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     const handleToolStatus = (data: any) => {
       if (data.chatId !== chatId || !isCurrentChat()) return
+      setMessages(prev => prev.map(m => m.id === data.messageId ? { ...m, ...timelineUpdate(data) } : m))
       setToolStatusMap(prev => ({
         ...prev,
         [data.messageId]: [

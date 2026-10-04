@@ -41,13 +41,34 @@ describe('Performance MTP status from engine health', () => {
       .toBe('sessions.performance.weightsPresentRuntimeReady')
   })
 
-  it('retains active runtime scope', () => {
+  it('labels an attached runtime ready, not observed execution', () => {
     expect(label({ status: 'native_runtime_active', runtime_active: true, runtime_scope: 'text+vl' }))
-      .toBe('sessions.performance.statusActive (text+vl)')
+      .toBe('sessions.performance.weightsPresentRuntimeReady (text+vl)')
   })
 
   it('retains an explicit engine reason without an artifact', () => {
     expect(label({ status: 'missing_weights', artifact_available: false, runtime_available: false, runtime_active: false }))
       .toBe('missing weights')
   })
+})
+
+// Execute the actual historical execution card guard: a loaded head or a
+// different last request must never become current-request execution proof.
+let observedGuard: string | undefined
+function findObservedGuard(node: ts.Node): void {
+  if (ts.isJsxExpression(node) && node.expression
+      && node.getText(source).includes("label={t('sessions.performance.mtpLast')}")) {
+    const expression = node.expression
+    if (ts.isBinaryExpression(expression)) observedGuard = expression.left.getText(source)
+  }
+  ts.forEachChild(node, findObservedGuard)
+}
+findObservedGuard(source)
+if (!observedGuard) throw new Error('Historical MTP guard not found')
+const observed = new Function('lastNativeMtp', `return !!(${observedGuard})`) as (row: unknown) => boolean
+it('shows historical execution only with a real request ID and completed cycles', () => {
+  expect(observed(undefined)).toBe(false)
+  expect(observed({ request_id: 'request-a', cycles: 0 })).toBe(false)
+  expect(observed({ cycles: 2 })).toBe(false)
+  expect(observed({ request_id: 'request-a', cycles: 2, accepted_tokens: 0 })).toBe(true)
 })

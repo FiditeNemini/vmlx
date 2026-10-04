@@ -14,6 +14,7 @@ import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '.
 import { useTranslation } from '../../i18n'
 import { sanitizeChatHtml } from './sanitizeChatHtml'
 import { restoreUserMessageContent } from './messageReplay'
+import { validateAssistantDisplayTimeline, type AssistantDisplayTimeline } from '../../../../shared/assistantDisplayTimeline'
 
 interface Message {
   id: string
@@ -21,6 +22,7 @@ interface Message {
   content: string
   timestamp: number
   tokens?: number
+  displayTimeline?: AssistantDisplayTimeline
 }
 
 interface MessageBubbleProps {
@@ -224,16 +226,20 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
 
   // Typewriter: smooth character-by-character reveal during streaming
   const displayedContent = useTypewriter(message.content, !!isStreaming)
+  const sourceReasoningSegments = Array.isArray(reasoningSegments) && reasoningSegments.length > 0
+    ? reasoningSegments : reasoningContent ? [reasoningContent] : []
+  const orderedTimeline = validateAssistantDisplayTimeline(message.displayTimeline, message.content, sourceReasoningSegments)
   const reasoningSegmentsForDisplay = useMemo(() => {
     const segments = Array.isArray(reasoningSegments) && reasoningSegments.length > 0
       ? reasoningSegments
       : reasoningContent
         ? [reasoningContent]
         : []
+    if (orderedTimeline) return segments
     return getReasoningSegmentsForDisplay(segments, {
       liveReplace: !!isStreaming && !(reasoningDone ?? false),
     })
-  }, [isStreaming, reasoningContent, reasoningDone, reasoningSegments])
+  }, [isStreaming, reasoningContent, reasoningDone, reasoningSegments, orderedTimeline])
   const latestReasoningSegment = reasoningSegmentsForDisplay[reasoningSegmentsForDisplay.length - 1] || ''
   // Same for the active reasoning segment (separate stream, same TCP batching problem)
   const displayedLatestReasoning = useTypewriter(latestReasoningSegment, !!isStreaming && !(reasoningDone ?? false))
@@ -247,7 +253,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   const isEmptyAssistant =
     message.role === 'assistant' &&
     !String(message.content || '').trim() &&
-    displayedReasoningSegments.length === 0 &&
+    !displayedReasoningSegments.some(segment => segment.trim()) &&
     !hasToolStatus
 
   // Render a DOMPurify-sanitized markdown segment
@@ -337,6 +343,34 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   }
 
   const renderInlineContent = () => {
+    if (orderedTimeline) {
+      const last = orderedTimeline.items[orderedTimeline.items.length - 1]
+      return <>{orderedTimeline.items.map((item, index) => {
+        if (item.kind === 'reasoning') {
+          const content = (displayedReasoningSegments[item.segment] || '').slice(item.start, item.end)
+          if (!content.trim()) return null
+          return <ReasoningBox key={`${message.id}-reasoning-${index}`} content={content}
+            isStreaming={!!isStreaming && item === last && !(reasoningDone ?? false)}
+            isDone={item !== last || (reasoningDone ?? false)} />
+        }
+        if (item.kind === 'tool') {
+          const group = toolGroups?.groups.find(group => group.statuses[0]?.toolCallId === item.callId)
+          return group ? <InlineToolCall key={`tool-${item.callId}`} group={group} isStreaming={!!isStreaming} /> : null
+        }
+        const content = displayedContent.slice(item.start, item.end)
+        return renderMarkdownSegment(toolGroups ? stripStructuredToolMarkup(content) : content, `content-${index}`)
+      })}
+      {/* Same live status row as the legacy inline path: while a tool pass is
+          still processing/generating and nothing newer has been emitted yet,
+          show it after the last recorded item instead of dropping it. */}
+      {toolGroups?.processingStatus && isStreaming && (
+        <div key="processing" className="flex items-center gap-2 text-muted-foreground text-xs py-1"
+          data-vmlx-proof-tool-progress={toolGroups.processingStatus.phase === 'generating' ? 'generating' : 'processing'}>
+          <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${toolGroups.processingStatus.phase === 'generating' ? 'bg-primary' : 'bg-warning'}`} />
+          <span>{toolGroups.processingStatus.phase === 'generating' ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}</span>
+        </div>
+      )}</>
+    }
     if (!message.content && (!toolGroups || toolGroups.groups.length === 0)) return null
 
     const content = toolGroups
@@ -359,7 +393,8 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
       if (toolGroups.processingStatus && isStreaming) {
         const isGenerating = toolGroups.processingStatus.phase === 'generating'
         elements.push(
-          <div key="processing" className="flex items-center gap-2 text-muted-foreground text-xs py-1">
+          <div key="processing" className="flex items-center gap-2 text-muted-foreground text-xs py-1"
+            data-vmlx-proof-tool-progress={isGenerating ? 'generating' : 'processing'}>
             <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${isGenerating ? 'bg-primary' : 'bg-warning'}`} />
             <span>{isGenerating ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}</span>
           </div>
@@ -567,7 +602,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         </div>
 
         {/* Reasoning boxes */}
-        {displayedReasoningSegments.length > 0 &&
+        {!orderedTimeline && displayedReasoningSegments.length > 0 &&
          !(displayedReasoningSegments.length === 1 && message.content && displayedReasoningSegments[0].trim() === message.content.trim()) && (
           <div className="mb-3 space-y-2">
             {displayedReasoningSegments.map((segment, index) => {
@@ -634,7 +669,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
 
         {/* Legacy tool call display */}
         {toolStatuses && toolStatuses.length > 0 &&
-         !(toolGroups && toolGroups.hasOffsets) && (
+         !orderedTimeline && !(toolGroups && toolGroups.hasOffsets) && (
           <ToolCallStatus statuses={toolStatuses} isStreaming={!!isStreaming} />
         )}
 

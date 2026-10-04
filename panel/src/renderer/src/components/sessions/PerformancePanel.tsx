@@ -428,7 +428,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                 label={t('sessions.performance.mtp')}
                 value={
                   health.mtp.runtime_active
-                    ? `${t('sessions.performance.statusActive')}${health.mtp.runtime_scope ? ` (${health.mtp.runtime_scope})` : ''}`
+                    ? `${t('sessions.performance.weightsPresentRuntimeReady')}${health.mtp.runtime_scope ? ` (${health.mtp.runtime_scope})` : ''}`
                     : health.mtp.status === 'runtime_disabled'
                       ? t('sessions.cache.statusDisabled')
                       : health.mtp.runtime_available
@@ -702,12 +702,14 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                 value={(health.scheduler.cache_reuse_partial_tokens || 0).toLocaleString()}
               />
             )}
-            {health.scheduler.batch_generator?.last_native_mtp && (
+            {/* Historical execution card: a loaded head or a different last
+                request must never read as current-request execution proof. */}
+            {lastNativeMtp?.request_id && Number(lastNativeMtp.cycles) > 0 && (
               <InfoCard
                 label={t('sessions.performance.mtpLast')}
-                value={`D${health.scheduler.batch_generator.last_native_mtp.final_depth ?? '?'}${
-                  health.scheduler.batch_generator.last_native_mtp.acceptance_rate != null
-                    ? ` ${t('sessions.performance.percentAcceptValue', { percent: Math.round((health.scheduler.batch_generator.last_native_mtp.acceptance_rate || 0) * 100) })}`
+                value={`${lastNativeMtp.request_id}: D${lastNativeMtp.final_depth ?? '?'}${
+                  lastNativeMtp.acceptance_rate != null
+                    ? ` ${t('sessions.performance.percentAcceptValue', { percent: Math.round((lastNativeMtp.acceptance_rate || 0) * 100) })}`
                     : ''
                 }`}
               />

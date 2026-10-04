@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } fr
 import { ArrowDown, MessageCircle } from 'lucide-react'
 import { MessageBubble } from './MessageBubble'
 import { useTranslation } from '../../i18n'
+import type { AssistantDisplayTimeline } from '../../../../shared/assistantDisplayTimeline'
 
 interface MessageMetrics {
   tokenCount: number
@@ -24,6 +25,7 @@ interface Message {
   metrics?: MessageMetrics
   warnings?: string[]
   warningsJson?: string
+  displayTimeline?: AssistantDisplayTimeline
 }
 
 interface MessageListProps {

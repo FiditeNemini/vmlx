@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { MessageBubble } from '../src/renderer/src/components/chat/MessageBubble'
 import { ReasoningBox } from '../src/renderer/src/components/chat/ReasoningBox'
+import { AssistantDisplayTimelineRecorder } from '../src/shared/assistantDisplayTimeline'
 
 vi.mock('dompurify', () => ({
   default: {
@@ -22,6 +23,80 @@ function renderBubble(props: Record<string, unknown>): string {
 }
 
 describe('interleaved reasoning rendered display', () => {
+  it.each([true, false])('renders recorded reasoning/text/tool/result phases in order with streaming=%s', isStreaming => {
+    const record = new AssistantDisplayTimelineRecorder()
+    const segments = ['PLAN-WRITE', 'PLAN-READ', 'CHECKED-BOTH']
+    record.observeReasoning([segments[0]])
+    record.observeContent('BEFORE-WRITE\n')
+    record.tool('write-1')
+    record.observeReasoning(segments.slice(0, 2))
+    record.observeContent('BEFORE-WRITE\nBETWEEN-TOOLS\n')
+    record.tool('read-2')
+    record.observeReasoning(segments)
+    const content = 'BEFORE-WRITE\nBETWEEN-TOOLS\nFINAL-ANSWER'
+    record.observeContent(content)
+    const html = renderBubble({
+      message: { ...baseMessage, content, displayTimeline: record.finalize(content, segments) },
+      reasoningSegments: segments, reasoningDone: !isStreaming, isStreaming,
+      toolStatuses: [
+        { phase: 'calling', toolName: 'write_file', toolCallId: 'write-1', contentOffset: 13, detail: '{"path":"/tmp/write","content":"value"}' },
+        { phase: 'result', toolName: 'write_file', toolCallId: 'write-1', detail: 'write completed' },
+        { phase: 'calling', toolName: 'read_file', toolCallId: 'read-2', contentOffset: 27, detail: '{"path":"/tmp/read"}' },
+        { phase: 'result', toolName: 'read_file', toolCallId: 'read-2', detail: 'read completed' },
+      ],
+    })
+    const positions = ['PLAN-WRITE', 'BEFORE-WRITE', 'data-vmlx-proof-tool-call-id="write-1"', 'PLAN-READ', 'BETWEEN-TOOLS', 'data-vmlx-proof-tool-call-id="read-2"', 'CHECKED-BOTH', 'FINAL-ANSWER'].map(text => html.indexOf(text))
+    expect(positions.every(position => position >= 0)).toBe(true)
+    expect(positions).toEqual([...positions].sort((a, b) => a - b))
+    expect(html.match(/data-vmlx-proof-tool-phase="result"/g)).toHaveLength(2)
+  })
+
+  it('keeps the live processing/generating status row after the last recorded item while streaming', () => {
+    const record = new AssistantDisplayTimelineRecorder()
+    record.observeReasoning(['PLAN'])
+    record.tool('write-1')
+    const toolStatuses = [
+      { phase: 'calling', toolName: 'write_file', toolCallId: 'write-1', contentOffset: 0, detail: '{}' },
+      { phase: 'result', toolName: 'write_file', toolCallId: 'write-1', detail: 'done' },
+      { phase: 'processing' },
+    ]
+    const streaming = renderBubble({
+      message: { ...baseMessage, content: '', displayTimeline: record.snapshot() },
+      reasoningSegments: ['PLAN'], reasoningDone: false, isStreaming: true, toolStatuses,
+    })
+    const toolAt = streaming.indexOf('data-vmlx-proof-tool-call-id="write-1"')
+    const rowAt = streaming.indexOf('data-vmlx-proof-tool-progress="processing"')
+    expect(toolAt).toBeGreaterThan(-1)
+    expect(rowAt).toBeGreaterThan(toolAt)
+    const generating = renderBubble({
+      message: { ...baseMessage, content: '', displayTimeline: record.snapshot() },
+      reasoningSegments: ['PLAN'], reasoningDone: false, isStreaming: true,
+      toolStatuses: [...toolStatuses.slice(0, 2), { phase: 'generating' }],
+    })
+    expect(generating.indexOf('data-vmlx-proof-tool-progress="generating"')).toBeGreaterThan(generating.indexOf('data-vmlx-proof-tool-call-id="write-1"'))
+    // Not streaming: no synthetic progress row survives completion.
+    const done = renderBubble({
+      message: { ...baseMessage, content: 'ANSWER', displayTimeline: (() => { record.observeContent('ANSWER'); return record.snapshot() })() },
+      reasoningSegments: ['PLAN'], reasoningDone: true, isStreaming: false, toolStatuses,
+    })
+    expect(done).not.toContain('data-vmlx-proof-tool-progress')
+  })
+
+  it('keeps final reasoning after multiple calls from an empty-reasoning pass', () => {
+    const record = new AssistantDisplayTimelineRecorder()
+    record.tool('a'); record.tool('b'); record.observeReasoning(['', 'AFTER-RESULTS'])
+    record.observeContent('VISIBLE-FINAL')
+    const html = renderBubble({
+      message: { ...baseMessage, content: 'VISIBLE-FINAL', displayTimeline: record.snapshot() },
+      reasoningSegments: ['', 'AFTER-RESULTS'], reasoningDone: true,
+      toolStatuses: ['a', 'b'].flatMap(toolCallId => [
+        { phase: 'calling', toolName: 'read_file', toolCallId, iteration: 1, detail: '{"path":"/tmp/value"}' },
+        { phase: 'result', toolName: 'read_file', toolCallId, detail: 'result' },
+      ]),
+    })
+    expect(html.indexOf('data-vmlx-proof-tool-call-id="b"')).toBeLessThan(html.indexOf('AFTER-RESULTS'))
+    expect(html.indexOf('AFTER-RESULTS')).toBeLessThan(html.indexOf('VISIBLE-FINAL'))
+  })
   it('renders user-message TeX through the same sanitized KaTeX path as assistant messages', () => {
     const html = renderBubble({
       message: {

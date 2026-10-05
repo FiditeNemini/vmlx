@@ -36,6 +36,34 @@ NESTED_OUT = Path(
     "build/current-api-cache-contract-api-surface-check-20260602-cache-detail-zero-cached.json"
 )
 
+RETAINED_PANEL_GATEWAY_TITLES = (
+    # The original last-40-line tail truncated the fourth (startup-port) PASS
+    # row. Leave that case in this run rather than infer its individual proof.
+    "auto-switches to a standby model by waking it before direct OpenAI streaming",
+    "passes Responses function-call argument SSE through unchanged",
+    "returns backend-unavailable for stale Responses session ports",
+)
+
+
+def _retained_panel_gateway_rows(nested: dict[str, Any]) -> list[str]:
+    tail = nested["commands"].get("panel_gateway_contracts", {}).get("stdout_tail")
+    if not isinstance(tail, list) or not all(isinstance(line, str) for line in tail):
+        raise ValueError("retained panel gateway receipt lacks original named PASS rows")
+    passed = []
+    for title in RETAINED_PANEL_GATEWAY_TITLES:
+        pattern = (
+            r"^\s*✓\s+(?:panel/)?tests/api-gateway-single-model\.behavior\.test\.ts"
+            r" > ApiGateway single-model mode behavior > " + re.escape(title)
+            + r"(?:\s+\d+(?:\.\d+)?(?:ms|s))?\s*$"
+        )
+        lines = [line for line in tail if re.fullmatch(
+            pattern, re.sub(r"\x1b\[[0-9;]*m", "", line)
+        )]
+        if len(lines) != 1:
+            raise ValueError(f"retained panel gateway named PASS row missing or ambiguous: {title}")
+        passed.extend(lines)
+    return passed
+
 SOURCE_HASH_FILES = (
     "tests/cross_matrix/output_counts.py",
     "vmlx_engine/server.py",
@@ -286,11 +314,19 @@ def _load_retained_api_cache(root: Path, path: Path) -> tuple[dict[str, Any], di
 
 def build_artifact(root: Path, retained_api_cache: Path | None = None) -> dict[str, Any]:
     retained = None
+    retained_panel_rows = []
     if retained_api_cache is not None:
         # Fail before running even the panel slice if the child cannot be retained.
         nested, retained = _load_retained_api_cache(root, retained_api_cache)
+        retained_panel_rows = _retained_panel_gateway_rows(nested)
+    panel_exclusion = (
+        "^(?!ApiGateway single-model mode behavior (?:"
+        + "|".join(re.escape(title) for title in RETAINED_PANEL_GATEWAY_TITLES)
+        + ")$).*"
+    )
     results = {
-        name: _run(root, name, cwd_rel, cmd)
+        name: _run(root, name, cwd_rel, cmd + ["--testNamePattern", panel_exclusion]
+                   if retained is not None and name == "panel_api_request_builders" else cmd)
         for name, (cwd_rel, cmd) in COMMANDS.items()
         if retained is None or name != "server_api_surface"
     }
@@ -300,6 +336,9 @@ def build_artifact(root: Path, retained_api_cache: Path | None = None) -> dict[s
     nested_checks = nested.get("checks", {})
     nested_missing_markers = nested.get("missing_markers", [])
     panel_stdout = str(results["panel_api_request_builders"].get("stdout", ""))
+    # The retained tail also includes skipped tests. Only the three authenticated
+    # passing lines may supplement this run's required-marker evidence.
+    panel_stdout += "\n" + "\n".join(retained_panel_rows)
     session_ipc_source = (root / "panel/src/main/ipc/sessions.ts").read_text(encoding="utf-8")
     missing_panel_markers = [
         marker for marker in REQUIRED_PANEL_API_TEST_MARKERS if marker not in panel_stdout
@@ -478,6 +517,12 @@ def build_artifact(root: Path, retained_api_cache: Path | None = None) -> dict[s
         "results": public_results,
         "nested_api_cache_status": nested.get("status"),
         **({"retained_api_cache": retained} if retained is not None else {}),
+        **({"retained_panel_gateway_tests": {
+            "command": "panel_gateway_contracts",
+            "titles": list(RETAINED_PANEL_GATEWAY_TITLES),
+            "passed_lines": retained_panel_rows,
+            "executed_in_this_run": False,
+        }} if retained is not None else {}),
     }
 
 

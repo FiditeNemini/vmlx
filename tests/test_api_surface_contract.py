@@ -1,6 +1,7 @@
 from pathlib import Path
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -288,7 +289,10 @@ def retained_api_cache_fixture(tmp_path, monkeypatch):
     (tmp_path / "owner.py").write_text("original owner\n")
     monkeypatch.setattr(gate.api_cache_gate, "SOURCE_HASH_FILES", ("owner.py",))
     command = ["/original/venv/bin/python", "-m", "pytest", "-vv", "owner.py"]
-    monkeypatch.setattr(gate.api_cache_gate, "COMMANDS", {"api": command})
+    panel_command = gate.api_cache_gate.COMMANDS["panel_gateway_contracts"]
+    monkeypatch.setattr(gate.api_cache_gate, "COMMANDS", {
+        "api": command, "panel_gateway_contracts": panel_command,
+    })
     receipt = {
         "status": "pass",
         "created_at": "2026-10-05T13:03:42-0700",
@@ -299,13 +303,29 @@ def retained_api_cache_fixture(tmp_path, monkeypatch):
             "name": "api", "command": command, "returncode": 0,
             "elapsed_sec": 2.37, "counts": {"passed": 42},
             "stdout_tail": ["42 passed"],
+        }, "panel_gateway_contracts": {
+            "name": "panel_gateway_contracts", "command": panel_command,
+            "returncode": 0, "elapsed_sec": 0.568, "counts": {"passed": 4},
+            "stdout_tail": [
+                " \x1b[32m✓\x1b[39m panel/tests/api-gateway-single-model.behavior.test.ts"
+                " > ApiGateway single-model mode behavior > " + title + " 2ms"
+                for title in gate.RETAINED_PANEL_GATEWAY_TITLES
+            ],
         }},
     }
     return gate, tmp_path, tmp_path / "retained.json", receipt
 
 
-def test_api_surface_retains_original_child_without_replaying_it(retained_api_cache_fixture, monkeypatch):
+@pytest.mark.parametrize("missing_executed_marker", [False, True])
+def test_api_surface_retains_original_child_without_replaying_it(
+    retained_api_cache_fixture, monkeypatch, missing_executed_marker,
+):
     gate, root, path, receipt = retained_api_cache_fixture
+    not_retained = "auto-switches Responses API streaming by model id while preserving output text deltas"
+    receipt["commands"]["panel_gateway_contracts"]["stdout_tail"].append(
+        " ↓ panel/tests/api-gateway-single-model.behavior.test.ts"
+        " > ApiGateway single-model mode behavior > " + not_retained
+    )
     path.write_text(json.dumps(receipt))
     original_bytes = path.read_bytes()
     session = root / "panel/src/main/ipc/sessions.ts"
@@ -322,13 +342,24 @@ def test_api_surface_retains_original_child_without_replaying_it(retained_api_ca
     def fake_run(root, name, cwd, command):
         calls.append(name)
         assert name == "panel_api_request_builders"
+        pattern = command[command.index("--testNamePattern") + 1]
+        for title in gate.RETAINED_PANEL_GATEWAY_TITLES:
+            assert not re.search(pattern, "ApiGateway single-model mode behavior " + title)
+            assert re.search(pattern, "ApiGateway single-model mode behavior " + title + " extra case")
+        assert re.search(pattern, "ApiGateway single-model mode behavior " + not_retained)
+        assert re.search(pattern, "ApiGateway single-model mode behavior "
+                         "allows gateway startup on ports used only by stopped or remote saved sessions")
         return {"name": name, "command": command, "returncode": 0,
                 "counts": {"passed": 100},
-                "stdout": "\n".join(gate.REQUIRED_PANEL_API_TEST_MARKERS)}
+                "stdout": "\n".join(marker for marker in gate.REQUIRED_PANEL_API_TEST_MARKERS
+                    if marker not in gate.RETAINED_PANEL_GATEWAY_TITLES
+                    and not (missing_executed_marker and marker == not_retained))}
 
     monkeypatch.setattr(gate, "_run", fake_run)
     artifact = gate.build_artifact(root, path)
-    assert artifact["status"] == "pass"
+    assert artifact["status"] == ("fail" if missing_executed_marker else "pass")
+    assert (not_retained in artifact["missing_panel_markers"]) is missing_executed_marker
+    assert artifact["results"]["panel_api_request_builders"]["counts"]["passed"] == 100
     assert calls == ["panel_api_request_builders"]
     assert "server_api_surface" not in artifact["results"]
     retained = artifact["retained_api_cache"]
@@ -338,6 +369,26 @@ def test_api_surface_retains_original_child_without_replaying_it(retained_api_ca
     assert retained["source_hashes"] == receipt["source_hashes"]
     assert retained["sha256"] == hashlib.sha256(original_bytes).hexdigest()
     assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("defect", ["missing", "skipped", "duplicate"])
+def test_api_surface_rejects_unproven_retained_panel_rows(retained_api_cache_fixture, monkeypatch, defect):
+    gate, root, path, receipt = retained_api_cache_fixture
+    tail = receipt["commands"]["panel_gateway_contracts"]["stdout_tail"]
+    if defect == "missing":
+        tail.pop(0)
+    elif defect == "skipped":
+        tail[0] = tail[0].replace("✓", "↓")
+    else:
+        tail.append(tail[0])
+    path.write_text(json.dumps(receipt))
+
+    def never_run(*args):
+        pytest.fail("unproven retained title must fail before any child executes")
+
+    monkeypatch.setattr(gate, "_run", never_run)
+    with pytest.raises(ValueError, match="named PASS row"):
+        gate.build_artifact(root, path)
 
 
 @pytest.mark.parametrize("defect", [

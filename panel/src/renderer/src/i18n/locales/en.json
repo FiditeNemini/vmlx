@@ -785,7 +785,7 @@
       "prefillBatchSize": "Prefill Batch Size",
       "prefillBatchSizeTooltip": "Maximum number of concurrent prompts processed in parallel during the prefill (prompt processing) phase. Higher = more parallelism for multi-user workloads, more memory pressure during prompt ingest.",
       "prefillStepSize": "Prefill Step Size",
-      "prefillStepSizeTooltip": "Maximum number of tokens processed in a single prefill forward pass per sequence. Larger = fewer kernel launches and faster prefill, more transient memory. Reduce if you OOM mid-prompt on long contexts.",
+      "prefillStepSizeTooltip": "Requested token chunk size for runtimes that support chunked prefill. Some hybrid or media paths choose their own processing spans, so this is not a hard per-forward limit. Larger chunks may improve throughput but use more transient memory; the effect depends on the model and runtime.",
       "completionBatchSize": "Completion Batch Size",
       "completionBatchSizeTooltip": "Maximum number of tokens to generate in a single completion (token generation) step. Similar to prefill batch size but for the generation phase. Larger values can improve throughput for multi-user scenarios.",
       "smeltMode": "Smelt Mode",

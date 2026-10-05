@@ -2131,6 +2131,7 @@ export function registerChatHandlers(
       let cumulativeTokenOffset = 0;
       // Collect tool statuses for DB persistence (mirrors what's emitted to renderer)
       const collectedToolStatuses: Array<{
+        timestamp: number;
         phase: string;
         toolName: string;
         toolCallId?: string;
@@ -2711,6 +2712,7 @@ export function registerChatHandlers(
           iteration?: number,
           toolCallId?: string,
         ) => {
+          const timestamp = Date.now();
           if (phase === "calling") displayTimeline.tool(toolCallId);
           const contentOffset =
             phase === "calling" ? lastEmittedContentLength : undefined;
@@ -2723,6 +2725,7 @@ export function registerChatHandlers(
                 : detail
               : undefined;
           collectedToolStatuses.push({
+            timestamp,
             phase,
             toolName,
             toolCallId,
@@ -2735,6 +2738,7 @@ export function registerChatHandlers(
             const win = getWindow();
             if (win && !win.isDestroyed()) {
               win.webContents.send("chat:toolStatus", {
+                timestamp,
                 chatId,
                 messageId: assistantMessage.id,
                 phase,

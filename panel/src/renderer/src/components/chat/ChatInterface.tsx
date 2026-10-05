@@ -271,7 +271,9 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
             if (Array.isArray(parsed) && parsed.length > 0) {
               restoredTools[m.id] = parsed.map((s: any) => ({
                 ...s,
-                timestamp: s.timestamp || m.timestamp
+                // Historical rows without event timing cannot supply a duration.
+                timestamp: typeof s.timestamp === 'number' && Number.isFinite(s.timestamp)
+                  ? s.timestamp : undefined
               }))
             }
           } catch { /* ignore bad json */ }
@@ -478,7 +480,8 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
             detail: data.detail,
             iteration: data.iteration,
             contentOffset: data.contentOffset,
-            timestamp: Date.now()
+            timestamp: typeof data.timestamp === 'number' && Number.isFinite(data.timestamp)
+              ? data.timestamp : Date.now()
           }
         ]
       }))

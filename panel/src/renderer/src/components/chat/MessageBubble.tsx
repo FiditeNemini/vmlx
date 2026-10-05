@@ -3,6 +3,7 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react'
 import { AlertTriangle, Copy, Check, User, Sparkles, RefreshCw, Pencil, Loader2 } from 'lucide-react'
+import { VideoAttachmentPreview } from './VideoAttachmentPreview'
 import { ReasoningBox } from './ReasoningBox'
 import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
@@ -318,13 +319,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
           {videos.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-2">
               {videos.map((vid, i) => (
-                <video
-                  key={`v-${i}`}
-                  src={vid.video_url!.url}
-                  controls
-                  preload="metadata"
-                  className="max-w-[360px] max-h-[240px] rounded-md border border-white/10 bg-black"
-                />
+                <VideoAttachmentPreview key={`v-${i}`} src={vid.video_url!.url} />
               ))}
             </div>
           )}

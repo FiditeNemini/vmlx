@@ -543,6 +543,8 @@
       "textAttachment": "Text"
     },
     "bubble": {
+      "videoPreviewUnavailable": "Video preview unavailable",
+      "videoPreviewUnavailableDetail": "This app could not play the video. The original attachment is retained for the model.",
       "codeDefaultLang": "code",
       "codeCopy": "Copy",
       "codeCopied": "Copied!",

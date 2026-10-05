@@ -722,8 +722,9 @@ def install_affine_moe_pair_decode(
     cost the verify cycle 5-12% at 1.7k context (45.9-48.9 vs 51.4 tok/s
     with the kernel off, acceptance 34-39% vs 44%) after the draft head was
     excluded, and 20-25% with the head included; plain decoding gains +3%.
-    Under native MTP the kernel therefore stays off unless the family env
-    requests it explicitly. The separate experimental Qwen AR_ONLY opt-in
+    Under native MTP the kernel therefore stayed off unless the family env
+    requested it explicitly; qwen4_exp now keeps it (see the 2026-10-04 note
+    in the body). The separate experimental Qwen AR_ONLY opt-in
     registers base modules for productive AR/handoff/calibration only; it
     never admits the MTP head or seed/verify forwards."""
 
@@ -739,7 +740,15 @@ def install_affine_moe_pair_decode(
         and os.environ.get("VMLX_QWEN4_FUSED_MOE_PAIR_AR_ONLY", "").strip().lower()
         in {"1", "true", "on", "yes"}
     )
-    if native_mtp_active and not _explicitly_requested(family) and not ar_only:
+    # qwen4_exp keeps the pair kernel under native MTP (2026-10-04, Flash-Next
+    # JANG_4M served, novel prompts, AR-bracketed): with it Adaptive ran prose
+    # 57.6 / code 85.6 / easy 96.9 tok/s vs 54.8 / 74.3 / 80.1 without, and only
+    # then is greedy Adaptive text identical to AR, because AR mode and the
+    # row-exact verify rows (one single-row MoE dispatch per row) now run the
+    # same expert kernel. The 2026-09-05 regression predates per-row verify.
+    # The MTP draft head stays excluded below. Other families keep the old rule.
+    if (native_mtp_active and not _explicitly_requested(family) and not ar_only
+            and family != "qwen4_exp"):
         _STATUS[family] = {
             "installed": 0,
             "reason": "native_mtp_active",

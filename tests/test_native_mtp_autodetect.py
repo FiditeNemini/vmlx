@@ -371,10 +371,13 @@ class TestNativeMtpAutodetect:
             text=True,
         )
 
-        assert "--native-mtp-depth" in result.stdout
-        assert "--native-mtp-depth-policy" in result.stdout
-        assert "--native-mtp-sampling-policy" in result.stdout
+        # Two product modes only (AR = --disable-native-mtp, Adaptive = default):
+        # fixed-depth and depth-policy flags stay accepted for scripts but are
+        # hidden from help.
         assert "--disable-native-mtp" in result.stdout
+        assert "--native-mtp-sampling-policy" in result.stdout
+        assert "--native-mtp-depth " not in result.stdout
+        assert "--native-mtp-depth-policy" not in result.stdout
 
     def test_qwen36_nested_config_and_layered_tensors_are_native_ready(self, tmp_path):
         from vmlx_engine.server import _model_mtp_status

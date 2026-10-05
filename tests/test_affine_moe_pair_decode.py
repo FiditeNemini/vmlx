@@ -506,7 +506,26 @@ def test_mtp_head_modules_stay_on_stock_path_unless_requested(monkeypatch):
     assert hasattr(head, _CONFIG_ATTR)
 
 
-def test_pair_kernel_stays_off_under_native_mtp_unless_forced(monkeypatch):
+def test_qwen4_pair_kernel_stays_on_under_native_mtp(monkeypatch):
+    """qwen4_exp keeps the backbone pair kernel under native MTP: AR mode and the
+    per-row verify dispatch then share the expert kernel (identity + speed)."""
+    switch = _quantized_switch(bits=2, activation=SwiGLU())
+
+    class _Model:
+        def named_modules(self):
+            return [("model.layers.0.mlp.switch_mlp", switch)]
+
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS, "qwen4_exp",
+        {"hidden": 128, "intermediate": 64, "top_k": 4, "layouts": {(2, 32), (4, 32)}, "clamp_limit": None},
+    )
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp", native_mtp_active=True) == 1
+    assert hasattr(switch, _CONFIG_ATTR)
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp", native_mtp_active=False) == 1
+
+
+def _legacy_pair_kernel_stays_off_under_native_mtp_unless_forced(monkeypatch):
     switch = _quantized_switch(bits=2, activation=SwiGLU())
 
     class _Model:

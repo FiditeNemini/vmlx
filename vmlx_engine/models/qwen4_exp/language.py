@@ -35,6 +35,7 @@ from vmlx_engine.metal.qwen4_hc_combine import (
     exact_hc_combine,
     exact_hc_combine_requested,
 )
+from vmlx_engine.metal.qwen4_hc_mix_fused import hc_fused_mix_requested, hc_mix_fused
 from vmlx_engine.metal.qwen4_hc_norm import (
     hc_combine_norm_requested,
     hc_combine_norm,
@@ -584,6 +585,8 @@ class GatedResidual(nn.Module):
         self._exact_combine = exact_hc_combine_requested()
         self._combine_norm = hc_combine_norm_requested()
         self._hc_view_split = os.environ.get("VMLX_QWEN4_HC_VIEW_SPLIT") == "1"
+        # One-dispatch mix tail (metal/qwen4_hc_mix_fused.py), default on; VMLX_QWEN4_HC_FUSED_MIX=0 opts out.
+        self._fused_mix = hc_fused_mix_requested()
         self.hc_count = args.hc_count
         self.hidden_size = args.hidden_size
         self.hc_lowrank = args.hc_lowrank
@@ -652,6 +655,17 @@ class GatedResidual(nn.Module):
             )
         else:
             combined = input_inject_weight(normed)
+            if self._fused_mix and self.use_combine and not view_split:
+                up = self.input_mix_weight_up
+                if type(up) is nn.Linear and "bias" not in up:
+                    fused = hc_mix_fused(
+                        combined, normed, up.weight, hc_count=self.hc_count,
+                        lowrank=self.hc_lowrank, hidden=self.hidden_size,
+                    )
+                    if fused is not None:
+                        mixed, inject_w = fused
+                        return (mixed.astype(hyper_input.dtype), hyper_input,
+                                inject_w.astype(hyper_input.dtype))
             if view_split:
                 mix = combined[..., :self.hc_lowrank]
                 block_injection = combined[..., self.hc_lowrank:]

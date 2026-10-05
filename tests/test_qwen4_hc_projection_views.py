@@ -23,6 +23,10 @@ from vmlx_engine.models.qwen4_exp.language import (
 @pytest.fixture(autouse=True)
 def _isolate_hc_switch(monkeypatch):
     monkeypatch.delenv("VMLX_QWEN4_HC_VIEW_SPLIT", raising=False)
+    # These tests qualify the COMPOSED HC graph's view-split layout bit for
+    # bit. The one-dispatch mix (default on, metal/qwen4_hc_mix_fused.py)
+    # replaces that graph and has its own tests, so pin it off here.
+    monkeypatch.setenv("VMLX_QWEN4_HC_FUSED_MIX", "0")
 
 
 def _gather_layout(value):

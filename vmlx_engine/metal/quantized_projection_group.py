@@ -62,6 +62,15 @@ class QuantizedProjectionGroup(nn.Module):
         self.freeze()
 
     def __call__(self, x: mx.array) -> tuple[mx.array, ...]:
+        from vmlx_engine.metal.row_exact_qmv import row_exact_qmv, row_exact_scope_active
+
+        if row_exact_scope_active():
+            output = row_exact_qmv(
+                x, self.weight, self.scales, self.biases,
+                group_size=self.group_size, bits=self.bits, mode=self.mode,
+            )
+            if output is not None:
+                return tuple(mx.split(output, self.split_indices, axis=-1))
         output = mx.quantized_matmul(
             x,
             self.weight,

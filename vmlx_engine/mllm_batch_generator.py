@@ -5156,6 +5156,21 @@ def _native_mtp_rollback_to_confirmed(
     reject_tokens: int,
     accepted_drafts: int = 0,
 ) -> bool:
+    # Recomputing the accepted drafts' recurrent/PLE state must use the same
+    # row-exact arithmetic as the verify forward and the AR decode step.
+    from .metal.row_exact_qmv import row_exact_verify_scope
+
+    with row_exact_verify_scope():
+        return _native_mtp_rollback_to_confirmed_impl(
+            cache, reject_tokens, accepted_drafts
+        )
+
+
+def _native_mtp_rollback_to_confirmed_impl(
+    cache: List[Any],
+    reject_tokens: int,
+    accepted_drafts: int = 0,
+) -> bool:
     """Roll back a rejected verify without re-running the confirmed tokens.
 
     SSM layers restore the ``rollback_state`` captured after the confirmed
@@ -18232,11 +18247,14 @@ class MLLMBatchGenerator:
     ) -> mx.array:
         replay_tokens = [_native_mtp_ensure_uint32(tok) for tok in confirmed_tokens]
         replay_input = mx.concatenate(replay_tokens).reshape(1, len(replay_tokens))
-        output = self.language_model(
-            replay_input,
-            cache=cache,
-            return_hidden=True,
-        )
+        from .metal.row_exact_qmv import row_exact_verify_scope
+
+        with row_exact_verify_scope():
+            output = self.language_model(
+                replay_input,
+                cache=cache,
+                return_hidden=True,
+            )
         if _diag_fingerprints_enabled():
             self._diag_decode_fingerprint(locals().get("batch"), locals().get("req") or locals().get("request"), cache if "cache" in locals() else None, output, "def _replay_native_mtp_confirmed_tokens(")
         if isinstance(output, tuple):
@@ -18295,9 +18313,13 @@ class MLLMBatchGenerator:
         # Each stays gated behind its own env until a full-model A/B on the
         # exact bundle proves it — isolated projection wins have repeatedly
         # died on the complete lazy Qwen graph in this codebase.
+        from .metal.row_exact_qmv import row_exact_verify_scope
+
+        # Row-exact verify: every verify row reproduces its single-token decode
+        # step bit for bit, so greedy native MTP emits exactly the AR text.
         with native_mtp_verify_qmm_scope() as verify_qmm_scope_stats, (
             native_mtp_verify_pad_scope()
-        ) as verify_pad_scope_stats:
+        ) as verify_pad_scope_stats, row_exact_verify_scope():
             output = self.language_model(
                 inputs[None, :],
                 cache=cache,

@@ -1779,8 +1779,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             { value: 'adaptive', label: t('sessions.config.nativeMtpModeAdaptive') },
             { value: 'off', label: t('sessions.config.nativeMtpModeAr') },
           ]}
+          disabled={dflash2Speculative}
         />
-        {nativeMtpMode === 'adaptive' && (
+        {dflash2Speculative && <IncompatWarning text={t('sessions.config.nativeMtpOffForDrafter')} />}
+        {nativeMtpMode === 'adaptive' && !dflash2Speculative && (
           <InfoNote text={t('sessions.config.nativeMtpAdaptiveNote')} />
         )}
         {nativeMtpMode === 'off' && detectedNativeMtp?.defaultMode === 'off' && (

@@ -942,6 +942,13 @@ async function scanModelsInPath(
       if (format === "mlx") {
         // Skip text models when scanning for image models only
         if (modelType === "image") return;
+        // DFlash2 drafters are not standalone chat models; they are offered
+        // under Speculative Decoding -> Draft model instead.
+        try {
+          if (configDeclaresDflash2(JSON.parse(await readFile(join(currentPath, "config.json"), "utf-8")))) return;
+        } catch {
+          /* no readable config: keep the existing handling */
+        }
         const size = await getDirectorySize(currentPath);
 
         // Skip empty models (less than 1MB)
@@ -1090,6 +1097,12 @@ export function killActiveDownload(): void {
   _killActiveDownload?.();
 }
 
+/** A drafter folder named generically (e.g. `<bundle>/dflash2`) shows its bundle too. */
+function drafterLabel(dir: string): string {
+  const name = basename(dir);
+  return /^(dflash2?|drafter|draft)$/i.test(name) ? `${basename(join(dir, ".."))}/${name}` : name;
+}
+
 async function findDflash2Drafters(): Promise<Array<{ name: string; path: string }>> {
   // Drafter folders hold config.json + weights but no tokenizer, so the general
   // model scan can miss them; walk the configured directories (depth <= 3).
@@ -1104,7 +1117,7 @@ async function findDflash2Drafters(): Promise<Array<{ name: string; path: string
           const key = dir.replace(/\/+$/, "");
           if (!seen.has(key)) {
             seen.add(key);
-            found.push({ name: basename(dir), path: dir });
+            found.push({ name: drafterLabel(dir), path: dir });
           }
           return;
         }
@@ -1142,7 +1155,7 @@ export function registerModelHandlers(): void {
     const list: Array<{ name: string; path: string; bundled?: boolean }> = scanLibrary ? await findDflash2Drafters() : [];
     const bundled = bundlePath ? findBundledDflash2Drafter(bundlePath) : null;
     if (!bundled) return list;
-    return [{ name: basename(bundled), path: bundled, bundled: true }, ...list.filter((d) => d.path !== bundled)];
+    return [{ name: drafterLabel(bundled), path: bundled, bundled: true }, ...list.filter((d) => d.path !== bundled)];
   });
 
   ipcMain.handle("models:scan", async (_, modelType?: string) => {

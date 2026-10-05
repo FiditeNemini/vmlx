@@ -1085,7 +1085,8 @@
       "bundledDflash2Active": "This bundle ships a DFlash2 drafter ({{name}}); it is used by default for faster text decoding. Native MTP is off while it runs. Turn it off under Speculative Decoding.",
       "bundledDflash2Available": "This bundle ships a DFlash2 drafter ({{name}}), currently not in use. Enable it under Speculative Decoding for faster text decoding.",
       "useBundledDflash2": "Use the bundled DFlash2 drafter ({{name}})",
-      "useBundledDflash2Tooltip": "On by default when the model bundle includes a DFlash2 drafter. A Draft model entered below takes precedence. Off = the bundle's native MTP (Adaptive/AR) is used instead."
+      "useBundledDflash2Tooltip": "On by default when the model bundle includes a DFlash2 drafter. A Draft model entered below takes precedence. Off = the bundle's native MTP (Adaptive/AR) is used instead.",
+      "nativeMtpOffForDrafter": "Native MTP is off while a DFlash2 drafter is selected (the two cannot share a decode step). Clear the Draft model or turn the bundled drafter off to use Adaptive MTP again."
     },
     "create": {
       "title": "Create Session",

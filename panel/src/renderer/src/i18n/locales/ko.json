@@ -1085,7 +1085,8 @@
       "bundledDflash2Active": "이 번들에는 DFlash2 드래프터({{name}})가 포함되어 있으며, 더 빠른 텍스트 디코딩에 기본으로 사용됩니다. 사용 중에는 네이티브 MTP가 꺼집니다. 추측 디코딩에서 끌 수 있습니다.",
       "bundledDflash2Available": "이 번들에는 DFlash2 드래프터({{name}})가 포함되어 있지만 현재 사용하지 않습니다. 추측 디코딩에서 켜면 텍스트가 빨라집니다.",
       "useBundledDflash2": "번들에 포함된 DFlash2 드래프터 사용({{name}})",
-      "useBundledDflash2Tooltip": "모델 번들에 DFlash2 드래프터가 있으면 기본으로 켜집니다. 아래에 입력한 드래프트 모델이 우선합니다. 끄면 번들의 네이티브 MTP(Adaptive/AR)를 사용합니다."
+      "useBundledDflash2Tooltip": "모델 번들에 DFlash2 드래프터가 있으면 기본으로 켜집니다. 아래에 입력한 드래프트 모델이 우선합니다. 끄면 번들의 네이티브 MTP(Adaptive/AR)를 사용합니다.",
+      "nativeMtpOffForDrafter": "DFlash2 드래프터가 선택된 동안 네이티브 MTP는 꺼집니다(같은 디코딩 단계를 공유할 수 없음). Adaptive MTP로 돌아가려면 드래프트 모델을 비우거나 번들 드래프터를 끄세요."
     },
     "create": {
       "title": "세션 생성",

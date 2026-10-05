@@ -1085,7 +1085,8 @@
       "bundledDflash2Active": "Este paquete incluye un drafter DFlash2 ({{name}}); se usa por defecto para decodificar texto más rápido. El MTP nativo se desactiva mientras se usa. Desactívalo en Decodificación especulativa.",
       "bundledDflash2Available": "Este paquete incluye un drafter DFlash2 ({{name}}), ahora sin usar. Actívalo en Decodificación especulativa para texto más rápido.",
       "useBundledDflash2": "Usar el drafter DFlash2 incluido ({{name}})",
-      "useBundledDflash2Tooltip": "Activado por defecto cuando el paquete del modelo incluye un drafter DFlash2. Un modelo borrador indicado abajo tiene prioridad. Desactivado = se usa el MTP nativo del paquete (Adaptativo/AR)."
+      "useBundledDflash2Tooltip": "Activado por defecto cuando el paquete del modelo incluye un drafter DFlash2. Un modelo borrador indicado abajo tiene prioridad. Desactivado = se usa el MTP nativo del paquete (Adaptativo/AR).",
+      "nativeMtpOffForDrafter": "El MTP nativo está desactivado mientras haya un drafter DFlash2 seleccionado (no pueden compartir el paso de decodificación). Borra el modelo borrador o desactiva el drafter incluido para volver a usar MTP adaptativo."
     },
     "create": {
       "title": "Crear sesión",

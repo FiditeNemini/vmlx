@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run no-heavy native MTP policy and wiring contracts.
 
-This gate protects the native-MTP release row: D3 policy, model-local tuning
+This gate protects the native-MTP release row: adaptive two-mode launch policy, model-local tuning
 depths, dropped/preserved MTP detection, MLLM decode-loop safety, telemetry, and
 panel launch controls. It does not claim live equivalence or speed clearance.
 """
@@ -35,6 +35,8 @@ SOURCE_HASH_FILES = (
     "vmlx_engine/server.py",
     "vmlx_engine/native_mtp_policy_suite.py",
     "panel/src/main/sessions.ts",
+    "panel/src/main/nativeMtpLaunchArgs.ts",
+    "panel/src/main/nativeMtpAdoption.ts",
     "panel/src/main/model-config-registry.ts",
     "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx",
     "panel/tests/settings-flow.test.ts",
@@ -72,14 +74,15 @@ REQUIRED_NATIVE_MTP_TEST_MARKERS = (
     "test_partial_indexed_layers_flagged",
     # Panel launch controls. These are display/CLI-wiring contracts, not hidden
     # generation defaults.
-    "defaults native-MTP bundles to adaptive Auto with greedy startup defaults",
-    "lets users disable native MTP without leaving deterministic sampling overrides behind",
+    "defaults native-MTP bundles to Adaptive with the bundle sampler (compatible-only), no depth",
+    "lets users choose AR (MTP off) without leaving sampling overrides behind",
     "keeps non-MTP models on bundle-owned generation defaults",
+    "ignores retired fixed-depth / greedy-only persisted keys: legacy rows launch adaptive",
     "DSV4 additional args cannot reenable native MTP or deterministic sampling policy",
     "does not expose Native MTP for config-only bundles without indexed mtp tensors",
     "does not expose Native MTP for Ling/Bailing config-only bundles without indexed mtp tensors",
     "does not expose Native MTP for Hy3 config-only bundles without indexed mtp tensors",
-    "real session launcher and settings form expose native MTP controls",
+    "real session launcher and settings form expose exactly the two native MTP modes",
 )
 
 COMMANDS: dict[str, tuple[Path, list[str]]] = {
@@ -166,11 +169,14 @@ def build_artifact(root: Path) -> dict[str, Any]:
     engine_passed = results["engine_native_mtp_contracts"]["counts"]["passed"] or 0
     panel_passed = results["panel_native_mtp_controls"]["counts"]["passed"] or 0
     checks = {
+        "all_required_policy_edges_executed": not failed and not missing_markers,
+        # Historical manifest key names remain stable; the panel assertion now
+        # proves Adaptive preserves the bundle sampler without pinning depth.
         "native_mtp_d3_default_policy": (
             not failed
             and "test_native_mtp_depth_defaults_to_three" not in missing_markers
             and "test_mllm_generator_runs_depth3_native_mtp_verify_cycle" not in missing_markers
-            and "defaults native-MTP bundles to adaptive Auto with greedy startup defaults"
+            and "defaults native-MTP bundles to Adaptive with the bundle sampler (compatible-only), no depth"
             not in missing_markers
         ),
         "model_tuning_depth_policy": (
@@ -207,11 +213,11 @@ def build_artifact(root: Path) -> dict[str, Any]:
         ),
         "panel_native_mtp_controls_visible_when_supported": (
             not failed
-            and "real session launcher and settings form expose native MTP controls" not in missing_markers
+            and "real session launcher and settings form expose exactly the two native MTP modes" not in missing_markers
         ),
         "panel_native_mtp_suppressed_for_dsv4_or_unsupported": (
             not failed
-            and "lets users disable native MTP without leaving deterministic sampling overrides behind" not in missing_markers
+            and "lets users choose AR (MTP off) without leaving sampling overrides behind" not in missing_markers
             and "keeps non-MTP models on bundle-owned generation defaults" not in missing_markers
             and "DSV4 additional args cannot reenable native MTP or deterministic sampling policy" not in missing_markers
         ),

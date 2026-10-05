@@ -235,6 +235,17 @@ export async function executeBuiltinTool(
 
 // ─── Tool Implementations ────────────────────────────────────────────────────
 
+/** A terminal newline ends the last line; it does not create another one.
+ * Preserve real blank lines and strip CR only when it belongs to a CRLF.
+ * This is presentation/counting only: write_file always writes original bytes.
+ */
+function fileDisplayLines(content: string): string[] {
+  if (!content) return []
+  const lines = content.split(/\r?\n/)
+  if (content.endsWith('\n')) lines.pop()
+  return lines
+}
+
 function readFile(path: string, workingDir: string, offset?: number, limit?: number): ToolResult {
   if (!path) return { content: 'Missing required parameter: path', is_error: true }
   const fullPath = resolvePath(workingDir, path)
@@ -250,7 +261,7 @@ function readFile(path: string, workingDir: string, offset?: number, limit?: num
     return { content: `File is too large (${formatBytes(stat.size)}). Use run_command with head/tail to read portions.`, is_error: true }
   }
   const content = readFileSync(fullPath, 'utf-8')
-  const allLines = content.split('\n')
+  const allLines = fileDisplayLines(content)
   const totalLines = allLines.length
 
   // Apply offset/limit (1-based offset)
@@ -262,7 +273,9 @@ function readFile(path: string, workingDir: string, offset?: number, limit?: num
   const numbered = slice.map((line, i) => `${String(startLine + i).padStart(5)} | ${line}`).join('\n')
 
   let header = `File: ${fullPath} (${totalLines} lines)`
-  if (startLine > 1 || endLine < totalLines) {
+  if (slice.length === 0) {
+    header += totalLines === 0 ? ' — empty file' : ` — no lines at offset ${startLine}`
+  } else if (startLine > 1 || endLine < totalLines) {
     header += ` — showing lines ${startLine}–${endLine}`
   }
   if (endLine < totalLines) {
@@ -278,7 +291,7 @@ function writeFile(path: string, content: string, workingDir: string): ToolResul
   const fullPath = resolvePath(workingDir, path)
   mkdirSync(dirname(fullPath), { recursive: true })
   writeFileSync(fullPath, content, 'utf-8')
-  const lines = content.split('\n').length
+  const lines = fileDisplayLines(content).length
   const bytes = Buffer.byteLength(content, 'utf-8')
   return { content: `Wrote ${fullPath} (${lines} lines, ${bytes} bytes)`, is_error: false }
 }

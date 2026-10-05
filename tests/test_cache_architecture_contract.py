@@ -381,3 +381,18 @@ def test_cache_architecture_default_still_runs_original_children(tmp_path, monke
     artifact = gate.build_artifact(tmp_path)
     assert calls == list(gate.COMMANDS)
     assert "retained_api_cache" not in artifact
+
+
+def test_cache_family_matrix_requirements_are_checked_for_absence():
+    from tests.cross_matrix import run_cache_architecture_contract as gate
+
+    categories = {
+        "markers": gate.REQUIRED_CACHE_TEST_MARKERS,
+        "panel_markers": gate.REQUIRED_PANEL_CACHE_MARKERS,
+        "api_checks": gate.REQUIRED_API_CACHE_CHECKS,
+        "api_command_markers": gate.REQUIRED_API_CACHE_COMMAND_MARKERS,
+    }
+    for row_id, requirement in gate.REQUIRED_CACHE_FAMILY_MATRIX.items():
+        for category, required in categories.items():
+            assert set(requirement[category]) <= set(required), (row_id, category)
+    assert "test_mimo_v2_cache_extraction_preserves_swa_kv_heads" in gate.CACHE_PATTERN

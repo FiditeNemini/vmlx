@@ -43,7 +43,8 @@ CACHE_PATTERN = (
     "or prompt_disk_l2 or mllm_stats_include_cache or mixed_swa "
     "or RotatingKVCache or jang_stamp_model_type_alias or ling or bailing "
     "or nemotron or minimax or qwen36 or qwen3_5 or hy_v3 "
-    "or step3p7 or step37 or lfm2 or ssm_l2 or companion_l2 or block_disk"
+    "or step3p7 or step37 or lfm2 or ssm_l2 or companion_l2 or block_disk "
+    "or test_mimo_v2_cache_extraction_preserves_swa_kv_heads"
 )
 
 SOURCE_HASH_FILES = (
@@ -111,6 +112,7 @@ REQUIRED_CACHE_TEST_MARKERS = (
     "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state",
     "test_hybrid_ssm_auto_mode_disables_live_tq_and_stores_full_precision",
     "test_mimo_v2_jang_loader_skips_generic_turboquant_kv_auto_mode",
+    "test_mimo_v2_cache_extraction_preserves_swa_kv_heads",
     "test_accepts_scheduler_owned_ssm_l2_store",
     "test_scheduler_creates_matching_ssm_companion_l2_for_block_disk",
     # L2/block-disk must backfill paged cache for later partial reuse.

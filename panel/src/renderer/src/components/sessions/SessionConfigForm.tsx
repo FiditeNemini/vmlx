@@ -1,6 +1,7 @@
 import { DEFAULT_BLOCK_DISK_CACHE_PERCENT } from '../../../../shared/cacheDefaults'
 import { resolveNativeMtpMode } from '../../../../shared/nativeMtpLaunchArgs'
 import { useEffect, useState, useRef } from 'react'
+import { QWEN38_27B_DFLASH2_REPO, isQwen38Dense27b, looksLikeDflash2Drafter } from '../../../../shared/dflash2Drafter'
 import { Modal } from '../ui/Modal'
 import { useTranslation } from '../../i18n'
 import {
@@ -81,6 +82,8 @@ export interface SessionConfig {
   isMultimodal?: boolean
   servedModelName: string
   speculativeModel: string
+  /** Use a DFlash2 drafter shipped inside the model bundle when present. */
+  useBundledDflash2?: boolean
   numDraftTokens: number
   nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'
   smelt: boolean
@@ -183,6 +186,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   isMultimodal: undefined,
   servedModelName: '',
   speculativeModel: '',
+  useBundledDflash2: true,
   numDraftTokens: 3,
   nativeMtpMode: undefined,
   smelt: false,
@@ -417,7 +421,28 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const zayaCcaActive = isZayaCcaFamily(normalizedDetectedFamily)
   const turboQuantActive = !!detectedIsTurboQuant
   const multimodalActive = !dsv4Active && !detectedForceTextOnly && (!!detectedIsMultimodal || config.isMultimodal === true)
-  const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
+  // Qwen3.8 27B is the only Qwen3.8 MTP family with a published DFlash2 block
+  // drafter; it beats native MTP on text there (see shared/dflash2Drafter.ts).
+  // A bundle may also SHIP its drafter (`<bundle>/dflash2`); then it is used by
+  // default (useBundledDflash2), and bundles without one are unaffected.
+  const qwen38Dense27b = !isImage && isQwen38Dense27b(modelIdentity)
+  const bundlePath = String(modelIdentity || '').split(/\s+/).reverse().find(part => part.startsWith('/')) || ''
+  const [dflash2Drafters, setDflash2Drafters] = useState<Array<{ name: string; path: string; bundled?: boolean }>>([])
+  useEffect(() => {
+    if (isImage || !bundlePath) return
+    let alive = true
+    const api = (window as any).api?.models
+    if (typeof api?.dflash2Drafters !== 'function') return
+    api.dflash2Drafters(bundlePath, qwen38Dense27b)
+      .then((list: unknown) => { if (alive && Array.isArray(list)) setDflash2Drafters(list as Array<{ name: string; path: string; bundled?: boolean }>) })
+      .catch(() => { /* advisory only */ })
+    return () => { alive = false }
+  }, [bundlePath, qwen38Dense27b, isImage])
+  const bundledDflash2 = dflash2Drafters.find(d => d.bundled) || null
+  const bundledDflash2Active = !!bundledDflash2 && config.useBundledDflash2 !== false && !config.speculativeModel
+  const effectiveDraftModel = config.speculativeModel || (bundledDflash2Active ? bundledDflash2!.path : '')
+  const dflash2Speculative = looksLikeDflash2Drafter(effectiveDraftModel) ||
+    dflash2Drafters.some(d => d.path === effectiveDraftModel)
   const hybridCacheActive =
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||
@@ -721,6 +746,20 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       )}
       {lagunaXsTopKMetadataWarning && (
         <IncompatWarning text={t('sessions.config.lagunaXsTopKWarning')} />
+      )}
+      {bundledDflash2 && (
+        <div data-vmlx-section="bundled-dflash2-notice">
+          <InfoNote text={bundledDflash2Active
+            ? t('sessions.config.bundledDflash2Active', { name: bundledDflash2.name })
+            : t('sessions.config.bundledDflash2Available', { name: bundledDflash2.name })} />
+        </div>
+      )}
+      {qwen38Dense27b && !bundledDflash2 && !dflash2Speculative && (
+        <div data-vmlx-section="qwen38-dflash2-notice">
+          <IncompatWarning text={dflash2Drafters.length > 0
+            ? t('sessions.config.qwen38Dflash2Installed', { path: dflash2Drafters[0].path })
+            : t('sessions.config.qwen38Dflash2Recommend', { repo: QWEN38_27B_DFLASH2_REPO })} />
+        </div>
       )}
       {/* Product-wide cache contract: the retained paged-RAM tier is locked off
           and SSD is authoritative. Keep this visible outside the collapsed
@@ -1757,6 +1796,32 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         <Field label={t('sessions.config.draftModel')} tooltip={t('sessions.config.draftModelTooltip')}>
           <input type="text" value={config.speculativeModel} onChange={e => onChange('speculativeModel', e.target.value)} placeholder={t('sessions.config.specModelPlaceholder')} className="cfg-input" disabled={dsv4Active || (!multimodalActive && config.continuousBatching)} />
         </Field>
+        {bundledDflash2 && (
+          <CheckField
+            label={t('sessions.config.useBundledDflash2', { name: bundledDflash2.name })}
+            tooltip={t('sessions.config.useBundledDflash2Tooltip')}
+            checked={config.useBundledDflash2 !== false}
+            onChange={v => onChange('useBundledDflash2', v)}
+          />
+        )}
+        {(qwen38Dense27b || bundledDflash2) && dflash2Drafters.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-2" data-vmlx-section="dflash2-drafter-picker">
+            {dflash2Drafters.map(d => (
+              <button
+                key={d.path}
+                type="button"
+                className={`px-2 py-0.5 text-xs rounded border ${config.speculativeModel === d.path ? 'border-primary text-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}
+                onClick={() => onChange('speculativeModel', config.speculativeModel === d.path ? '' : d.path)}
+                title={d.path}
+              >
+                {config.speculativeModel === d.path
+                  ? t('sessions.config.dflash2DrafterSelected', { name: d.name })
+                  : t('sessions.config.dflash2DrafterUse', { name: d.name })}
+              </button>
+            ))}
+          </div>
+        )}
+        {dflash2Speculative && <InfoNote text={t('sessions.config.dflash2ActiveNote')} />}
         {config.speculativeModel && (
           <SliderField settingKey="numDraftTokens"
             label={t('sessions.config.draftTokensPerStep')}

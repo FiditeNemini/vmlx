@@ -112,6 +112,8 @@ export interface ServerConfig {
 
   // Speculative decoding
   speculativeModel?: string
+  /** Use a DFlash2 drafter shipped inside the model bundle (default true). */
+  useBundledDflash2?: boolean
   numDraftTokens?: number
 
   // Native in-model MTP: 'adaptive' (engine-governed speculation) or 'off'

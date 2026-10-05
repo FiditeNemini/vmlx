@@ -1076,7 +1076,16 @@
       "videoMaxPixelsMax": "loader maximum",
       "videoTokenBudget": "Video Token Budget",
       "videoTokenBudgetTooltip": "Approximate cap on vision tokens for each video attachment (images are not included; it never limits output tokens or context). The engine turns it into a per-clip pixel budget (tokens × the model's pixels per video token; 2,048 for Qwen3-VL) that the video loader spreads across the sampled frames; frames still round to the model's patch size and the processor keeps its own whole-clip bounds, so the exact count can differ. The engine log line 'Video processed' shows the real token count.",
-      "multimodalSection": "Multimodal & Video"
+      "multimodalSection": "Multimodal & Video",
+      "qwen38Dflash2Recommend": "Qwen3.8 27B: a DFlash2 drafter makes this model much faster on text (measured 1.15-2.1x on prose, 2-3.3x on code vs plain decoding). Download {{repo}} (3.6 GB) from Hugging Face into your models folder, then pick it under Speculative Decoding → Draft model. With a drafter, native MTP is turned off, image turns run without speculative acceleration, and requests are served one at a time.",
+      "qwen38Dflash2Installed": "Qwen3.8 27B: a DFlash2 drafter is installed ({{path}}). Select it under Speculative Decoding → Draft model for faster text (measured 1.15-2.1x prose, 2-3.3x code). Native MTP turns off while it is selected.",
+      "dflash2DrafterUse": "Use {{name}}",
+      "dflash2DrafterSelected": "{{name}} selected (click to clear)",
+      "dflash2ActiveNote": "DFlash2 drafter active: native MTP is off, requests are served one at a time, and image turns decode without speculative acceleration.",
+      "bundledDflash2Active": "This bundle ships a DFlash2 drafter ({{name}}); it is used by default for faster text decoding. Native MTP is off while it runs. Turn it off under Speculative Decoding.",
+      "bundledDflash2Available": "This bundle ships a DFlash2 drafter ({{name}}), currently not in use. Enable it under Speculative Decoding for faster text decoding.",
+      "useBundledDflash2": "Use the bundled DFlash2 drafter ({{name}})",
+      "useBundledDflash2Tooltip": "On by default when the model bundle includes a DFlash2 drafter. A Draft model entered below takes precedence. Off = the bundle's native MTP (Adaptive/AR) is used instead."
     },
     "create": {
       "title": "Create Session",

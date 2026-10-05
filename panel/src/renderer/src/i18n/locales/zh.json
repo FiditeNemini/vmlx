@@ -1076,7 +1076,16 @@
       "videoMaxPixelsMax": "加载器上限",
       "videoTokenBudget": "视频 token 预算",
       "videoTokenBudgetTooltip": "每个视频附件的视觉 token 数量上限（近似值；不包含图片，也不限制输出 token 或上下文）。引擎将其换算为每段视频的像素预算（token 数 × 2,048 (Qwen3-VL) pixels per token 像素），由加载器分配到各采样帧；帧仍按模型的 patch 尺寸取整，处理器还会套用自身的整段限制，因此实际数量可能不同。引擎日志中的“Video processed”行显示真实的 token 数。",
-      "multimodalSection": "多模态与视频"
+      "multimodalSection": "多模态与视频",
+      "qwen38Dflash2Recommend": "Qwen3.8 27B：使用 DFlash2 草稿模型可大幅提升文本生成速度（实测相对普通解码：散文 1.15–2.1 倍，代码 2–3.3 倍）。从 Hugging Face 下载 {{repo}}（3.6 GB）到模型文件夹，然后在“推测解码 → 草稿模型”中选择。使用草稿模型时，原生 MTP 关闭，图像轮次不使用推测加速，请求逐个处理。",
+      "qwen38Dflash2Installed": "Qwen3.8 27B：已安装 DFlash2 草稿模型（{{path}}）。在“推测解码 → 草稿模型”中选择即可加速文本（实测散文 1.15–2.1 倍，代码 2–3.3 倍）。选中期间原生 MTP 关闭。",
+      "dflash2DrafterUse": "使用 {{name}}",
+      "dflash2DrafterSelected": "已选择 {{name}}（点击清除）",
+      "dflash2ActiveNote": "DFlash2 草稿模型已启用：原生 MTP 关闭，请求逐个处理，图像轮次在无推测加速的情况下解码。",
+      "bundledDflash2Active": "此模型包内置 DFlash2 草稿模型（{{name}}），默认用于加速文本解码。使用期间原生 MTP 关闭。可在“推测解码”中关闭。",
+      "bundledDflash2Available": "此模型包内置 DFlash2 草稿模型（{{name}}），当前未使用。在“推测解码”中启用可加速文本。",
+      "useBundledDflash2": "使用内置的 DFlash2 草稿模型（{{name}}）",
+      "useBundledDflash2Tooltip": "模型包包含 DFlash2 草稿模型时默认开启。下方填写的草稿模型优先。关闭后使用模型包自带的原生 MTP（自适应/AR）。"
     },
     "create": {
       "title": "创建会话",

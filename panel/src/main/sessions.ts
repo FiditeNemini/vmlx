@@ -114,6 +114,23 @@ import {
 } from '../shared/launchArgValues'
 import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../shared/nativeMtpLaunchArgs'
 import { planSessionConfigSave } from '../shared/sessionConfigLifecycle'
+import { configDeclaresDflash2, looksLikeDflash2Drafter } from '../shared/dflash2Drafter'
+import { findBundledDflash2Drafter } from './dflash2Bundle'
+
+/** DFlash2 drafter by its config.json architecture (local path), else by name. */
+function isDflash2DrafterSelection(path: string | undefined | null): boolean {
+  const value = String(path || '').trim()
+  if (!value) return false
+  try {
+    const cfg = join(value, 'config.json')
+    if (existsSync(cfg)) return configDeclaresDflash2(JSON.parse(readFileSync(cfg, 'utf8')))
+  } catch {
+    /* fall back to the name test */
+  }
+  return looksLikeDflash2Drafter(value)
+}
+
+
 
 /** Result of findEnginePath: packaged Python, a source-bound dev venv, or a system binary. */
 type EnginePath =
@@ -580,6 +597,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--worker-nodes',
   '--cluster-secret',
   '--speculative-model',
+  '--no-bundled-dflash2',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',
@@ -667,6 +685,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--worker-nodes',
   '--cluster-secret',
   '--speculative-model',
+  '--no-bundled-dflash2',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',
@@ -3843,7 +3862,7 @@ export class SessionManager extends EventEmitter {
     'maxTokens', 'maxContextLength', 'mcpConfig',
     'mcpEnabledServers', 'mcpDisabledServers', 'mcpEnabledTools', 'mcpDisabledTools',
     'servedModelName',
-    'speculativeModel', 'numDraftTokens', 'smelt', 'smeltExperts',
+    'speculativeModel', 'numDraftTokens', 'useBundledDflash2', 'smelt', 'smeltExperts',
     'nativeMtpMode',
     'omniBackend',
     'flashMoe', 'flashMoeSlotBank', 'flashMoePrefetch', 'flashMoeIoSplit',
@@ -5211,7 +5230,17 @@ export class SessionManager extends EventEmitter {
       args.push('--text-only')
     }
 
-    const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
+    // Drafter precedence: the user's explicit Draft model, else a DFlash2
+    // drafter shipped inside the bundle (default on, `useBundledDflash2`),
+    // else none — bundles without a drafter launch exactly as before.
+    const bundledDflash2Drafter = (config as any).useBundledDflash2 === false || dsv4Active
+      ? null
+      : findBundledDflash2Drafter(config.modelPath)
+    const effectiveSpeculativeModel = config.speculativeModel || bundledDflash2Drafter || ''
+    if (!config.speculativeModel && bundledDflash2Drafter) {
+      console.log(`[SESSION] Using the DFlash2 drafter bundled with the model: ${bundledDflash2Drafter}`)
+    }
+    const dflash2Speculative = isDflash2DrafterSelection(effectiveSpeculativeModel)
     const cacheStackActive = dsv4Active
       ? true
       : dflash2Speculative
@@ -5449,7 +5478,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Speculative decoding
-    const externalSpeculativeModel = config.speculativeModel || ''
+    const externalSpeculativeModel = effectiveSpeculativeModel
     const loopedNanbeige = detected.family === 'nanbeige' || detected.architectureHints?.cacheSchema === 'looped_kv_v1'
     const compatibleExternalSpeculative = !!externalSpeculativeModel && (
       dflash2Speculative
@@ -5467,6 +5496,11 @@ export class SessionManager extends EventEmitter {
         ? 'Nanbeige has 44 looped KV slots for 22 shared layers'
         : 'this runtime does not support external draft decoding'
       console.warn(`[SESSION] Ignoring stale speculative model because ${reason}`)
+    }
+    if (!config.speculativeModel && (config as any).useBundledDflash2 === false &&
+        findBundledDflash2Drafter(config.modelPath)) {
+      // The engine also defaults to a bundled drafter; honour the user's "off".
+      args.push('--no-bundled-dflash2')
     }
     if (compatibleExternalSpeculative) {
       args.push('--speculative-model', externalSpeculativeModel)

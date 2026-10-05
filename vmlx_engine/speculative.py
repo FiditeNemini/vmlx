@@ -95,6 +95,27 @@ def _is_dflash2_model(model: str) -> bool:
     return "dflash2" in model.lower()
 
 
+def find_bundled_dflash2(model_path: str) -> str | None:
+    """A DFlash2 drafter shipped inside the model bundle, or None.
+
+    Any immediate subfolder whose config.json declares DFlash2DraftModel
+    (convention: ``<bundle>/dflash2``). Bundles without one return None.
+    """
+    root = Path(str(model_path or "")).expanduser()
+    if not root.is_dir():
+        return None
+    try:
+        children = sorted(root.iterdir(), key=lambda p: (p.name != "dflash2", p.name))
+    except OSError:
+        return None
+    for child in children:
+        if child.name.startswith(".") or not child.is_dir():
+            continue
+        if _is_dflash2_model(str(child)) and (child / "config.json").is_file():
+            return str(child)
+    return None
+
+
 def resolve_num_draft_tokens(model: str, requested: int) -> int:
     """Return the verifier width the selected draft runtime will actually use."""
     if not _is_dflash2_model(model):

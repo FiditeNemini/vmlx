@@ -1644,6 +1644,23 @@ def serve_command(args):
             sys.exit(1)
         server._default_repetition_penalty = args.default_repetition_penalty
 
+    # A DFlash2 drafter shipped inside the bundle (`<bundle>/dflash2`) is used
+    # by default; an explicit --speculative-model wins and --no-bundled-dflash2
+    # opts out. Bundles without one are unaffected.
+    if not getattr(args, "speculative_model", None) and not getattr(
+        args, "no_bundled_dflash2", False
+    ):
+        from .speculative import find_bundled_dflash2
+
+        _bundled_drafter = find_bundled_dflash2(getattr(args, "model", ""))
+        if _bundled_drafter:
+            args.speculative_model = _bundled_drafter
+            logger.info(
+                "Using the DFlash2 drafter bundled with the model: %s "
+                "(--no-bundled-dflash2 to use native MTP instead)",
+                _bundled_drafter,
+            )
+
     # An external draft model and the bundle's own MTP heads are two
     # speculative decoders competing for the same decode step. Running both
     # gives neither a clean measurement and produces wildly variable decode
@@ -4328,6 +4345,13 @@ Examples:
              "The draft model proposes tokens that the main model verifies in a single "
              "forward pass, giving 20-90%% speedup with zero quality loss. Must use the "
              "same tokenizer as the main model. Example: --speculative-model mlx-community/Llama-3.2-1B-Instruct-4bit",
+    )
+    serve_parser.add_argument(
+        "--no-bundled-dflash2",
+        action="store_true",
+        default=False,
+        help="Ignore a DFlash2 drafter shipped inside the model bundle "
+             "(<bundle>/dflash2) and use the bundle's native MTP instead.",
     )
     serve_parser.add_argument(
         "--num-draft-tokens",

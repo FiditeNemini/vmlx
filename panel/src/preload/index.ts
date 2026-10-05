@@ -20,6 +20,7 @@ const api = {
   // Model management
   models: {
     scan: (modelType?: string) => ipcRenderer.invoke('models:scan', modelType),
+    dflash2Drafters: (bundlePath?: string, scanLibrary?: boolean): Promise<Array<{ name: string; path: string; bundled?: boolean }>> => ipcRenderer.invoke('models:dflash2Drafters', bundlePath, scanLibrary),
     info: (modelPath: string) => ipcRenderer.invoke('models:info', modelPath),
     getDirectories: (modelType?: string) => ipcRenderer.invoke('models:getDirectories', modelType),
     addDirectory: (dirPath: string, modelType?: string) => ipcRenderer.invoke('models:addDirectory', dirPath, modelType),

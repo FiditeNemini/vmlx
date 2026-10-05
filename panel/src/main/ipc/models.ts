@@ -17,6 +17,8 @@ import { homedir } from "os";
 import { spawn, ChildProcess } from "child_process";
 import { db } from "../database";
 import { detectModelConfigFromDir } from "../model-config-registry";
+import { configDeclaresDflash2 } from "../../shared/dflash2Drafter";
+import { findBundledDflash2Drafter } from "../dflash2Bundle";
 import { getBundledPythonPath, getDevelopmentProjectVenv } from "../engine-manager";
 import {
   getImageModelEncoderType,
@@ -1088,8 +1090,61 @@ export function killActiveDownload(): void {
   _killActiveDownload?.();
 }
 
+async function findDflash2Drafters(): Promise<Array<{ name: string; path: string }>> {
+  // Drafter folders hold config.json + weights but no tokenizer, so the general
+  // model scan can miss them; walk the configured directories (depth <= 3).
+  const found: Array<{ name: string; path: string }> = [];
+  const seen = new Set<string>();
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > 3 || found.length >= 50) return;
+    const cfg = join(dir, "config.json");
+    if (existsSync(cfg)) {
+      try {
+        if (configDeclaresDflash2(JSON.parse(readFileSync(cfg, "utf8")))) {
+          const key = dir.replace(/\/+$/, "");
+          if (!seen.has(key)) {
+            seen.add(key);
+            found.push({ name: basename(dir), path: dir });
+          }
+          return;
+        }
+      } catch {
+        /* unreadable config: not a drafter we can vouch for */
+      }
+    }
+    let entries: string[] = [];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.startsWith(".")) continue;
+      const child = join(dir, entry);
+      try {
+        if ((await stat(child)).isDirectory()) await walk(child, depth + 1);
+      } catch {
+        /* skip */
+      }
+    }
+  };
+  for (const base of getModelDirectories("text")) {
+    await walk(base, 0);
+  }
+  return found;
+}
+
 export function registerModelHandlers(): void {
   // Scan for available models in all configured directories
+  ipcMain.handle("models:dflash2Drafters", async (_e, bundlePath?: string, scanLibrary: boolean = true) => {
+    // The library walk only runs where a drafter is relevant (Qwen3.8 27B);
+    // the bundle check is one directory listing for any model.
+    const list: Array<{ name: string; path: string; bundled?: boolean }> = scanLibrary ? await findDflash2Drafters() : [];
+    const bundled = bundlePath ? findBundledDflash2Drafter(bundlePath) : null;
+    if (!bundled) return list;
+    return [{ name: basename(bundled), path: bundled, bundled: true }, ...list.filter((d) => d.path !== bundled)];
+  });
+
   ipcMain.handle("models:scan", async (_, modelType?: string) => {
     const dirs = getModelDirectories(modelType);
     console.log("[MODELS] Scanning directories:", dirs);

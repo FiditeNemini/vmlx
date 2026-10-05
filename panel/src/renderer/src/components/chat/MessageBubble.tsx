@@ -6,6 +6,7 @@ import { AlertTriangle, Copy, Check, User, Sparkles, RefreshCw, Pencil, Loader2 
 import { ReasoningBox } from './ReasoningBox'
 import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
+import { useElapsedSeconds } from './useElapsedSeconds'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
 import { useRelativeTime } from '../ui/use-relative-time'
@@ -224,6 +225,13 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     return groupToolStatuses(toolStatuses)
   }, [toolStatuses])
 
+  // Live processing/generating row: real elapsed seconds since the producer
+  // emitted that status (no synthetic percentage).
+  const processingElapsed = useElapsedSeconds(
+    toolGroups?.processingStatus?.timestamp,
+    !!isStreaming && !!toolGroups?.processingStatus,
+  )
+
   // Typewriter: smooth character-by-character reveal during streaming
   const displayedContent = useTypewriter(message.content, !!isStreaming)
   const sourceReasoningSegments = Array.isArray(reasoningSegments) && reasoningSegments.length > 0
@@ -365,9 +373,10 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
           show it after the last recorded item instead of dropping it. */}
       {toolGroups?.processingStatus && isStreaming && (
         <div key="processing" className="flex items-center gap-2 text-muted-foreground text-xs py-1"
-          data-vmlx-proof-tool-progress={toolGroups.processingStatus.phase === 'generating' ? 'generating' : 'processing'}>
+          data-vmlx-proof-tool-progress={toolGroups.processingStatus.phase === 'generating' ? 'generating' : 'processing'}
+          data-vmlx-proof-tool-progress-elapsed-s={processingElapsed ?? undefined}>
           <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${toolGroups.processingStatus.phase === 'generating' ? 'bg-primary' : 'bg-warning'}`} />
-          <span>{toolGroups.processingStatus.phase === 'generating' ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}</span>
+          <span>{toolGroups.processingStatus.phase === 'generating' ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}{processingElapsed != null && processingElapsed >= 1 ? ` ${processingElapsed}s` : ''}</span>
         </div>
       )}</>
     }
@@ -394,9 +403,10 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         const isGenerating = toolGroups.processingStatus.phase === 'generating'
         elements.push(
           <div key="processing" className="flex items-center gap-2 text-muted-foreground text-xs py-1"
-            data-vmlx-proof-tool-progress={isGenerating ? 'generating' : 'processing'}>
+            data-vmlx-proof-tool-progress={isGenerating ? 'generating' : 'processing'}
+            data-vmlx-proof-tool-progress-elapsed-s={processingElapsed ?? undefined}>
             <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${isGenerating ? 'bg-primary' : 'bg-warning'}`} />
-            <span>{isGenerating ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}</span>
+            <span>{isGenerating ? t('chat.bubble.generatingTool') : t('chat.bubble.processingTool')}{processingElapsed != null && processingElapsed >= 1 ? ` ${processingElapsed}s` : ''}</span>
           </div>
         )
       }

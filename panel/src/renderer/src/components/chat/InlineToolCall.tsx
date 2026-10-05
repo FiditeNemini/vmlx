@@ -2,10 +2,11 @@ import { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from '../../i18n'
 import { Check, X, Square, ChevronRight, Loader2 } from 'lucide-react'
 import { parseToolArgs, getToolSummary, formatJson } from './chat-utils'
+import { formatDurationMs, useElapsedSeconds } from './useElapsedSeconds'
 
 export interface InlineToolGroup {
   name: string
-  statuses: Array<{ phase: string; toolName: string; toolCallId?: string; detail?: string; iteration?: number }>
+  statuses: Array<{ phase: string; toolName: string; toolCallId?: string; detail?: string; iteration?: number; timestamp?: number }>
 }
 
 interface InlineToolCallProps {
@@ -45,6 +46,16 @@ export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
   const args = useMemo(() => parseToolArgs(callingStatus?.detail), [callingStatus?.detail])
   const summary = useMemo(() => getToolSummary(group.name, args), [group.name, args])
   const iteration = callingStatus?.iteration
+  // Long-running tool feedback: real elapsed time from the producer's own
+  // status timestamps (executing, else calling) while the call is open, and
+  // the measured duration once a result/error arrived. No percentages are
+  // shown because the executor reports none; a legacy row without timestamps
+  // keeps the spinner only.
+  const executingStatus = group.statuses.find(s => s.phase === 'executing')
+  const startAt = executingStatus?.timestamp ?? callingStatus?.timestamp
+  const endAt = resultStatus?.timestamp
+  const elapsed = useElapsedSeconds(startAt, !isDone && isStreaming)
+  const durationMs = isDone && startAt != null && endAt != null && endAt >= startAt ? endAt - startAt : null
 
   return (
     <div
@@ -52,6 +63,8 @@ export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
       data-vmlx-proof-tool-name={group.name}
       data-vmlx-proof-tool-call-id={callingStatus?.toolCallId || ''}
       data-vmlx-proof-tool-phase={lastPhase.phase}
+      data-vmlx-proof-tool-elapsed-s={!isDone && elapsed != null ? elapsed : undefined}
+      data-vmlx-proof-tool-duration-ms={durationMs != null ? durationMs : undefined}
       className={`my-1.5 rounded-lg border overflow-hidden transition-all duration-150 ${
       !isDone && isStreaming ? 'border-warning/40 border-l-warning border-l-2' : 'border-border/60'
     } bg-popover/80`}>
@@ -94,6 +107,14 @@ export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
               lastPhase.phase === 'calling' ? 'detected' :
               lastPhase.phase === 'asking' ? 'waiting\u2026' :
               lastPhase.phase === 'executing' ? 'running\u2026' : ''}
+            {isStreaming && elapsed != null && elapsed >= 1 && lastPhase.phase !== 'asking' ? ` ${elapsed}s` : ''}
+          </span>
+        )}
+
+        {/* Measured duration of a completed call */}
+        {isDone && durationMs != null && (
+          <span className="text-muted-foreground/70 text-[10px] flex-shrink-0" title="measured from the executor's own timestamps">
+            {formatDurationMs(durationMs)}
           </span>
         )}
 

@@ -82,6 +82,58 @@ describe('interleaved reasoning rendered display', () => {
     expect(done).not.toContain('data-vmlx-proof-tool-progress')
   })
 
+  it('shows real elapsed time on an open tool call and the measured duration once it completed', () => {
+    const t0 = Date.now() - 7_400
+    const record = new AssistantDisplayTimelineRecorder()
+    record.observeReasoning(['PLAN'])
+    record.tool('cmd-1')
+    const open = renderBubble({
+      message: { ...baseMessage, content: '', displayTimeline: record.snapshot() },
+      reasoningSegments: ['PLAN'], reasoningDone: false, isStreaming: true,
+      toolStatuses: [
+        { phase: 'calling', toolName: 'run_command', toolCallId: 'cmd-1', contentOffset: 0, detail: '{"command":"sleep 6"}', timestamp: t0 - 300 },
+        { phase: 'executing', toolName: 'run_command', toolCallId: 'cmd-1', timestamp: t0 },
+      ],
+    })
+    expect(open).toMatch(/data-vmlx-proof-tool-elapsed-s="7"/)
+    expect(open).toContain('running… 7s')
+    expect(open).not.toMatch(/\d+%<\/span>/)   // no fabricated percentage in any status label
+    const done = renderBubble({
+      message: { ...baseMessage, content: 'ANSWER', displayTimeline: (() => { record.observeContent('ANSWER'); return record.snapshot() })() },
+      reasoningSegments: ['PLAN'], reasoningDone: true, isStreaming: false,
+      toolStatuses: [
+        { phase: 'calling', toolName: 'run_command', toolCallId: 'cmd-1', contentOffset: 0, detail: '{"command":"sleep 6"}', timestamp: t0 - 300 },
+        { phase: 'executing', toolName: 'run_command', toolCallId: 'cmd-1', timestamp: t0 },
+        { phase: 'result', toolName: 'run_command', toolCallId: 'cmd-1', detail: 'done', timestamp: t0 + 6_250 },
+      ],
+    })
+    expect(done).toMatch(/data-vmlx-proof-tool-duration-ms="6250"/)
+    expect(done).toContain('6.3s')
+    expect(done).not.toContain('data-vmlx-proof-tool-elapsed-s')
+    // Legacy rows without timestamps keep the indicator only, no invented number.
+    const legacy = renderBubble({
+      message: { ...baseMessage, content: '', displayTimeline: record.snapshot() },
+      reasoningSegments: ['PLAN'], reasoningDone: false, isStreaming: true,
+      toolStatuses: [
+        { phase: 'calling', toolName: 'run_command', toolCallId: 'cmd-1', contentOffset: 0, detail: '{}' },
+        { phase: 'executing', toolName: 'run_command', toolCallId: 'cmd-1' },
+      ],
+    })
+    expect(legacy).toContain('running…')
+    expect(legacy).not.toContain('data-vmlx-proof-tool-elapsed-s')
+    // The processing row carries its own real elapsed seconds.
+    const processing = renderBubble({
+      message: { ...baseMessage, content: '', displayTimeline: record.snapshot() },
+      reasoningSegments: ['PLAN'], reasoningDone: false, isStreaming: true,
+      toolStatuses: [
+        { phase: 'calling', toolName: 'run_command', toolCallId: 'cmd-1', contentOffset: 0, detail: '{}', timestamp: t0 - 300 },
+        { phase: 'result', toolName: 'run_command', toolCallId: 'cmd-1', detail: 'done', timestamp: t0 },
+        { phase: 'processing', timestamp: Date.now() - 3_100 },
+      ],
+    })
+    expect(processing).toMatch(/data-vmlx-proof-tool-progress-elapsed-s="3"/)
+  })
+
   it('keeps final reasoning after multiple calls from an empty-reasoning pass', () => {
     const record = new AssistantDisplayTimelineRecorder()
     record.tool('a'); record.tool('b'); record.observeReasoning(['', 'AFTER-RESULTS'])

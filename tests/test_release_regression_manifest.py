@@ -16361,3 +16361,161 @@ def test_manifest_documents_the_media_row_regeneration_envs():
     harness = Path("panel/scripts/live-real-ui-model-proof.mjs").read_text()
     for env in MEDIA_ROW_REGENERATION_ENVS:
         assert env in harness, f"{env} is documented but the harness never reads it"
+
+
+def _scoped_prepackage_fixture(tmp_path, monkeypatch):
+    from tests.cross_matrix import run_release_regression_manifest as runner
+    root = tmp_path / "repo"
+    evidence = tmp_path / "evidence"
+    root.mkdir()
+    evidence.mkdir()
+    (root / "owned.py").write_text("unchanged = True\n")
+    digest = hashlib.sha256((root / "owned.py").read_bytes()).hexdigest()
+
+    def write(name, value):
+        path = evidence / name
+        path.write_text(json.dumps(value))
+        return {"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+    raw = write("raw.json", {"command": ["pytest", "owned"], "returncode": 0,
+                              "counts": {"passed": 1}, "original_timestamp": "2026-10-05T00:00:00Z"})
+    image = evidence / "visual.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    image_ref = {"path": image.name, "sha256": hashlib.sha256(image.read_bytes()).hexdigest()}
+    stream = evidence / "api.sse"
+    stream.write_text('data: {"choices": [{"delta": {"content": "fixture"}}]}\n\n')
+    stream_ref = {"path": stream.name, "sha256": hashlib.sha256(stream.read_bytes()).hexdigest()}
+    receipt = write("acceptance.json", {"status": "PASS", "source_hashes": {"owned.py": digest},
+                                       "artifacts": [raw]})
+    scope = write("scope.json", {"models": sorted(runner.SCOPED_MODELS),
+                                 "required_receipts": sorted(runner.SCOPED_REQUIRED_RECEIPTS),
+                                 "authority": "explicit finite scope", "limits": "bounded evidence"})
+    provenance = {key: {"commit": letter * 40, "tree": letter * 40,
+                        "remote_identity": "jjang-ai/" + name}
+                  for key, letter, name in [("source", "a", "vmlx"), ("jang", "b", "jangq")]}
+    data = {"schema": runner.SCOPED_PREPACKAGE_SCHEMA, "phase": "prepackage", "version": "1.6.74",
+            "models": sorted(runner.SCOPED_MODELS), "pending_stages": runner.SCOPED_PENDING_STAGES,
+            "active_gaps": [], "source": provenance["source"], "jang": provenance["jang"],
+            "scope_document": scope, "exclusions": [], "source_files": {"owned.py": digest},
+            "baseline_commit": "c" * 40, "changed_path_receipts": {}, "receipts": {}}
+    for owner in runner.SCOPED_REQUIRED_RECEIPTS:
+        owner_receipt = write(owner + ".json", {"status": "PASS", "owner": owner,
+            "source_hashes": {"owned.py": digest}, "artifacts": [raw]})
+        data["receipts"][owner] = {"receipt": owner_receipt, "active_gaps": [], "source_paths": ["owned.py"],
+            "artifacts": [raw, image_ref, stream_ref], "resolved_failures": [], "skips": [],
+            "proof": {"visual": [image_ref["sha256"]], "api": [stream_ref["sha256"]],
+                      "runtime_identity": [raw["sha256"]], "offline": [raw["sha256"]]}}
+    path = evidence / "scoped.json"
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(runner, "_git_output", lambda *args: "")
+    return runner, root, path, data, provenance
+
+
+def test_scoped_prepackage_validates_bound_evidence_only(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    result = runner.validate_scoped_prepackage(root, path, provenance=provenance, expected_version="1.6.74")
+    assert result["status"] == "pass"
+    assert result["pending_stages"] == runner.SCOPED_PENDING_STAGES
+    (path.parent / "raw.json").write_text("tampered")
+    assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                           expected_version="1.6.74")["status"] == "fail"
+
+
+def test_scoped_prepackage_rejects_missing_owner_and_active_gap(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    for mutation in [lambda d: d["receipts"].pop("CACHE_API"),
+                     lambda d: d.update(active_gaps=["cache"]),
+                     lambda d: d.update(models=["flash-next-affine4m"]),
+                     lambda d: d.update(pending_stages=[]),
+                     lambda d: d.update(phase="release")]:
+        candidate = json.loads(json.dumps(data))
+        mutation(candidate)
+        path.write_text(json.dumps(candidate))
+        assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                               expected_version="1.6.74")["status"] == "fail"
+
+
+def test_scoped_prepackage_rejects_source_drift_and_omitted_changed_path(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "_git_output", lambda *args: "owned.py\0")
+    assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                           expected_version="1.6.74")["status"] == "fail"
+    monkeypatch.setattr(runner, "_git_output", lambda *args: "")
+    (root / "owned.py").write_text("changed")
+    assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                           expected_version="1.6.74")["status"] == "fail"
+
+
+def test_scoped_prepackage_rejects_draft_skip_and_escaping_artifact(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    for mutation in [lambda d: d["receipts"]["CACHE_API"]["receipt"].update(path="../outside.json"),
+                     lambda d: d["receipts"]["CACHE_API"].update(skips=[{"status": "skipped", "node": "active"}]),
+                     lambda d: d["receipts"]["CACHE_API"].update(artifacts=[]),
+                     lambda d: d["receipts"]["CACHE_API"].update(proof={"offline": []})]:
+        candidate = json.loads(json.dumps(data)); mutation(candidate)
+        path.write_text(json.dumps(candidate))
+        assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                               expected_version="1.6.74")["status"] == "fail"
+    original = path.parent / "CACHE_API.json"
+    receipt = json.loads(original.read_text()); receipt["status"] = "DRAFT_PASS"
+    original.write_text(json.dumps(receipt))
+    data["receipts"]["CACHE_API"]["receipt"]["sha256"] = hashlib.sha256(original.read_bytes()).hexdigest()
+    path.write_text(json.dumps(data))
+    assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                           expected_version="1.6.74")["status"] == "fail"
+
+
+def test_scoped_prepackage_never_promotes_release_or_rewrites_historical_sweep(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    historical = {"status": "fail", "failed_components": ["historical_missing"],
+                  "regression_suite": {"open_requirements": ["historical_other_model"]}}
+    monkeypatch.setattr(runner, "build_manifest", lambda: {"rows": []})
+    monkeypatch.setattr(runner, "validate_current_proof_sweep_artifacts", lambda root: historical)
+    monkeypatch.setattr(runner, "collect_production_provenance", lambda *a, **kw: (provenance, []))
+    args = dict(scope="r20_production", require_prepackage_ready=True,
+                require_production_provenance=True, expected_version="1.6.74",
+                jang_source=root, scoped_prepackage_receipt=path)
+    result = runner.build_manifest_artifact(root, **args)
+    assert result["status"] == "pass" and result["prepackage_ready"] is True
+    assert result["release_ready"] is False
+    assert result["current_proof_sweep"] == historical
+    assert runner.build_manifest_artifact(root, **args, require_release_ready=True)["status"] == "fail"
+    monkeypatch.setattr(runner, "collect_production_provenance", lambda *a, **kw: (provenance, ["dirty source"]))
+    assert runner.build_manifest_artifact(root, **args)["status"] == "fail"
+
+
+def test_scoped_prepackage_historical_skip_and_failure_chain_stay_visible(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    exclusion = {"id": "historical-qwen36-physical-artifacts", "status": "unproven_outside_scope",
+                 "reason": "Historical bundle absent; active Flash Next evidence remains required"}
+    data["exclusions"] = [exclusion]
+    entry = data["receipts"]["VL_MEDIA"]
+    entry["skips"] = [{"node": "old_physical_bundle", "status": "skipped", "exclusion_id": exclusion["id"]}]
+    original = path.parent / "original-failure.json"
+    original.write_text(json.dumps({"returncode": 1, "passed": 212, "failed": 1}))
+    original_ref = {"path": original.name, "sha256": hashlib.sha256(original.read_bytes()).hexdigest()}
+    entry["artifacts"].append(original_ref)
+    entry["resolved_failures"] = [{"original": original_ref, "correction": entry["artifacts"][0],
+        "node": "exact_corrected_assertion", "commit": "d" * 40, "remaining_failures": []}]
+    path.write_text(json.dumps(data))
+    result = runner.validate_scoped_prepackage(root, path, provenance=provenance, expected_version="1.6.74")
+    assert result["status"] == "pass"
+    assert result["exclusions"] == [exclusion]
+    assert json.loads(original.read_text())["returncode"] == 1
+    entry["resolved_failures"][0]["remaining_failures"] = ["still fails"]
+    path.write_text(json.dumps(data))
+    assert runner.validate_scoped_prepackage(root, path, provenance=provenance,
+                                           expected_version="1.6.74")["status"] == "fail"
+
+
+def test_scoped_prepackage_default_path_never_reads_private_receipt(tmp_path, monkeypatch):
+    from tests.cross_matrix import run_release_regression_manifest as runner
+    monkeypatch.setattr(runner, "build_manifest", lambda: {"rows": []})
+    historical = {"status": "pass", "failed_components": []}
+    monkeypatch.setattr(runner, "validate_current_proof_sweep_artifacts", lambda root: historical)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("default mode called scoped validator")
+    monkeypatch.setattr(runner, "validate_scoped_prepackage", forbidden)
+    result = runner.build_manifest_artifact(tmp_path)
+    assert result["status"] == "pass"
+    assert "scoped_prepackage_acceptance" not in result

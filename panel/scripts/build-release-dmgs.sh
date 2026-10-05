@@ -836,12 +836,17 @@ case "$RELEASE_SCOPE" in
         echo "ERROR: obsolete VMLX_R20_RELEASE_ATTESTATION is forbidden for the SSD-only release path" >&2
         exit 1
       fi
+      scoped_prepackage_args=()
+      if [[ -n "${VMLX_SCOPED_PREPACKAGE_RECEIPT:-}" ]]; then
+        scoped_prepackage_args=(--scoped-prepackage-receipt "$VMLX_SCOPED_PREPACKAGE_RECEIPT")
+      fi
       run_release_python "tests/cross_matrix/run_release_regression_manifest.py" \
         --scope "$RELEASE_SCOPE" \
         --require-prepackage-ready \
         --require-production-provenance \
         --expected-version "$VERSION" \
         --jang-source "$VMLX_JANG_TOOLS_SOURCE" \
+        "${scoped_prepackage_args[@]}" \
         --out "$PREPACKAGE_READY_MANIFEST_OUT"
     )
     ;;

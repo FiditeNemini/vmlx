@@ -10,6 +10,7 @@ instead of another one-off command.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import stat
@@ -426,6 +427,196 @@ def prepackage_clearance_from_release_clearance(release_clearance: dict) -> dict
     }
 
 
+# This is a prepackage evidence reader, never a substitute for installed proof.
+SCOPED_PREPACKAGE_SCHEMA = "vmlx-scoped-prepackage-v1"
+SCOPED_MODELS = {"flash-next-affine4m", "flash-next-jangh4"}
+SCOPED_REQUIRED_RECEIPTS = {
+    "PROVENANCE", "SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION",
+    "NATIVE_MTP", "API_CACHE", "API_SURFACE", "MCP", "JANG_COMPAT",
+    "REASONING", "GENERATION", "OUTPUT_CONTEXT", "TOOL_CALL", "TOOL_SECURITY",
+    "PANEL_SETTINGS", "ARTIFACT_FORMAT", "PARSER", "CACHE_ARCHITECTURE",
+    "FAMILY_DETECTION", "VL_MEDIA",
+}
+SCOPED_HISTORICAL_EXCLUSIONS = {
+    "historical-qwen36-physical-artifacts", "historical-zaya-physical-artifacts",
+    "historical-other-family-physical-artifacts", "dflash2-27b-implementation",
+}
+SCOPED_PENDING_STAGES = [
+    "both_flavor_packaged_integrity", "signing_notarization_stapling",
+    "installed_electron_and_api", "publication_and_readback",
+]
+
+
+def validate_scoped_prepackage(
+    root: Path, path: Path, *, provenance: dict, expected_version: str,
+) -> dict:
+    """Validate an explicit private evidence envelope; perform no tests or loads.
+
+    Original receipts remain byte-for-byte artifacts, including failed children.
+    A scoped offline acceptance may exclude named historical physical fixtures,
+    but cannot exclude a required active model, unresolved failure, or stage.
+    """
+    failures: list[str] = []
+    result: dict = {"status": "fail", "failures": failures}
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw)
+        result["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
+        evidence_root = path.resolve().parent
+        if not isinstance(data, dict) or data.get("schema") != SCOPED_PREPACKAGE_SCHEMA:
+            raise ValueError("unsupported scoped prepackage schema")
+        if data.get("phase") != "prepackage" or data.get("version") != expected_version:
+            raise ValueError("scoped phase/version mismatch")
+        if set(data.get("models", [])) != SCOPED_MODELS:
+            raise ValueError("scoped active models must be exactly affine4m and jangh4")
+        if data.get("pending_stages") != SCOPED_PENDING_STAGES:
+            raise ValueError("packaging/install/publication stages must remain pending")
+        if data.get("active_gaps") != []:
+            raise ValueError("active acceptance gaps remain or were not declared")
+        for key in ("source", "jang"):
+            observed = provenance.get(key, {})
+            declared = data.get(key, {})
+            if not observed or any(declared.get(k) != observed.get(k) for k in ("commit", "tree", "remote_identity")):
+                raise ValueError(f"{key} frozen production provenance mismatch")
+
+        def bound_file(ref: dict) -> Path:
+            if not isinstance(ref, dict) or not isinstance(ref.get("path"), str):
+                raise ValueError("artifact reference must contain a relative path")
+            rel = Path(ref["path"])
+            if rel.is_absolute() or ".." in rel.parts:
+                raise ValueError("artifact reference escapes private evidence root")
+            file = evidence_root / rel
+            if not file.resolve().is_relative_to(evidence_root) or not file.is_file():
+                raise ValueError(f"missing/escaping artifact: {rel}")
+            digest = ref.get("sha256")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"invalid artifact digest: {rel}")
+            if hashlib.sha256(file.read_bytes()).hexdigest() != digest:
+                raise ValueError(f"artifact hash mismatch: {rel}")
+            return file
+
+        scope_file = bound_file(data.get("scope_document"))
+        scope = json.loads(scope_file.read_bytes())
+        if set(scope.get("models", [])) != SCOPED_MODELS or set(scope.get("required_receipts", [])) != SCOPED_REQUIRED_RECEIPTS:
+            raise ValueError("scope document omits required models/acceptance owners")
+        if not scope.get("authority") or not scope.get("limits"):
+            raise ValueError("scope requires explicit user authority and measured limits")
+        exclusions = data.get("exclusions")
+        if not isinstance(exclusions, list):
+            raise ValueError("historical exclusions must be explicit")
+        for item in exclusions:
+            if (item.get("id") not in SCOPED_HISTORICAL_EXCLUSIONS
+                    or item.get("status") != "unproven_outside_scope"
+                    or not item.get("reason")):
+                raise ValueError("invalid historical exclusion; active gaps cannot be waived")
+        exclusion_ids = {item["id"] for item in exclusions}
+        files = data.get("source_files")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("missing owning source hashes")
+        for rel, digest in files.items():
+            source = root / rel
+            if (Path(rel).is_absolute() or ".." in Path(rel).parts
+                    or not source.resolve().is_relative_to(root.resolve())
+                    or not source.is_file()
+                    or hashlib.sha256(source.read_bytes()).hexdigest() != digest):
+                raise ValueError(f"owning source mismatch: {rel}")
+        receipts = data.get("receipts")
+        if not isinstance(receipts, dict) or set(receipts) != SCOPED_REQUIRED_RECEIPTS:
+            raise ValueError("missing or unknown required acceptance receipt")
+        seen_receipts: set[str] = set()
+        for owner, entry in receipts.items():
+            identity = entry.get("receipt", {}).get("sha256")
+            if identity in seen_receipts:
+                raise ValueError("one acceptance receipt cannot stand in for multiple required owners")
+            seen_receipts.add(identity)
+            original = json.loads(bound_file(entry.get("receipt")).read_bytes())
+            if original.get("status") not in ("pass", "PASS"):
+                raise ValueError(f"{owner}: original acceptance is not final PASS")
+            if entry.get("active_gaps") != []:
+                raise ValueError(f"{owner}: unresolved active gaps")
+            owners = entry.get("source_paths")
+            if not isinstance(owners, list) or not owners or any(p not in files for p in owners):
+                raise ValueError(f"{owner}: missing source ownership")
+            artifacts = entry.get("artifacts")
+            if not isinstance(artifacts, list) or not artifacts:
+                raise ValueError(f"{owner}: missing raw proof artifacts")
+            verified_files = {ref["sha256"]: bound_file(ref) for ref in artifacts}
+            verified = set(verified_files)
+            # Bind every declared artifact hash in the original acceptance, not
+            # just a convenient subset selected by the new envelope.
+            original_refs = original.get("artifact_sha256", {})
+            original_hashes = set(original_refs.values()) if isinstance(original_refs, dict) else set()
+            for ref in original.get("artifacts", []):
+                if isinstance(ref, dict) and "sha256" in ref:
+                    original_hashes.add(ref["sha256"])
+            if not original_hashes or not original_hashes <= verified:
+                raise ValueError(f"{owner}: original raw artifact closure incomplete")
+            original_sources = original.get("source_hashes", original.get("source_files", {}))
+            if not isinstance(original_sources, dict):
+                raise ValueError(f"{owner}: original source bindings must be a map")
+            overrides = entry.get("source_corrections", {})
+            for rel, digest in original_sources.items():
+                if not isinstance(digest, str):
+                    raise ValueError(f"{owner}: unsupported original source digest shape")
+                if rel not in files:
+                    raise ValueError(f"{owner}: original source closure incomplete: {rel}")
+                if digest != files[rel]:
+                    correction = overrides.get(rel, {})
+                    if (correction.get("original_sha256") != digest
+                            or correction.get("current_sha256") != files[rel]
+                            or correction.get("proof_sha256") not in verified
+                            or not correction.get("commit")):
+                        raise ValueError(f"{owner}: changed source lacks correction proof: {rel}")
+            if not isinstance(entry.get("resolved_failures"), list) or not isinstance(entry.get("skips"), list):
+                raise ValueError(f"{owner}: failures and skips must be explicitly accounted")
+            proof = entry.get("proof")
+            needed = {"visual", "api", "runtime_identity"} if owner in {"SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION", "PROVENANCE"} else {"offline"}
+            if not isinstance(proof, dict) or not needed <= set(proof):
+                raise ValueError(f"{owner}: missing owning proof surfaces")
+            for refs in proof.values():
+                if not isinstance(refs, list) or not refs or any(ref not in verified for ref in refs):
+                    raise ValueError(f"{owner}: unbound proof surface")
+            if "visual" in needed:
+                if not any(verified_files[d].read_bytes().startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
+                           for d in proof["visual"]):
+                    raise ValueError(f"{owner}: visual proof requires actual image bytes")
+                if not any(b"data:" in verified_files[d].read_bytes() for d in proof["api"]):
+                    raise ValueError(f"{owner}: API proof requires raw streaming capture")
+            for failure in entry.get("resolved_failures", []):
+                old = bound_file(failure["original"])
+                correction = bound_file(failure["correction"])
+                original_result = json.loads(old.read_bytes())
+                corrected_result = json.loads(correction.read_bytes())
+                if (not isinstance(original_result, dict)
+                        or original_result.get("returncode") in (None, 0)
+                        or not isinstance(corrected_result, dict)
+                        or corrected_result.get("returncode") != 0):
+                    raise ValueError(f"{owner}: failure chain requires original failed and corrected passing command receipts")
+                if (hashlib.sha256(old.read_bytes()).hexdigest() not in verified
+                        or hashlib.sha256(correction.read_bytes()).hexdigest() not in verified
+                        or not failure.get("node") or not failure.get("commit")
+                        or failure.get("remaining_failures") != []):
+                    raise ValueError(f"{owner}: incomplete failure correction chain")
+            for skip in entry.get("skips", []):
+                if skip.get("exclusion_id") not in exclusion_ids or skip.get("status") != "skipped" or not skip.get("node"):
+                    raise ValueError(f"{owner}: unaccounted skipped assertion")
+        baseline = data.get("baseline_commit")
+        if not isinstance(baseline, str) or not re.fullmatch(r"[0-9a-f]{40}", baseline):
+            raise ValueError("missing audit baseline commit")
+        changed = set(filter(None, _git_output(root, "diff", "--name-only", "-z", baseline, provenance["source"]["commit"]).split("\0")))
+        coverage = data.get("changed_path_receipts", {})
+        if set(coverage) != changed:
+            raise ValueError("changed source path coverage differs from Git diff")
+        for rel, ids in coverage.items():
+            if rel not in files or not ids or any(i not in receipts or rel not in receipts[i]["source_paths"] for i in ids):
+                raise ValueError(f"unowned changed source path: {rel}")
+        result.update(status="pass", models=sorted(SCOPED_MODELS), exclusions=exclusions,
+                      required_receipts=sorted(receipts), pending_stages=SCOPED_PENDING_STAGES)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
+        failures.append(str(exc))
+    return result
+
+
 def build_manifest_artifact(
     root: Path,
     *,
@@ -436,6 +627,7 @@ def build_manifest_artifact(
     require_production_provenance: bool = False,
     expected_version: str | None = None,
     jang_source: Path | None = None,
+    scoped_prepackage_receipt: Path | None = None,
 ) -> dict:
     manifest = build_manifest()
     if scope is not None:
@@ -489,6 +681,31 @@ def build_manifest_artifact(
             "status": "pass" if not provenance_failures else "fail",
             "failures": provenance_failures,
         }
+    if scoped_prepackage_receipt is not None:
+        allowed = (scope == R20_PRODUCTION_SCOPE and require_prepackage_ready
+                   and require_production_provenance and not require_release_ready
+                   and not require_current_proof_sweep and not provenance_failures)
+        acceptance = (validate_scoped_prepackage(
+            root, scoped_prepackage_receipt, provenance=manifest,
+            expected_version=expected_version or "",
+        ) if allowed else {"status": "fail", "failures": [
+            "scoped evidence requires production provenance and prepackage-only mode"
+        ]})
+        manifest["scoped_prepackage_acceptance"] = acceptance
+        accepted = acceptance["status"] == "pass"
+        manifest["prepackage_ready"] = accepted
+        manifest["release_ready"] = False
+        manifest["release_clearance"] = {
+            "status": "open", "release_ready": False,
+            "pending_stages": SCOPED_PENDING_STAGES,
+            "historical": manifest["release_clearance"],
+        }
+        manifest["prepackage_clearance"] = {
+            "status": "pass" if accepted else "open", "prepackage_ready": accepted,
+            "mode": SCOPED_PREPACKAGE_SCHEMA, "acceptance": acceptance,
+        }
+        manifest["status"] = "pass" if accepted else "fail"
+        return manifest
     manifest["status"] = (
         "fail"
         if (
@@ -526,6 +743,7 @@ def main() -> int:
         action="store_true",
         help="Require clean pushed canonical vMLX/JANG origin/main provenance.",
     )
+    parser.add_argument("--scoped-prepackage-receipt", type=Path)
     parser.add_argument("--scope")
     parser.add_argument("--expected-version")
     parser.add_argument("--jang-source", type=Path)
@@ -540,6 +758,7 @@ def main() -> int:
         require_production_provenance=args.require_production_provenance,
         expected_version=args.expected_version,
         jang_source=args.jang_source,
+        scoped_prepackage_receipt=args.scoped_prepackage_receipt,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

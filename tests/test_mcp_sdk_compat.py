@@ -131,3 +131,187 @@ def test_client_source_has_no_unguarded_camelcase_sdk_reads():
     for bad in ("result.protocolVersion", "result.serverInfo",
                 "tool.inputSchema", "result.isError"):
         assert bad not in code_only, f"unguarded SDK read reintroduced: {bad}"
+
+
+@pytest.mark.parametrize("failure", [None, "enter", "body"])
+def test_http_transport_sdk_client_headers_and_cleanup(monkeypatch, failure):
+    import asyncio
+    from contextlib import asynccontextmanager
+    import mcp.shared._httpx_utils as utils
+
+    events = []
+    clients = []
+    real_create = utils.create_mcp_http_client
+
+    def create(**kwargs):
+        client = real_create(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(utils, "create_mcp_http_client", create)
+
+    @asynccontextmanager
+    async def transport(url, *, http_client):
+        assert url == "http://localhost/mcp"
+        assert http_client.headers["X-Test-Auth"] == "fixture"
+        assert not http_client.is_closed
+        assert http_client.timeout.connect == utils.MCP_DEFAULT_TIMEOUT
+        assert http_client.timeout.read == utils.MCP_DEFAULT_SSE_READ_TIMEOUT
+        if failure == "enter":
+            raise RuntimeError("transport entry failure")
+        try:
+            yield ("read", "write")
+        finally:
+            assert not http_client.is_closed
+            events.append("transport closed before client")
+
+    async def run():
+        async with mcp_client._streamable_http_transport(
+            transport, "http://localhost/mcp", {"X-Test-Auth": "fixture"}
+        ) as streams:
+            assert streams == ("read", "write")
+            if failure == "body":
+                raise RuntimeError("session failure")
+
+    if failure:
+        with pytest.raises(RuntimeError):
+            asyncio.run(run())
+    else:
+        asyncio.run(run())
+    assert len(clients) == 1 and clients[0].is_closed
+    assert events == ([] if failure == "enter" else ["transport closed before client"])
+
+
+def test_http_transport_legacy_headers_and_no_header_defaults():
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    calls = []
+
+    @asynccontextmanager
+    async def legacy(url, headers=None):
+        calls.append((url, headers))
+        yield ("read", "write", None)
+
+    async def run():
+        for headers in ({"X-Test-Auth": "fixture"}, None):
+            async with mcp_client._streamable_http_transport(legacy, "url", headers):
+                pass
+
+    asyncio.run(run())
+    assert calls == [("url", {"X-Test-Auth": "fixture"}), ("url", None)]
+
+
+def test_installed_http_factory_accepts_sdk_http_client_without_network():
+    import inspect
+    from mcp.shared._httpx_utils import create_mcp_http_client
+    import asyncio
+
+    factory = mcp_client._resolve_streamable_http_client()
+    signature = inspect.signature(factory)
+
+    async def run():
+        if "http_client" in signature.parameters:
+            async with create_mcp_http_client(headers={"X-Test-Auth": "fixture"}) as client:
+                signature.bind("http://localhost/mcp", http_client=client)
+                assert client.headers["X-Test-Auth"] == "fixture"
+        else:
+            signature.bind("http://localhost/mcp", headers={"X-Test-Auth": "fixture"})
+
+    asyncio.run(run())
+
+
+def test_real_http_sdk_auth_schema_results_and_cleanup():
+    """Actual SDK transport against bounded loopback JSON-RPC, without models."""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from vmlx_engine.mcp.types import MCPServerConfig, MCPTransport
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, status, payload=None):
+            data = json.dumps(payload).encode() if payload is not None else b""
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Mcp-Session-Id", "fixture-session")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def authorized(self):
+            requests.append((self.command, self.headers.get("Authorization")))
+            if self.headers.get("Authorization") != "Bearer fixture-only":
+                self.reply(401)
+                return False
+            return True
+
+        def do_GET(self):
+            if self.authorized():
+                self.reply(405)
+
+        def do_DELETE(self):
+            if self.authorized():
+                self.reply(200)
+
+        def do_POST(self):
+            if not self.authorized():
+                return
+            message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            method = message["method"]
+            if "id" not in message:
+                self.reply(202)
+                return
+            if method == "initialize":
+                result = {"protocolVersion": message["params"]["protocolVersion"],
+                          "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "fixture", "version": "1"}}
+            elif method == "tools/list":
+                result = {"tools": [{"name": "echo", "description": "Fixture echo",
+                          "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+            elif method == "tools/call":
+                value = message["params"]["arguments"]["text"]
+                result = {"content": [{"type": "text", "text": value}], "isError": value == "failure"}
+            else:
+                self.reply(400)
+                return
+            self.reply(200, {"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = mcp_client.MCPClient(MCPServerConfig(
+        name="fixture", transport=MCPTransport.HTTP,
+        url=f"http://127.0.0.1:{server.server_port}/mcp",
+        headers={"Authorization": "Bearer fixture-only"}, timeout=5,
+    ))
+
+    async def run():
+        try:
+            assert await client.connect(), client.get_status().error
+            assert len(client.tools) == 1
+            assert client.tools[0].input_schema["required"] == ["text"]
+            success = await client.call_tool("echo", {"text": "success"})
+            assert success.content == "success" and not success.is_error
+            failure = await client.call_tool("echo", {"text": "failure"})
+            assert failure.content == "failure" and failure.is_error
+        finally:
+            await client.disconnect()
+        assert client._session is None
+        assert client._sse_client is None
+        assert not client.is_connected
+
+    try:
+        asyncio.run(run())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert requests and all(auth == "Bearer fixture-only" for _, auth in requests)
+    assert any(method == "DELETE" for method, _ in requests)

@@ -4,6 +4,8 @@ MCP client for connecting to individual MCP servers.
 """
 
 import asyncio
+import inspect
+from contextlib import asynccontextmanager
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -46,6 +48,25 @@ def _resolve_streamable_http_client():
         f"none of {_STREAMABLE_HTTP_FACTORY_NAMES} exist in "
         f"mcp.client.streamable_http"
     )
+
+
+@asynccontextmanager
+async def _streamable_http_transport(factory, url, headers):
+    """Keep caller-owned SDK HTTP clients alive until transport cleanup finishes."""
+    if headers and "http_client" in inspect.signature(factory).parameters:
+        # Use the SDK factory: 1.x uses httpx, 2.x uses httpx2. It also owns
+        # recommended timeout/redirect defaults; do not recreate those here.
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        async with create_mcp_http_client(headers=dict(headers)) as http_client:
+            async with factory(url, http_client=http_client) as streams:
+                yield streams
+    else:
+        # Legacy 1.x takes headers directly; no-header requests keep the SDK's
+        # own default client and lifecycle. Unexpected API errors propagate.
+        kwargs = {"headers": dict(headers)} if headers else {}
+        async with factory(url, **kwargs) as streams:
+            yield streams
 
 
 def _sdk_attr(obj, *names, default=None):
@@ -274,10 +295,9 @@ class MCPClient:
                 f"mcp.client.streamable_http): {exc}"
             ) from exc
 
-        _kwargs: Dict[str, Any] = {}
-        if self.config.headers:
-            _kwargs["headers"] = dict(self.config.headers)
-        self._sse_client = streamablehttp_client(self.config.url, **_kwargs)
+        self._sse_client = _streamable_http_transport(
+            streamablehttp_client, self.config.url, self.config.headers
+        )
         # streamablehttp_client returns (read, write, get_session_id) — we
         # only consume the read/write pair; session-id callback is optional.
         _ctx_result = await self._sse_client.__aenter__()

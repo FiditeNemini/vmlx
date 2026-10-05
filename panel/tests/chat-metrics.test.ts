@@ -42,6 +42,15 @@ describe('chat prefill TPS', () => {
 })
 
 describe('final chat decode TPS', () => {
+  it('accepts Chat completion counts and requires timing for every tool pass', () => {
+    const pass = parseServerDecodeUsage({ completion_tokens: 12,
+      vmlx_decode: { tokens: 8, seconds: 2, tokens_per_second: 999 } })
+    expect(pass?.tokensPerSecond).toBe(4)
+    expect(summarizeServerDecodePasses([pass, undefined])).toBeUndefined()
+    expect(summarizeServerDecodePasses([undefined, pass])).toBeUndefined()
+    expect(summarizeServerDecodePasses([pass, pass])?.outputTokens).toBe(24)
+  })
+
   it('uses authoritative per-request decode windows for a tool-loop exchange', () => {
     const first = parseServerDecodeUsage({
       output_tokens: 85,

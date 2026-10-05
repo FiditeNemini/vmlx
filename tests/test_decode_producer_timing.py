@@ -136,8 +136,10 @@ async def test_stream_uses_producer_window_and_preserves_terminal_usage(monkeypa
         assert [p["usage"]["completion_tokens"] for p in payloads if p.get("usage")][-1] == 12
         last_usage = [p["usage"] for p in payloads if p.get("usage")][-1]
         assert ("vmlx_prefill" in last_usage) is telemetry
+        assert ("vmlx_decode" in last_usage) is telemetry
         if telemetry:
             assert last_usage["vmlx_prefill"]["seconds"] == 0.5
+            assert last_usage["vmlx_decode"] == {"tokens": 8, "seconds": 2.0, "tokens_per_second": 4.0}
         assert sum(event.count("data: [DONE]") for event in events) == 1
 
 

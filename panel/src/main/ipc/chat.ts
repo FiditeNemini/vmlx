@@ -2057,12 +2057,12 @@ export function registerChatHandlers(
       const liveTpsHistory: number[] = [];
       const MAX_LIVE_TPS_SAMPLES = 512;
       let tpsTokenBase = 0; // re-anchor point for tpsSnapshots after iteration reset
-      // Local vMLX Responses streams negotiate exact engine-side decode
+      // Local vMLX Chat and Responses streams negotiate exact engine-side decode
       // windows. Keep one latest cumulative snapshot per HTTP pass, then sum
       // passes across the visible agent/tool exchange. SSE arrival timing is
       // only a fallback: --stream-interval batches tokens, and tool-control
       // output can advance usage without producing a visible delta.
-      const completedServerDecodePasses: ServerDecodePass[] = [];
+      const completedServerDecodePasses: Array<ServerDecodePass | undefined> = [];
       let currentServerDecodePass: ServerDecodePass | undefined;
       let currentPrefillUsage: unknown;
       const completedPrefillPasses: unknown[] = [];
@@ -2079,10 +2079,10 @@ export function registerChatHandlers(
         liveTps = decoded.tokensPerSecond;
       };
       const finishServerDecodePass = () => {
-        if (currentServerDecodePass) {
-          completedServerDecodePasses.push(currentServerDecodePass);
-          currentServerDecodePass = undefined;
-        }
+        // Missing receipt coverage must remain visible; never report only
+        // the last measured pass as the entire tool exchange.
+        completedServerDecodePasses.push(currentServerDecodePass);
+        currentServerDecodePass = undefined;
       };
       // No streaming throttle — emit every token. Renderer-side useTypewriter
       // in MessageBubble.tsx handles smooth character reveal via rAF.
@@ -3405,7 +3405,7 @@ export function registerChatHandlers(
 
               // Update usage BEFORE emitting delta so metrics use real server counts
               if (parsed.usage) {
-                if ("vmlx_prefill" in parsed.usage) currentPrefillUsage = parsed.usage.vmlx_prefill;
+                recordServerDecodeUsage(parsed.usage);
                 remoteMetrics?.recordUsage(parsed.usage);
                 if (parsed.usage.completion_tokens != null) {
                   tokenCount = parsed.usage.completion_tokens;

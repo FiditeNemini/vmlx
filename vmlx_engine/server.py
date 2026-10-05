@@ -9870,7 +9870,7 @@ def _decode_usage_snapshot(
     """Return producer-observed decode timing for local UI telemetry.
 
     This receipt is attached only to the explicitly negotiated private
-    ``response.usage`` event. Standard Responses terminal usage stays
+    ``response.usage`` event or negotiated Chat terminal usage. Standard usage stays
     OpenAI-compatible. Initial speculative/coalesced tokens have only one
     observation, so do not invent inter-token timing inside that first burst.
     """
@@ -25802,8 +25802,17 @@ async def stream_chat_completion(
         if include_usage and not terminal_usage:
             payload["usage"] = None
         if terminal_usage:
-            if _prefill_usage_extension and _prefill_usage is not None and payload.get("usage"):
-                payload["usage"]["vmlx_prefill"] = _prefill_usage
+            if _prefill_usage_extension and payload.get("usage"):
+                if _prefill_usage is not None:
+                    payload["usage"]["vmlx_prefill"] = _prefill_usage
+                decode_usage = _decode_usage_snapshot(
+                    completion_tokens=int(payload["usage"].get("completion_tokens", 0)),
+                    first_token_ts=_decode_first_ts,
+                    last_token_ts=_decode_last_ts,
+                    first_token_count=_decode_first_count,
+                )
+                if decode_usage is not None:
+                    payload["usage"]["vmlx_decode"] = decode_usage
             # Attach the context-clamp record on the one terminal usage
             # chunk (mirrors the non-stream surface; pops so the registry
             # never leaks). `exhausted` = the clamped budget was consumed.

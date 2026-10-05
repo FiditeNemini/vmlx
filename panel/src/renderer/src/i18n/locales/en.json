@@ -628,6 +628,8 @@
       "tokensLabel": "{n} tokens",
       "tokensTitleStreaming": "Tokens generated so far",
       "tokensTitleDone": "Completion tokens",
+      "estimatedRateLabel": "~{speed} t/s",
+      "estimatedRateTitle": "Estimated from streamed output arrival times; engine decode timing was unavailable for one or more passes.",
       "remoteRateLabel": "{speed} t/s observed",
       "remoteRateTitle": "Provider output tokens divided by total HTTP-request time. Includes prefill, network and buffered output; excludes time executing tools. Not isolated model decode speed.",
       "remoteUsageUnavailable": "Token usage is unavailable until the provider reports it for every request. Stream events are not tokens.",

@@ -121,6 +121,13 @@ describe('remote/local metric presentation', () => {
     expect(items[1]).toMatchObject({ label: '20.0 t/s', title: 'chat.metrics.tpsTitle:{}' })
   })
 
+  it('labels local arrival timing as an estimate without changing numeric storage', () => {
+    const estimated = getMetricsItems({ ...base, decodeMetricSource: 'client' }, false, t)
+    expect(estimated[1]).toMatchObject({ value: '20.0',
+      label: 'chat.metrics.estimatedRateLabel:{"speed":"20.0"}',
+      title: 'chat.metrics.estimatedRateTitle:{}' })
+  })
+
   it('labels the observed remote window and missing provider usage', () => {
     const observed = getMetricsItems({ ...base, decodeMetricSource: 'remote-request' }, false, t)
     expect(observed[1].title).toBe('chat.metrics.remoteRateTitle:{}')

@@ -33,7 +33,7 @@ export function parseServerDecodeUsage(usage: unknown): ServerDecodePass | undef
   if (!decode || typeof decode !== 'object') return undefined
   const decodeRecord = decode as Record<string, unknown>
 
-  const outputTokens = Number(record.output_tokens)
+  const outputTokens = Number(record.output_tokens ?? record.completion_tokens)
   const decodeTokens = Number(decodeRecord.tokens)
   const decodeSeconds = Number(decodeRecord.seconds)
   if (
@@ -58,7 +58,7 @@ export function summarizeServerDecodePasses(
   passes: Array<ServerDecodePass | undefined>,
 ): ServerDecodeSummary | undefined {
   const valid = passes.filter((pass): pass is ServerDecodePass => !!pass)
-  if (valid.length === 0) return undefined
+  if (valid.length === 0 || valid.length !== passes.length) return undefined
 
   const outputTokens = valid.reduce((sum, pass) => sum + pass.outputTokens, 0)
   const decodeTokens = valid.reduce((sum, pass) => sum + pass.decodeTokens, 0)

@@ -144,12 +144,16 @@ export function getMetricsItems(
   items.push({
     label: metrics.decodeMetricSource === 'remote-request'
       ? t('chat.metrics.remoteRateLabel', { speed: metrics.tokensPerSecond })
-      : `${metrics.tokensPerSecond} t/s`,
+      : metrics.decodeMetricSource === 'client'
+        ? t('chat.metrics.estimatedRateLabel', { speed: metrics.tokensPerSecond })
+        : `${metrics.tokensPerSecond} t/s`,
     value: metrics.tokensPerSecond,
     title: metrics.decodeMetricSource === 'remote-request'
       ? t('chat.metrics.remoteRateTitle')
       : metrics.decodeMetricSource === 'unavailable'
-        ? t('chat.metrics.remoteUsageUnavailable') : t('chat.metrics.tpsTitle'),
+        ? t('chat.metrics.remoteUsageUnavailable')
+        : metrics.decodeMetricSource === 'client'
+          ? t('chat.metrics.estimatedRateTitle') : t('chat.metrics.tpsTitle'),
   });
 
   // Legacy stored rates used TTFT. Never relabel historical estimates as

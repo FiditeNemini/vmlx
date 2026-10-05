@@ -38,11 +38,28 @@ _ADMITTED: dict[tuple, str | None] = {}
 STATS = {"calls": 0, "admitted": 0, "rejected": 0}
 
 
+# Families where exactness is NOT the default. Measured 2026-10-04 on the dense
+# Qwen3.8-27B (JANG_4D, served, novel prompts, AR-bracketed): row-exact verify
+# cost Adaptive 15-20 % (prose 31.6 vs 37.4 tok/s stock, code 37.9 vs 47.3);
+# MLX's single-row qmv_fast is bandwidth-bound there, so replaying its per-row
+# arithmetic for 3-4 verify rows costs 1.3-1.6x the stock multi-row kernel. On
+# the MoE Flash-Next family the experts dominate and exactness was ~free
+# (JANGH4 prose +1.4 %, code -3.9 %).
+_DENSE_SPEED_FIRST = frozenset({"qwen3_5", "qwen3_5_text", "qwen3_6", "qwen3_6_text"})
+_ACTIVE_FAMILY = {"value": None}
+
+
+def set_row_exact_family(model_type) -> None:
+    """Record the loaded model family (the generator calls this once at load)."""
+    _ACTIVE_FAMILY["value"] = str(model_type or "") or None
+
+
 def row_exact_qmv_requested() -> bool:
-    """Default on; ``VMLX_ROW_EXACT_VERIFY_QMV=0`` restores stock MLX rows."""
-    return os.environ.get("VMLX_ROW_EXACT_VERIFY_QMV", "1").strip().lower() not in {
-        "0", "false", "no", "off",
-    }
+    """``VMLX_ROW_EXACT_VERIFY_QMV`` = 1/0 forces it; otherwise on except dense Qwen3.5/3.8."""
+    raw = os.environ.get("VMLX_ROW_EXACT_VERIFY_QMV", "").strip().lower()
+    if raw:
+        return raw not in {"0", "false", "no", "off"}
+    return _ACTIVE_FAMILY["value"] not in _DENSE_SPEED_FIRST
 
 
 def _extract_template_function(source: str, signature: str) -> str | None:
@@ -104,6 +121,7 @@ def _mlx_qmv_header() -> str | None:
                 .replace("inline U qdot(", "inline U qdot_reg(")
                 .replace("device", "thread")
             )
+    pieces.append(_QDOT_ROWS)
     return "#ifndef SIMD_SIZE\n#define SIMD_SIZE 32\n#endif\n" + "\n\n".join(pieces)
 
 
@@ -139,6 +157,99 @@ def _generic_traversal_matches(impl: str) -> bool:
 # branches: N >= 8 moves the last tile back and recomputes identical outputs;
 # N < 8 keeps out_row and guards every output row. Every x row r runs the
 # identical per-row sequence.
+_QDOT_ROWS = r"""
+// qdot for ROWS activation rows sharing one register copy of the weights.
+// Each integer weight field is converted once; every row then evaluates the
+// exact term and accumulation shape of MLX qdot (same products, same order).
+template <typename U, int values_per_thread, int bits, int ROWS>
+inline void qdot_rows(
+    const thread uint8_t* w,
+    const thread U* x,          // [ROWS][values_per_thread], row-major
+    U scale,
+    U bias,
+    const thread U* sum,        // [ROWS]
+    thread U* out) {            // [ROWS] receives scale * accum + sum * bias
+  U accum[ROWS];
+  for (int r = 0; r < ROWS; r++) accum[r] = 0;
+  if (bits == 2) {
+    for (int i = 0; i < (values_per_thread / 4); i++) {
+      U w0 = (w[i] & 0x03), w1 = (w[i] & 0x0c), w2 = (w[i] & 0x30), w3 = (w[i] & 0xc0);
+      for (int r = 0; r < ROWS; r++) {
+        const thread U* xt = x + r * values_per_thread;
+        accum[r] += (xt[4 * i] * w0 + xt[4 * i + 1] * w1 + xt[4 * i + 2] * w2 + xt[4 * i + 3] * w3);
+      }
+    }
+  } else if (bits == 3) {
+    int xo = 0, wo = 0;
+    for (int i = 0; i < (values_per_thread / 8); i++) {
+      xo += 8 * i; wo += 3 * i;
+      const thread uint8_t* ww = w + wo;
+      U a0 = (ww[0] & 0x07), a1 = (ww[0] & 0x38), a2 = (ww[0] & 0xc0), a3 = (ww[1] & 0x01);
+      U a4 = (ww[1] & 0x0e), a5 = (ww[1] & 0x70), a6 = (ww[1] & 0x80), a7 = (ww[2] & 0x03);
+      U a8 = (ww[2] & 0x1c), a9 = (ww[2] & 0xe0);
+      for (int r = 0; r < ROWS; r++) {
+        const thread U* xt = x + r * values_per_thread + xo;
+        U acc = accum[r];
+        acc += a0 * xt[0]; acc += a1 * xt[1]; acc += a2 * xt[2]; acc += a3 * (xt[2] * 256.0f);
+        acc += a4 * xt[3]; acc += a5 * xt[4]; acc += a6 * xt[5]; acc += a7 * (xt[5] * 256.0f);
+        acc += a8 * xt[6]; acc += a9 * xt[7];
+        accum[r] = acc;
+      }
+    }
+  } else if (bits == 4) {
+    const thread uint16_t* ws = (const thread uint16_t*)w;
+    for (int i = 0; i < (values_per_thread / 4); i++) {
+      U w0 = (ws[i] & 0x000f), w1 = (ws[i] & 0x00f0), w2 = (ws[i] & 0x0f00), w3 = (ws[i] & 0xf000);
+      for (int r = 0; r < ROWS; r++) {
+        const thread U* xt = x + r * values_per_thread;
+        accum[r] += (xt[4 * i] * w0 + xt[4 * i + 1] * w1 + xt[4 * i + 2] * w2 + xt[4 * i + 3] * w3);
+      }
+    }
+  } else if (bits == 5) {
+    int xo = 0, wo = 0;
+    for (int i = 0; i < (values_per_thread / 8); i++) {
+      xo += 8 * i; wo += 5 * i;
+      const thread uint8_t* ww = w + wo;
+      U a0 = (ww[0] & 0x1f), a1 = (ww[0] & 0xe0), a2 = (ww[1] & 0x3), a3 = (ww[1] & 0x7c);
+      U a4 = (ww[1] & 0x80), a5 = (ww[2] & 0xf), a6 = (ww[2] & 0xf0), a7 = (ww[3] & 0x1);
+      U a8 = (ww[3] & 0x3e), a9 = (ww[3] & 0xc0), a10 = (ww[4] & 0x7), a11 = (ww[4] & 0xf8);
+      for (int r = 0; r < ROWS; r++) {
+        const thread U* xt = x + r * values_per_thread + xo;
+        U acc = accum[r];
+        acc += a0 * xt[0]; acc += a1 * xt[1]; acc += a2 * (xt[1] * 256.0f); acc += a3 * xt[2];
+        acc += a4 * xt[3]; acc += a5 * (xt[3] * 256.0f); acc += a6 * xt[4]; acc += a7 * (xt[4] * 256.0f);
+        acc += a8 * xt[5]; acc += a9 * xt[6]; acc += a10 * (xt[6] * 256.0f); acc += a11 * xt[7];
+        accum[r] = acc;
+      }
+    }
+  } else if (bits == 6) {
+    int xo = 0, wo = 0;
+    for (int i = 0; i < (values_per_thread / 4); i++) {
+      xo += 4 * i; wo += 3 * i;
+      const thread uint8_t* ww = w + wo;
+      U a0 = (ww[0] & 0x3f), a1 = (ww[0] & 0xc0), a2 = (ww[1] & 0x0f);
+      U a3 = (ww[1] & 0xf0), a4 = (ww[2] & 0x03), a5 = (ww[2] & 0xfc);
+      for (int r = 0; r < ROWS; r++) {
+        const thread U* xt = x + r * values_per_thread + xo;
+        U acc = accum[r];
+        acc += a0 * xt[0];
+        acc += a1 * xt[1]; acc += a2 * (xt[1] * 256.0f);
+        acc += a3 * xt[2]; acc += a4 * (xt[2] * 256.0f);
+        acc += a5 * xt[3];
+        accum[r] = acc;
+      }
+    }
+  } else if (bits == 8) {
+    for (int i = 0; i < values_per_thread; i++) {
+      U wi = w[i];
+      for (int r = 0; r < ROWS; r++) accum[r] += x[r * values_per_thread + i] * wi;
+    }
+  }
+  for (int r = 0; r < ROWS; r++) out[r] = scale * accum[r] + sum[r] * bias;
+}
+"""
+
+
 _SOURCE_GENERIC = r"""
   constexpr int bits = BITS;
   constexpr int group_size = GS;
@@ -178,7 +289,7 @@ _SOURCE_GENERIC = r"""
   ws += used_out_row * in_vec_size_w + simd_lid * packs_per_thread * bytes_per_pack;
   sc += used_out_row * in_vec_size_g + simd_lid / scale_step_per_thread;
   bi += used_out_row * in_vec_size_g + simd_lid / scale_step_per_thread;
-  const device T* xs = x + simd_lid * values_per_thread;
+  const device T* xs = x + (BATCH ? tid.x * in_vec_size : 0) + simd_lid * values_per_thread;
 
   int k = 0;
   for (; k < in_vec_size - block_size; k += block_size) {
@@ -192,7 +303,14 @@ _SOURCE_GENERIC = r"""
       const device T* bl = bi + row * in_vec_size_g;
       U s = sl[0];
       U b = bl[0];
-#if REG
+#if MULTI
+      thread uint32_t wbw[(packs_per_thread * bytes_per_pack + 3) / 4];
+      thread uint8_t* wb = (thread uint8_t*)wbw;
+      for (int j = 0; j < packs_per_thread * bytes_per_pack; j++) wb[j] = wl[j];
+      U part[ROWS];
+      qdot_rows<U, values_per_thread, bits, ROWS>(wb, &x_thread[0][0], s, b, sum, part);
+      for (int r = 0; r < ROWS; r++) result[r][row] += part[r];
+#elif REG
       thread uint32_t wbw[(packs_per_thread * bytes_per_pack + 3) / 4];
       thread uint8_t* wb = (thread uint8_t*)wbw;
       for (int j = 0; j < packs_per_thread * bytes_per_pack; j++) wb[j] = wl[j];
@@ -243,7 +361,7 @@ _SOURCE_GENERIC = r"""
     for (int row = 0; row < results_per_simdgroup && (!small_n || out_row + row < out_vec_size); row++) {
       U v = simd_sum(result[r][row]);
       if (simd_lid == 0) {
-        y[r * out_vec_size + used_out_row + row] = static_cast<T>(v);
+        y[(BATCH ? tid.x : r) * out_vec_size + used_out_row + row] = static_cast<T>(v);
       }
     }
   }
@@ -351,9 +469,36 @@ _SOURCE = r"""
   ws += out_row * in_vec_size_w + simd_lid * packs_per_thread * bytes_per_pack;
   sc += out_row * in_vec_size_g + simd_lid / scale_step_per_thread;
   bi += out_row * in_vec_size_g + simd_lid / scale_step_per_thread;
-  const device T* xs = x + simd_lid * values_per_thread;
+  const device T* xs = x + (BATCH ? tid.x * in_vec_size : 0) + simd_lid * values_per_thread;
 
   for (int k = 0; k < in_vec_size; k += block_size) {
+#if ROWOUTER
+    // Weights, scales and biases of this block's 4 output rows in registers
+    // once; activation rows one at a time (one row's x_thread live). Per
+    // (row, output row) the qdot sequence and block order equal qmv_fast.
+    thread uint32_t wrow[results_per_simdgroup][(packs_per_thread * bytes_per_pack + 3) / 4];
+    U srow[results_per_simdgroup], brow[results_per_simdgroup];
+    for (int row = 0; row < results_per_simdgroup; row++) {
+      auto wl = (const device uint8_t*)(ws + row * in_vec_size_w);
+      thread uint8_t* wb = (thread uint8_t*)wrow[row];
+      for (int j = 0; j < packs_per_thread * bytes_per_pack; j++) wb[j] = wl[j];
+      srow[row] = (sc + row * in_vec_size_g)[0];
+      brow[row] = (bi + row * in_vec_size_g)[0];
+    }
+    for (int r = 0; r < ROWS; r++) {
+      U xr[values_per_thread];
+      U sr = load_vector<T, U, values_per_thread, bits>(xs + r * in_vec_size, xr);
+      for (int row = 0; row < results_per_simdgroup; row++) {
+        result[r][row] += qdot_reg<U, values_per_thread, bits>(
+            (thread uint8_t*)wrow[row], xr, srow[row], brow[row], sr);
+      }
+    }
+    ws += block_size * bytes_per_pack / pack_factor;
+    sc += block_size / group_size;
+    bi += block_size / group_size;
+    xs += block_size;
+    continue;
+#endif
     U sum[ROWS];
     for (int r = 0; r < ROWS; r++) {
       sum[r] = load_vector<T, U, values_per_thread, bits>(xs + r * in_vec_size, x_thread[r]);
@@ -364,7 +509,14 @@ _SOURCE = r"""
       const device T* bl = bi + row * in_vec_size_g;
       U s = sl[0];
       U b = bl[0];
-#if REG
+#if MULTI
+      thread uint32_t wbw[(packs_per_thread * bytes_per_pack + 3) / 4];
+      thread uint8_t* wb = (thread uint8_t*)wbw;
+      for (int j = 0; j < packs_per_thread * bytes_per_pack; j++) wb[j] = wl[j];
+      U part[ROWS];
+      qdot_rows<U, values_per_thread, bits, ROWS>(wb, &x_thread[0][0], s, b, sum, part);
+      for (int r = 0; r < ROWS; r++) result[r][row] += part[r];
+#elif REG
       thread uint32_t wbw[(packs_per_thread * bytes_per_pack + 3) / 4];
       thread uint8_t* wb = (thread uint8_t*)wbw;
       for (int j = 0; j < packs_per_thread * bytes_per_pack; j++) wb[j] = wl[j];
@@ -387,7 +539,7 @@ _SOURCE = r"""
     for (int row = 0; row < results_per_simdgroup; row++) {
       U v = simd_sum(result[r][row]);
       if (simd_lid == 0) {
-        y[r * out_vec_size + out_row + row] = static_cast<T>(v);
+        y[(BATCH ? tid.x : r) * out_vec_size + out_row + row] = static_cast<T>(v);
       }
     }
   }
@@ -408,19 +560,27 @@ def _register_weights(rows: int) -> bool:
     return rows >= 3
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=16)
 def _kernel(variant: str = "fast", reg: bool | None = None):
     header = _mlx_qmv_header()
     if header is None:
         return None
+    rowouter = variant.endswith("_rowouter")
+    variant = variant[:-9] if rowouter else variant
+    batch = variant.endswith("_batch")
+    variant = variant[:-6] if batch else variant
+    multi = variant.endswith("_multi")
+    variant = variant[:-6] if multi else variant
     reg = bool(reg)
     source = {"fast": _SOURCE, "generic": _SOURCE_GENERIC, "quad": _SOURCE_QUAD}[variant]
     return mx.fast.metal_kernel(
-        name=f"vmlx_row_exact_verify_qmv_{variant}{'_reg' if reg else ''}",
+        name=(f"vmlx_row_exact_verify_qmv_{variant}{'_multi' if multi else ''}{'_batch' if batch else ''}"
+              f"{'_rowouter' if rowouter else ''}{'_reg' if reg else ''}"),
         input_names=["w", "scales", "biases", "x"],
         output_names=["y"],
         header=header,
-        source=f"#define REG {1 if reg else 0}\n" + source,
+        source=(f"#define REG {1 if reg else 0}\n#define MULTI {1 if multi else 0}\n"
+                f"#define BATCH {1 if batch else 0}\n#define ROWOUTER {1 if rowouter else 0}\n" + source),
     )
 
 
@@ -448,7 +608,25 @@ def _variants(rows, in_dim, out_dim, bits, group_size, dtype) -> tuple[str, ...]
     quad_ok = (in_dim in (64, 128) and bits in (2, 4, 8)
                and group_size % (in_dim // 4) == 0 and rows * in_dim // 4 <= 128)
     variants = ("quad",) if quad_ok else ()
-    return variants + (("fast", "generic") if fast_ok else ("generic",))
+    base = ("fast", "generic") if fast_ok else ("generic",)
+    # Admission order. Measured on Qwen3.8-27B shapes (M5 Max, 4 rows): the
+    # shared-unpack "multi" walk is best or tied for 4/5/6/8-bit; the batched
+    # grid ("batch", MLX's own single-row kernel per row) is slowest and is
+    # only reachable explicitly via VMLX_ROW_EXACT_QMV_ORDER.
+    order = os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain").split(",")
+    ranked = []
+    for kind in order:
+        kind = kind.strip()
+        if kind == "rowouter":
+            ranked += [v + "_rowouter" for v in base if v == "fast"]
+        elif kind == "batch":
+            ranked += [v + "_batch" for v in base]
+        elif kind == "multi":
+            ranked += [v + "_multi" for v in base]
+        elif kind == "plain":
+            ranked += list(base)
+    base = tuple(ranked)
+    return variants + base
 
 
 def _device_sized(a):
@@ -464,11 +642,13 @@ def _launch(x2d, weight, scales, biases, bits, group_size, variant="fast"):
     rows, in_dim = x2d.shape
     out_dim = weight.shape[0]
     weight, scales, biases = (_device_sized(a) for a in (weight, scales, biases))
-    (y,) = _kernel(variant, _register_weights(rows))(
+    batch = variant.endswith("_batch")
+    (y,) = _kernel(variant, False if batch else _register_weights(rows))(
         inputs=[weight, scales, biases, x2d],
         template=[("T", x2d.dtype), ("BITS", bits), ("GS", group_size),
-                  ("K", in_dim), ("N", out_dim), ("ROWS", rows)],
-        grid=(32, (out_dim + 63) // 64, 1) if variant == "quad" else (32, 2 * ((out_dim + 7) // 8), 1),
+                  ("K", in_dim), ("N", out_dim), ("ROWS", 1 if batch else rows)],
+        grid=((32, (out_dim + 63) // 64, 1) if variant == "quad"
+              else (32 * (rows if batch else 1), 2 * ((out_dim + 7) // 8), 1)),
         threadgroup=(32, 1, 1) if variant == "quad" else (32, 2, 1),
         output_shapes=[(rows, out_dim)],
         output_dtypes=[x2d.dtype],

@@ -186,3 +186,19 @@ def test_qwen35_attention_verify_rows_equal_decode_steps(positions, width):
     mx.eval(verify)
     for r in range(width):
         assert bool(mx.array_equal(verify[:, r:r + 1], steps[r]).item()), f"row {r} differs"
+
+
+def test_row_exact_default_is_per_family_and_env_wins(monkeypatch):
+    monkeypatch.delenv("VMLX_ROW_EXACT_VERIFY_QMV", raising=False)
+    try:
+        R.set_row_exact_family("qwen4_exp")
+        assert R.row_exact_qmv_requested()
+        R.set_row_exact_family("qwen3_5")  # dense 27B: speed first by default
+        assert not R.row_exact_qmv_requested()
+        monkeypatch.setenv("VMLX_ROW_EXACT_VERIFY_QMV", "1")
+        assert R.row_exact_qmv_requested()
+        R.set_row_exact_family("qwen4_exp")
+        monkeypatch.setenv("VMLX_ROW_EXACT_VERIFY_QMV", "0")
+        assert not R.row_exact_qmv_requested()
+    finally:
+        R.set_row_exact_family(None)

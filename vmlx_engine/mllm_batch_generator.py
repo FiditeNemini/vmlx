@@ -8773,6 +8773,9 @@ class MLLMBatchGenerator:
         # Get language model for text generation
         self.language_model = getattr(model, "language_model", model)
         self._model_type = _runtime_model_type(model)
+        from .metal.row_exact_qmv import set_row_exact_family
+
+        set_row_exact_family(self._model_type)
 
         # Check if this is actually a VLM with separate language model
         self.is_vlm = hasattr(model, "language_model")

@@ -18,7 +18,7 @@ export function VideoAttachmentPreview({ src }: { src: string }) {
         hidden={failed}
       />
       {failed && (
-        <p role="status" className="p-2 text-xs text-muted-foreground border border-border rounded-md"
+        <p role="status" className="p-2 text-xs text-inherit border border-current/30 rounded-md"
           title={t('chat.bubble.videoPreviewUnavailableDetail')}>
           {t('chat.bubble.videoPreviewUnavailable')}
           <span className="block mt-1">{t('chat.bubble.videoPreviewUnavailableDetail')}</span>

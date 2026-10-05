@@ -73,11 +73,13 @@ def unified_gdn_verify_eligible(
 
 _HEADER = r"""
 #include <metal_atomic>
+// MLX 0.32.3 unary_ops.h Sigmoid, verbatim: precise::exp promotes to float and
+// the result rounds to U exactly once on return. Casting the exponential back to
+// U first (the 0.31 transcription) double-rounds half inputs.
 template <typename U>
 inline U mlx_sigmoid_precise(U x) {
-  U e = static_cast<U>(metal::precise::exp(metal::abs(x)));
-  U y = static_cast<U>(1) / (static_cast<U>(1) + e);
-  return (x < 0) ? y : (static_cast<U>(1) - y);
+  auto y = 1 / (1 + metal::precise::exp(metal::abs(x)));
+  return static_cast<U>((x < 0) ? y : 1 - y);
 }
 
 template <typename U>

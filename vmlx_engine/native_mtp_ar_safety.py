@@ -5,7 +5,8 @@ Both native-MTP generators (the multimodal lane in ``mllm_batch_generator``
 and the text lane in ``patches/mlx_lm_mtp/batch_generator``) run this every
 verify cycle, for FIXED and ADAPTIVE depth alike.  The depth-adapt gates are
 what a fixed policy disables; this valve is not a depth policy, it is the
-guarantee that a request never keeps speculating while losing to plain AR.
+bounded loss detector; measurement and exploratory work are not an
+instantaneous or whole-request guarantee of AR parity.
 
 Mechanism (wall-clock + counters only; the one sync added is per request,
 before the seed timer):
@@ -26,10 +27,13 @@ before the seed timer):
     is active — so concurrency never enters this measurement.)
   * baseline = the request's measured AR ms/tok once it has run an AR tier
     (true AR at the live context), else the seed AR step.
-  * trip iff window-mean ms/tok AND per-cycle MEDIAN ms/tok exceed
+  * normally trip when window-mean ms/tok AND per-cycle MEDIAN ms/tok exceed
     baseline x scale x margin.  Acceptance collapse raises ms/tok without
     changing the cycle wall, so it is never masked; a single stalled cycle
-    cannot trip (median guard).  Demotion is reversible: the lane's AR tier
+    cannot trip (median guard). With a measured, unscaled AR reference,
+    two nonoverlapping mean-losing windows also trip, so repeated minority
+    stalls cannot hide a sustained loss. Depth/reference changes discard
+    that confirmation. Demotion is reversible: the lane's AR tier
     re-probes MTP with exponential backoff (see mllm_batch_generator).
   * skip while cycles < warmup (longer for an unprimed head) or the window is
     not full.
@@ -207,6 +211,9 @@ class ArSafetyState:
     # (cycles, emitted, wall perf_counter)
     ring: List[Tuple[int, int, float]] = field(default_factory=list)
 
+    mean_loss_end_cycle: Optional[int] = None
+    mean_loss_reference: Optional[Tuple[float, float, bool, bool, bool]] = None
+
     def reset(self, cycle_base: int) -> None:
         """Start a fresh judgment window after a tier change (D3->D1, probe,
         promotion): the anchor and window of one depth say nothing about
@@ -217,6 +224,8 @@ class ArSafetyState:
         self.cycle_base = int(cycle_base)
         self.warmup_cycle_ms = []
         self.ring = []
+        self.mean_loss_end_cycle = None
+        self.mean_loss_reference = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +242,8 @@ class ArSafetyTrip:
     cur_cycle_ms: float
     anchor_context_tokens: int
     context_now: int
+
+    confirmed_mean_loss: bool = False
 
     def marginal_loss_needs_confirmation(
         self, ring: Sequence[Tuple[int, int, float]], ar_step_ms: float
@@ -275,6 +286,7 @@ class ArSafetyTrip:
             f"mtp_ms_per_tok={self.mtp_ms_per_tok:.1f}"
             f">ar_baseline={self.ar_baseline:.1f}(seed={self.seed_ar_ms:.1f})"
             f"x{self.margin:.2f}"
+            + (" confirmed_mean_loss=true" if self.confirmed_mean_loss else "")
         )
 
     def log_text(
@@ -290,6 +302,7 @@ class ArSafetyTrip:
             f"{self.cycle_max_ms_per_tok:.1f} ms/tok, cycle wall anchor "
             f"{self.anchor_cycle_ms:.1f} -> {self.cur_cycle_ms:.1f} ms, "
             f"context {self.anchor_context_tokens} -> {self.context_now})"
+            + (" confirmed_mean_loss=true" if self.confirmed_mean_loss else "")
         )
 
 
@@ -397,11 +410,38 @@ def ar_safety_step(
         # the recovery margin; a cheap median cannot excuse a losing mean.
         per_cycle_ms_per_tok=None if probe else per_cycle_ms_per_tok,
     )
+    # A lone stall retains the median guard. Two independently observed,
+    # nonoverlapping losing windows cannot keep hiding behind that median.
+    # Only a measured, unscaled reference supports this stronger decision.
+    reference = (float(seed_ar_ms), float(margin), baseline_measured, probe, scale_context)
+    if reference != st.mean_loss_reference:
+        st.mean_loss_end_cycle = None
+        st.mean_loss_reference = reference
+    confirmed_mean_loss = False
+    if baseline_measured and not probe and not scale_context:
+        mean_cost = ((float(now) - t0) * 1000.0) / max(1, int(emitted) - e0)
+        excess_ms = ((float(now) - t0) * 1000.0
+                     - (int(emitted) - e0) * float(seed_ar_ms) * float(margin))
+        mean_loses = excess_ms > 0.0
+        pending = st.mean_loss_end_cycle
+        if pending is None:
+            if verdict is None and mean_loses:
+                st.mean_loss_end_cycle = int(cycles)
+        elif c0 >= pending:
+            # Do not clear confirmation on overlapping windows containing
+            # some of the original stall; wait for an independent interval.
+            st.mean_loss_end_cycle = None
+            if mean_loses:
+                confirmed_mean_loss = True
+                verdict = (mean_cost, float(seed_ar_ms))
+    else:
+        st.mean_loss_end_cycle = None
     if verdict is None:
         return None
     mtp_ms_per_tok, ar_baseline = verdict
     return ArSafetyTrip(
         cycles=int(cycles) + int(st.cycle_base),
+        confirmed_mean_loss=confirmed_mean_loss,
         mtp_ms_per_tok=mtp_ms_per_tok,
         ar_baseline=ar_baseline,
         seed_ar_ms=float(seed_ar_ms),

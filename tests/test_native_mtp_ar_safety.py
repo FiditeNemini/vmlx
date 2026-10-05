@@ -1621,6 +1621,10 @@ def test_d1_stale_baseline_single_losing_window_recovers_without_fallback(monkey
     state.ar_tier = m.NativeMTPArTier(depth=3)
     _ar_steps(state.ar_tier, 8, ms=18.0)
     base_t = time.perf_counter() - 1.0
+    # The supplied ring ends at base_t + 160ms; the next cycle is 20ms
+    # later. Real wall time here added an accidental ~840ms final stall,
+    # so the supposed winning window actually had a losing mean.
+    monkeypatch.setattr(m.time, "perf_counter", lambda: base_t + 0.180)
     state.stats.cycles = 40; state.stats.accepted_tokens = 0
     state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]  # marginal: 20 ms/tok vs AR 18
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False

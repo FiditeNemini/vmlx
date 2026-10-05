@@ -7302,13 +7302,14 @@ def _native_mtp_maybe_ar_safety_fallback(
         - int(state.last_ar_measure_emitted) < _NATIVE_MTP_CALIBRATION_MIN_SPACING_TOKENS
         and trip.window >= window
         and trip.mtp_ms_per_tok > measured_ar
-        and trip.cycle_median_ms_per_tok > measured_ar
+        and (trip.cycle_median_ms_per_tok > measured_ar or trip.confirmed_mean_loss)
     )
     # Default off: marginal windows can cost less than the handoff itself.
     # Reuse the bounded confirmation path; larger losses and failed probes
     # retain their immediate exit. No acceptance/sampling/cache math changes.
     if (
         fresh_measured_loss
+        and not trip.confirmed_mean_loss
         and os.environ.get("VMLX_MTP_CONFIRM_MARGINAL_LOSS", "0") == "1"
         and trip.marginal_loss_needs_confirmation(state.ar_safety.ring, measured_ar)
     ):
@@ -7318,7 +7319,7 @@ def _native_mtp_maybe_ar_safety_fallback(
             request_id, measured_ar, pending,
         )
         fresh_measured_loss = False
-    if not fresh_measured_loss and (
+    if not fresh_measured_loss and not trip.confirmed_mean_loss and (
         pending <= 0 or cycles - pending > _NATIVE_MTP_D1_TRIP_CONFIRM_WINDOWS * window
     ):
         state.ar_trip_pending_cycle = cycles

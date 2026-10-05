@@ -305,6 +305,7 @@ const api = {
 
   // App-level events
   app: {
+    getPowerMode: (): Promise<import('../shared/powerMode').PowerModeStatus> => ipcRenderer.invoke('app:powerMode'),
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getTotalMemoryGB: (): Promise<number> => ipcRenderer.invoke('app:totalMemoryGB'),
     onUpdateAvailable: (callback: (data: any) => void) => {

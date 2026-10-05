@@ -1,3 +1,4 @@
+import { PowerModeStatus } from './PowerModeStatus'
 import { DEFAULT_BLOCK_DISK_CACHE_PERCENT } from '../../../../shared/cacheDefaults'
 import { resolveNativeMtpMode } from '../../../../shared/nativeMtpLaunchArgs'
 import { useEffect, useState, useRef } from 'react'
@@ -1781,6 +1782,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           ]}
           disabled={dflash2Speculative}
         />
+        <PowerModeStatus />
         {dflash2Speculative && <IncompatWarning text={t('sessions.config.nativeMtpOffForDrafter')} />}
         {nativeMtpMode === 'adaptive' && !dflash2Speculative && (
           <InfoNote text={t('sessions.config.nativeMtpAdaptiveNote')} />

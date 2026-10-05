@@ -1,4 +1,5 @@
 import './user-data-dir'
+import { getPowerMode } from './powerMode'
 import { app, BrowserWindow, ipcMain, dialog, shell, session } from 'electron'
 import { join } from 'path'
 import { readFileSync } from 'fs'
@@ -277,6 +278,7 @@ function createWindow(): void {
 
     // App version
     ipcMain.handle('app:getVersion', () => app.getVersion())
+    ipcMain.handle('app:powerMode', () => getPowerMode())
     // Total unified memory, so the renderer can warn low-RAM Macs that the
     // in-RAM KV cache competes with model weights. Advisory only — nothing
     // is disabled on the basis of this number.

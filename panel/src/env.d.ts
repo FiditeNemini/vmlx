@@ -385,6 +385,7 @@ declare global {
         delete: (key: string) => Promise<{ success: boolean }>;
       };
       app: {
+        getPowerMode: () => Promise<import('./shared/powerMode').PowerModeStatus>;
         getVersion: () => Promise<string>;
         onUpdateAvailable: (
           callback: (data: {

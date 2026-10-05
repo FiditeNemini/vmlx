@@ -130,3 +130,59 @@ def test_tiny_qwen4_verify_rows_equal_decode_steps(bits, width):
     mx.eval(verify)
     for r in range(width):
         assert bool(mx.array_equal(verify[:, r], steps[r]).item()), f"row {r} differs from its decode step"
+
+
+@pytest.mark.parametrize("positions", ["text", "mrope"])
+@pytest.mark.parametrize("width", [2, 3, 4])
+def test_qwen35_attention_verify_rows_equal_decode_steps(positions, width):
+    """Qwen3.5/3.8 dense attention (27B path): fused text RoPE per row, hoisted
+    M-RoPE angles formed like decode, and paired single-query SDPA."""
+    from mlx_lm.models.cache import KVCache
+    from vmlx_engine.patches.mlx_vlm_mtp import qwen35_vl
+
+    qwen35_vl.apply()
+    from mlx_vlm.models.qwen3_5 import config as qcfg
+    from mlx_vlm.models.qwen3_5 import language as qlang
+
+    cfg = qcfg.TextConfig(
+        model_type="qwen3_5_text", hidden_size=256, intermediate_size=512,
+        linear_num_value_heads=2, linear_num_key_heads=2, linear_key_head_dim=32,
+        linear_value_head_dim=32, linear_conv_kernel_dim=4, num_hidden_layers=4,
+        num_attention_heads=4, rms_norm_eps=1e-6, vocab_size=97, num_key_value_heads=2,
+        max_position_embeddings=4096, head_dim=256,
+    )
+    mx.random.seed(23)
+    attn = qlang.Qwen3_5Attention(cfg)
+    nn.quantize(attn, group_size=64, bits=8)
+    attn.set_dtype(mx.bfloat16)
+    prefix = (mx.random.normal((1, 9, 256)) * 0.5).astype(mx.bfloat16)
+    rows = (mx.random.normal((1, width, 256)) * 0.5).astype(mx.bfloat16)
+
+    def pos(start, count):
+        return mx.broadcast_to(mx.arange(start, start + count)[None, None], (3, 1, count))
+
+    def call(x, cache, start, verify=False):
+        if positions == "text":
+            return attn(x, mask="causal" if x.shape[1] > 1 else None, cache=cache)
+        p = pos(start, x.shape[1])
+        if verify:
+            pe = R.rotary_rows_like_decode(attn.rotary_emb, p, x)
+        else:
+            pe = attn.rotary_emb(x, p)
+        return attn(x, mask="causal" if x.shape[1] > 1 else None, cache=cache,
+                    position_ids=p, position_embeddings=pe)
+
+    reference = KVCache()
+    mx.eval(call(prefix, reference, 0))
+    steps = []
+    for r in range(width):
+        out = call(rows[:, r:r + 1], reference, 9 + r)
+        mx.eval(out)
+        steps.append(out)
+    candidate = KVCache()
+    mx.eval(call(prefix, candidate, 0))
+    with R.row_exact_verify_scope():
+        verify = call(rows, candidate, 9, verify=True)
+    mx.eval(verify)
+    for r in range(width):
+        assert bool(mx.array_equal(verify[:, r:r + 1], steps[r]).item()), f"row {r} differs"

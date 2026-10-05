@@ -19,7 +19,6 @@ The language core is shared by the text, image, and video lanes.
 from dataclasses import dataclass, field, replace
 import logging
 import os
-from collections import OrderedDict
 import time
 from typing import Any, Dict, List, Optional
 
@@ -41,7 +40,9 @@ from vmlx_engine.metal.qwen4_hc_norm import (
     hc_combine_norm,
 )
 from vmlx_engine.metal.row_exact_qmv import MAX_ROWS as _ROW_EXACT_MAX_ROWS
-from vmlx_engine.metal.row_exact_qmv import row_exact_scope_active
+from vmlx_engine.metal.row_exact_qmv import (
+    attend_rows_in_pairs, rotary_rows_like_decode, row_exact_scope_active,
+)
 from vmlx_engine.metal.qwen4_gdn_prework import (
     gdn_prework_requested, gdn_prework_update,
 )
@@ -1544,52 +1545,6 @@ def _qsa_exact_rope_enabled() -> bool:
     }
 
 
-_PAIR_CAUSAL_MASKS: "OrderedDict[tuple[int, str], mx.array]" = OrderedDict()
-
-
-def _pair_causal_mask(end: int, dtype) -> mx.array:
-    """Additive mask for the last two query rows over ``end`` keys.
-
-    Every QSA layer of one verify forward needs the same masks; sharing the
-    lazy array removes four small kernels per layer and pair.
-    """
-    key = (end, str(dtype))
-    mask = _PAIR_CAUSAL_MASKS.get(key)
-    if mask is None:
-        q_pos = mx.arange(end - 2, end)[:, None]
-        mask = mx.where(mx.arange(end)[None, :] <= q_pos, 0.0, -np.inf).astype(dtype)[None, None]
-        _PAIR_CAUSAL_MASKS[key] = mask
-        while len(_PAIR_CAUSAL_MASKS) > 16:
-            _PAIR_CAUSAL_MASKS.popitem(last=False)
-    return mask
-
-
-def _rotary_rows_like_decode(rotary, position_ids: mx.array) -> tuple[mx.array, mx.array]:
-    """Stock M-RoPE cos/sin for S rows, each row computed exactly as at decode.
-
-    The stock embedding forms angles as ``inv_freq[F,1] @ positions[1,S]``.
-    At decode S=1, so every batch element is a one-column product; a chunk of
-    S>=2 columns takes a different matmul kernel that rounds differently.
-    Moving the S positions into the batch dimension gives every row its own
-    one-column product in a single call; the remaining ops are elementwise.
-    """
-    if position_ids.ndim == 2:
-        position_ids = mx.broadcast_to(
-            position_ids[None, ...], (3,) + tuple(position_ids.shape)
-        )
-    axes, batch, rows = position_ids.shape
-    width = rotary.inv_freq.shape[0]
-    inv = mx.broadcast_to(
-        rotary.inv_freq.astype(mx.float32)[None, None, None, :, None],
-        (axes, batch, rows, width, 1),
-    )
-    pos = position_ids.astype(mx.float32)[..., None, None]  # [3, B, S, 1, 1]
-    freqs = (inv @ pos).reshape(axes, batch, rows, width)
-    freqs = rotary.apply_interleaved_mrope(freqs, rotary.mrope_section)
-    emb = mx.concatenate([freqs, freqs], axis=-1)
-    return mx.cos(emb), mx.sin(emb)
-
-
 def _qsa_exact_rope_attn_enabled() -> bool:
     """Exact angles for the QSA ATTENTION rotary (default off: model-wide
     numerics change awaiting its own long-context quality A/B;
@@ -1988,7 +1943,7 @@ class QSAAttention(nn.Module):
         row_exact = (1 < S <= _ROW_EXACT_MAX_ROWS and B == 1
                      and row_exact_scope_active() and not self.training)
         if row_exact and not _qsa_exact_rope_attn_enabled():
-            cos, sin = _rotary_rows_like_decode(self.rotary_emb, position_ids)
+            cos, sin = rotary_rows_like_decode(self.rotary_emb, position_ids, values)
         elif _qsa_exact_rope_attn_enabled():
             # Opt-in numerical correction for the attention rotary (see
             # _exact_mrope_cos_sin): the stock K=1 matmul rounds the angle
@@ -2083,22 +2038,10 @@ class QSAAttention(nn.Module):
             # single-query vector SDPA. MLX keeps that vector kernel for up to
             # two queries (measured bit-exact) and switches to the full kernel,
             # whose reduction order differs, from three; so rows go in pairs.
-            start = T - S
-            rows = []
-            for first in range(0, S, 2):
-                count = min(2, S - first)
-                end = start + first + count
-                row_mask = None
-                if index_mask is not None:
-                    row_mask = index_mask[..., first:first + count, :end]
-                if count == 2:
-                    causal = _pair_causal_mask(end, queries.dtype)
-                    row_mask = causal if row_mask is None else causal + row_mask
-                rows.append(self._attend(
-                    queries[:, :, first:first + count], keys[:, :, :end],
-                    values[:, :, :end], row_mask, end,
-                ))
-            out = mx.concatenate(rows, axis=2)
+            out = attend_rows_in_pairs(
+                lambda q, k, v, m: self._attend(q, k, v, m, k.shape[2]),
+                queries, keys, values, index_mask,
+            )
             out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
             return self.o_proj(out * mx.sigmoid(gate))
 

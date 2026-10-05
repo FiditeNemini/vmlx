@@ -93,6 +93,19 @@ class QuantizedProjectionGroup(nn.Module):
         """
 
         boundaries = (0, *self.split_indices, self.output_dims)
+        from vmlx_engine.metal.row_exact_qmv import row_exact_qmv, row_exact_scope_active
+
+        if row_exact_scope_active():
+            exact = tuple(
+                row_exact_qmv(
+                    x, self.weight[start:end], self.scales[start:end],
+                    self.biases[start:end] if self.biases is not None else None,
+                    group_size=self.group_size, bits=self.bits, mode=self.mode,
+                )
+                for start, end in zip(boundaries, boundaries[1:])
+            )
+            if all(y is not None for y in exact):
+                return exact
         return tuple(
             mx.quantized_matmul(
                 x,

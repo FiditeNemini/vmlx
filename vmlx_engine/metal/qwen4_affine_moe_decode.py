@@ -315,6 +315,28 @@ def qwen4_affine_switchglu(
     scores: mx.array,
 ) -> tuple[mx.array, bool]:
     """Return the weighted routed output and whether the fused path owned it."""
+    from vmlx_engine.metal.row_exact_qmv import MAX_ROWS, row_exact_scope_active
+
+    if (
+        x.ndim == 3 and x.shape[0] == 1 and 1 < x.shape[1] <= MAX_ROWS
+        and row_exact_scope_active()
+    ):
+        # Native-MTP verify rows must equal their decode steps bit for bit.
+        # Single-row decode takes fused kernels (e.g. the gate/up pair kernel)
+        # whose arithmetic differs from the multi-row gather path (measured
+        # ~1.7k differing elements per row on 2-bit experts). Routed experts
+        # are row-specific, so running each row through the exact decode
+        # dispatch costs launches, not extra weight bytes.
+        pieces = [
+            qwen4_affine_switchglu(
+                switch, x[:, r:r + 1], indices[:, r:r + 1], scores[:, r:r + 1]
+            )
+            for r in range(x.shape[1])
+        ]
+        return (
+            mx.concatenate([out for out, _ in pieces], axis=1),
+            all(owned for _, owned in pieces),
+        )
     aligned = aligned_switchglu(switch, x, indices)
     if aligned is not None:
         return (aligned * scores[..., None]).sum(axis=-2), True

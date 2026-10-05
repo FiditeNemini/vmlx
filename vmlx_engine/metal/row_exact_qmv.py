@@ -439,7 +439,7 @@ def _variants(rows, in_dim, out_dim, bits, group_size, dtype) -> tuple[str, ...]
     """Candidate transcriptions in admission order (the self-check decides)."""
     if bits not in (2, 3, 4, 5, 6, 8) or group_size not in (32, 64, 128):
         return ()
-    if dtype not in (mx.float16, mx.bfloat16) or not 2 <= rows <= _max_rows(bits):
+    if dtype not in (mx.float16, mx.bfloat16, mx.float32) or not 2 <= rows <= _max_rows(bits):
         return ()
     if in_dim % group_size:
         return ()
@@ -476,12 +476,15 @@ def _launch(x2d, weight, scales, biases, bits, group_size, variant="fast"):
     return y
 
 
-def _admit(key, weight, scales, biases, bits, group_size, rows, in_dim, dtype, variants):
+def _admit(key, weight, scales, biases, bits, group_size, rows, in_dim, dtype, variants,
+           ref_scales=None, ref_biases=None):
     if key in _ADMITTED:
         return _ADMITTED[key]
+    ref_scales = scales if ref_scales is None else ref_scales
+    ref_biases = biases if ref_biases is None else ref_biases
     probe = (mx.random.normal((rows, in_dim), key=mx.random.key(1234)) * 0.5).astype(dtype)
     want = mx.concatenate([
-        mx.quantized_matmul(probe[r:r + 1], weight, scales, biases, transpose=True,
+        mx.quantized_matmul(probe[r:r + 1], weight, ref_scales, ref_biases, transpose=True,
                             group_size=group_size, bits=bits, mode="affine")
         for r in range(rows)
     ], axis=0)
@@ -519,10 +522,20 @@ def row_exact_qmv(x, weight, scales, biases, *, group_size: int, bits: int, mode
     variants = _variants(rows, in_dim, out_dim, bits, group_size, x.dtype)
     if not variants:
         return None
-    if weight.dtype != mx.uint32 or scales.dtype != x.dtype or biases.dtype != x.dtype:
+    if weight.dtype != mx.uint32:
         return None
-    key = (rows, in_dim, out_dim, bits, group_size, str(x.dtype))
-    variant = _admit(key, weight, scales, biases, bits, group_size, rows, in_dim, x.dtype, variants)
+    if scales.dtype != x.dtype or biases.dtype != x.dtype:
+        # e.g. float32 activations over bf16 scales (Qwen3.5 attention promotes
+        # through its float32 rotary): run in the activation dtype; admission
+        # proves the result equals MLX's own M=1 call bit for bit.
+        if x.dtype != mx.float32:
+            return None
+    ref_scales, ref_biases = scales, biases
+    if scales.dtype != x.dtype:
+        scales, biases = scales.astype(x.dtype), biases.astype(x.dtype)
+    key = (rows, in_dim, out_dim, bits, group_size, str(x.dtype), str(ref_scales.dtype))
+    variant = _admit(key, weight, scales, biases, bits, group_size, rows, in_dim, x.dtype, variants,
+                     ref_scales, ref_biases)
     if variant is None:
         return None
     STATS["calls"] += 1
@@ -546,6 +559,91 @@ _INSTALLED = {"done": False}
 
 def row_exact_scope_active() -> bool:
     return _SCOPE.get()
+
+
+_PAIR_CAUSAL_MASKS: "dict[tuple[int, str], mx.array]" = {}
+
+
+def pair_causal_mask(end: int, dtype) -> mx.array:
+    """Additive causal mask for the last two query rows over ``end`` keys.
+
+    Shared by every attention layer of one verify forward (one lazy array).
+    """
+    key = (end, str(dtype))
+    mask = _PAIR_CAUSAL_MASKS.get(key)
+    if mask is None:
+        q_pos = mx.arange(end - 2, end)[:, None]
+        mask = mx.where(mx.arange(end)[None, :] <= q_pos, 0.0, float("-inf")).astype(dtype)[None, None]
+        if len(_PAIR_CAUSAL_MASKS) >= 16:
+            _PAIR_CAUSAL_MASKS.pop(next(iter(_PAIR_CAUSAL_MASKS)))
+        _PAIR_CAUSAL_MASKS[key] = mask
+    return mask
+
+
+_ROTARY_OUTPUT_DTYPE: dict = {}
+
+
+def rotary_rows_like_decode(rotary, position_ids: mx.array, x=None) -> tuple[mx.array, mx.array]:
+    """Stock M-RoPE cos/sin for S rows, each row computed exactly as at decode.
+
+    The stock embedding forms angles as ``inv_freq[F,1] @ positions[1,S]``.
+    At decode S=1, so every batch element is a one-column product; a chunk of
+    S>=2 columns takes a different matmul kernel that rounds differently.
+    Moving the S positions into the batch dimension gives every row its own
+    one-column product in a single call; the remaining ops are elementwise.
+    """
+    if position_ids.ndim == 2:
+        position_ids = mx.broadcast_to(
+            position_ids[None, ...], (3,) + tuple(position_ids.shape)
+        )
+    axes, batch, rows = position_ids.shape
+    width = rotary.inv_freq.shape[0]
+    inv = mx.broadcast_to(
+        rotary.inv_freq.astype(mx.float32)[None, None, None, :, None],
+        (axes, batch, rows, width, 1),
+    )
+    pos = position_ids.astype(mx.float32)[..., None, None]  # [3, B, S, 1, 1]
+    freqs = (inv @ pos).reshape(axes, batch, rows, width)
+    freqs = rotary.apply_interleaved_mrope(freqs, rotary.mrope_section)
+    emb = mx.concatenate([freqs, freqs], axis=-1)
+    cos, sin = mx.cos(emb), mx.sin(emb)
+    if x is not None:
+        # Some rotary copies return float32, others cast to the activation
+        # dtype (vendored Qwen3.5). Match this class's own convention; the
+        # one-row call is lazy and never evaluated, only its dtype is read.
+        key = (type(rotary), str(x.dtype))
+        out_dtype = _ROTARY_OUTPUT_DTYPE.get(key)
+        if out_dtype is None:
+            out_dtype = rotary(x[:, :1], position_ids[..., :1])[0].dtype
+            _ROTARY_OUTPUT_DTYPE[key] = out_dtype
+        if out_dtype != cos.dtype:
+            cos, sin = cos.astype(out_dtype), sin.astype(out_dtype)
+    return cos, sin
+
+
+def attend_rows_in_pairs(attend, queries, keys, values, row_masks=None):
+    """Attend S verify rows like their decode steps.
+
+    MLX keeps its single-query vector SDPA for up to two queries (measured
+    bit-exact against decode) and switches to the full kernel, whose reduction
+    order differs, from three. Row ``r`` sees keys up to and including itself.
+    ``attend(q, k, v, mask)`` is the model's own SDPA call; ``row_masks``
+    optionally supplies extra additive rows ``[..., S, T]`` (e.g. a sparse
+    index mask), sliced per pair.
+    """
+    S = queries.shape[2]
+    T = keys.shape[2]
+    start = T - S
+    outs = []
+    for first in range(0, S, 2):
+        count = min(2, S - first)
+        end = start + first + count
+        mask = None if row_masks is None else row_masks[..., first:first + count, :end]
+        if count == 2:
+            causal = pair_causal_mask(end, queries.dtype)
+            mask = causal if mask is None else causal + mask
+        outs.append(attend(queries[:, :, first:first + count], keys[:, :, :end], values[:, :, :end], mask))
+    return mx.concatenate(outs, axis=2)
 
 
 _DENSE_ADMITTED: dict[tuple, bool] = {}

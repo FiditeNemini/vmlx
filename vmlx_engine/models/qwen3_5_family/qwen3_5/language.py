@@ -587,7 +587,17 @@ class Qwen3_5Model(nn.Module):
         position_embeddings = None
         if position_ids is not None and getattr(position_ids, "ndim", 0) == 3:
             fa_layer = self.layers[self.fa_idx]
-            position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
+            from vmlx_engine.metal.row_exact_qmv import (
+                MAX_ROWS as _ROW_EXACT_MAX_ROWS, rotary_rows_like_decode, row_exact_scope_active,
+            )
+
+            if 1 < h.shape[1] <= _ROW_EXACT_MAX_ROWS and row_exact_scope_active():
+                # Native-MTP verify rows: each angle as its decode step forms it.
+                position_embeddings = rotary_rows_like_decode(
+                    fa_layer.self_attn.rotary_emb, position_ids, h
+                )
+            else:
+                position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
 
         for layer, c in zip(self.layers, cache):
             mask = ssm_mask if layer.is_linear else fa_mask

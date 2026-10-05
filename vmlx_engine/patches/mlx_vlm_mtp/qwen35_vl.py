@@ -29,6 +29,11 @@ from vmlx_engine.metal.qwen35_gdn_gate_terms import (
     qwen35_gated_delta_decode,
 )
 
+from vmlx_engine.metal.row_exact_qmv import MAX_ROWS as _ROW_EXACT_MAX_ROWS
+from vmlx_engine.metal.row_exact_qmv import (
+    attend_rows_in_pairs, rotary_rows_like_decode, row_exact_scope_active,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -350,6 +355,63 @@ def _register_mtp_classes(qlang: Any) -> None:
     qlang.MTPModule = MTPModule
 
 
+def _row_exact_attention(self, qlang, x, cache, position_ids, position_embeddings=None):
+    """Verify-scope attention whose every row equals its decode step bit for bit.
+
+    Rotary per row exactly as decode forms it (text: fused RoPE at the row's own
+    offset; M-RoPE: one-column angle products), then paired single-query SDPA
+    over the keys each row may see (vmlx_engine/metal/row_exact_qmv.py).
+    """
+    mx = qlang.mx
+    batch_size, seq_len, _ = x.shape
+    q_proj_output = self.q_proj(x)
+    queries, gate = mx.split(
+        q_proj_output.reshape(batch_size, seq_len, self.num_attention_heads, -1), 2, axis=-1
+    )
+    gate = gate.reshape(batch_size, seq_len, -1)
+    keys, values = self.k_proj(x), self.v_proj(x)
+    queries = self.q_norm(queries).transpose(0, 2, 1, 3)
+    keys = self.k_norm(
+        keys.reshape(batch_size, seq_len, self.num_key_value_heads, -1)
+    ).transpose(0, 2, 1, 3)
+    values = values.reshape(batch_size, seq_len, self.num_key_value_heads, -1).transpose(0, 2, 1, 3)
+    if position_embeddings is not None:
+        # Hoisted once per forward by the model, already row-exact in scope.
+        cos, sin = position_embeddings
+        queries, keys = qlang.apply_multimodal_rotary_pos_emb(queries, keys, cos, sin)
+    elif position_ids is None or getattr(position_ids, "ndim", 0) == 2:
+        if position_ids is None:
+            offset = cache.offset if cache is not None else 0
+        else:
+            first = position_ids[0, 0]
+            offset = int(first.item() if hasattr(first, "item") else first)
+        rope = self._vmlx_text_rope()
+        queries = mx.concatenate(
+            [rope(queries[:, :, r:r + 1], offset=offset + r) for r in range(seq_len)], axis=2
+        )
+        keys = mx.concatenate(
+            [rope(keys[:, :, r:r + 1], offset=offset + r) for r in range(seq_len)], axis=2
+        )
+    else:
+        cos, sin = rotary_rows_like_decode(self.rotary_emb, position_ids, values)
+        queries, keys = qlang.apply_multimodal_rotary_pos_emb(queries, keys, cos, sin)
+    if cache is not None:
+        keys, values = cache.update_and_fetch(keys, values)
+    if isinstance(keys, mx.array) and isinstance(values, mx.array):
+        output = attend_rows_in_pairs(
+            lambda q, k, v, m: qlang.scaled_dot_product_attention(
+                q, k, v, cache=cache, scale=self.scale, mask=m,
+            ),
+            queries, keys, values,
+        )
+    else:  # quantized KV storage: stock multi-query kernel
+        output = qlang.scaled_dot_product_attention(
+            queries, keys, values, cache=cache, scale=self.scale, mask="causal",
+        )
+    output = output.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
+    return self.o_proj(output * mx.sigmoid(gate))
+
+
 def _patch_attention_text_rope(qlang: Any) -> None:
     cls = qlang.Qwen3_5Attention
     if "_vmlx_text_rope_patched" in cls.__dict__:
@@ -383,6 +445,11 @@ def _patch_attention_text_rope(qlang: Any) -> None:
         position_ids=None,
         position_embeddings=None,
     ):
+        if (
+            x.shape[0] == 1 and 1 < x.shape[1] <= _ROW_EXACT_MAX_ROWS
+            and row_exact_scope_active()
+        ):
+            return _row_exact_attention(self, qlang, x, cache, position_ids, position_embeddings)
         if position_ids is not None and getattr(position_ids, "ndim", 0) != 2:
             if position_embeddings is None:
                 # Upstream mlx-vlm attention has no position_embeddings
@@ -881,7 +948,13 @@ def _patch_qwen_model(qlang: Any) -> None:
         position_embeddings = None
         if position_ids is not None and getattr(position_ids, "ndim", 0) == 3:
             fa_layer = self.layers[self.fa_idx]
-            position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
+            if 1 < h.shape[1] <= _ROW_EXACT_MAX_ROWS and row_exact_scope_active():
+                # Verify rows: each angle as its one-row decode forward forms it.
+                position_embeddings = rotary_rows_like_decode(
+                    fa_layer.self_attn.rotary_emb, position_ids, h
+                )
+            else:
+                position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
 
         capture_set = set(capture_layer_ids) if capture_layer_ids else set()
         for layer_idx, (layer, layer_cache) in enumerate(zip(self.layers, cache)):

@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-
 def test_local_generation_metadata_audit_defaults_include_step3p7_repro_paths():
     from tests.cross_matrix.run_local_generation_metadata_audit import (
         HIGH_RISK_MODEL_CANDIDATES,
@@ -21,36 +18,44 @@ def test_local_generation_metadata_audit_defaults_include_step3p7_repro_paths():
 def test_local_generation_metadata_audit_reports_high_risk_rows(tmp_path):
     from tests.cross_matrix.run_local_generation_metadata_audit import build_artifact
 
-    artifact = build_artifact(
-        (
-            "/Users/example/models/JANGQ/Hy3-preview-JANG_2L",
-            "/Users/example/models/JANGQ/MiniMax-M2.7-JANG_K",
-            "/Users/example/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K",
-        )
-    )
+    # Metadata-only fixtures exercise the real registry and default resolvers;
+    # this unit contract must not depend on machine-specific model downloads.
+    models = []
+    for name, model_type, generation, jang in (
+        ("Hy3-preview-JANG_2L", "hy_v3",
+         {"max_new_tokens": 2048, "top_k": 0}, {}),
+        ("MiniMax-M2.7-JANG_K", "minimax_m2",
+         {"max_new_tokens": 4096}, {"capabilities": {"reasoning_parser": "qwen3"}}),
+        ("DeepSeek-V4-Flash-JANGTQ-K", "deepseek_v4",
+         {"max_new_tokens": 4096}, {"chat": {"sampling_defaults": {
+             "repetition_penalty_chat": 1.0, "repetition_penalty_thinking": 1.0,
+         }}}),
+    ):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "config.json").write_text(json.dumps({"model_type": model_type}))
+        (path / "generation_config.json").write_text(json.dumps(generation))
+        (path / "jang_config.json").write_text(json.dumps(jang))
+        models.append(str(path))
 
-    if artifact["row_count"] == 0:
-        pytest.skip("high-risk local model paths are not present on this machine")
+    artifact = build_artifact(tuple(models))
 
     assert artifact["status"] == "pass"
-    assert artifact["row_count"] >= 1
+    assert artifact["row_count"] == 3
     rows = {Path(row["path"]).name: row for row in artifact["rows"]}
-    if "Hy3-preview-JANG_2L" in rows:
-        hy3 = rows["Hy3-preview-JANG_2L"]
-        assert hy3["registry"]["reasoning_parser"] == "qwen3"
-        assert hy3["registry"]["tool_parser"] == "hunyuan"
-        assert hy3["resolved_chat"]["max_tokens"] == 2048
-        assert hy3["resolved_chat"]["top_k"] == 0
-    if "MiniMax-M2.7-JANG_K" in rows:
-        minimax = rows["MiniMax-M2.7-JANG_K"]
-        assert minimax["registry"]["reasoning_parser"] == "minimax_m2"
-        assert "registry_overrides_stale_capability_reasoning_parser" in minimax["notes"]
-        assert minimax["resolved_chat"]["max_tokens"] == 4096
-    if "DeepSeek-V4-Flash-JANGTQ-K" in rows:
-        dsv4 = rows["DeepSeek-V4-Flash-JANGTQ-K"]
-        assert dsv4["resolved_chat"]["repetition_penalty"] == 1.0
-        assert dsv4["resolved_thinking"]["repetition_penalty"] == 1.0
-        assert dsv4["resolved_chat"]["max_tokens"] == 4096
+    hy3 = rows["Hy3-preview-JANG_2L"]
+    assert hy3["registry"]["reasoning_parser"] == "qwen3"
+    assert hy3["registry"]["tool_parser"] == "hunyuan"
+    assert hy3["resolved_chat"]["max_tokens"] == 2048
+    assert hy3["resolved_chat"]["top_k"] == 0
+    minimax = rows["MiniMax-M2.7-JANG_K"]
+    assert minimax["registry"]["reasoning_parser"] == "minimax_m2"
+    assert "registry_overrides_stale_capability_reasoning_parser" in minimax["notes"]
+    assert minimax["resolved_chat"]["max_tokens"] == 4096
+    dsv4 = rows["DeepSeek-V4-Flash-JANGTQ-K"]
+    assert dsv4["resolved_chat"]["repetition_penalty"] == 1.0
+    assert dsv4["resolved_thinking"]["repetition_penalty"] == 1.0
+    assert dsv4["resolved_chat"]["max_tokens"] == 4096
 
 
 def test_local_generation_metadata_audit_artifact_is_json_serializable():

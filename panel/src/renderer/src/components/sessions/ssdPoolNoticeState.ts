@@ -26,3 +26,22 @@ export function ssdPoolNoticeKind(current: SsdPoolSnapshot, previous: SsdPoolSna
     && current.capacityEvicted > previous.capacityEvicted) return 'evicted'
   return null
 }
+
+export interface SsdPoolNoticeState {
+  key: string
+  kind: 'capacity' | 'evicted'
+}
+
+/** Capacity describes current usage; eviction describes an observed past event. */
+export function reconcileSsdPoolNotice(
+  current: SsdPoolSnapshot,
+  previous: SsdPoolSnapshot | null,
+  notice: SsdPoolNoticeState | null,
+): SsdPoolNoticeState | null {
+  const kind = ssdPoolNoticeKind(current, previous)
+  if (kind) return { kind, key: `${current.root}:${current.cap}:${current.capacityEvicted}:${kind}` }
+  if (previous?.root !== current.root || previous.cap !== current.cap) return null
+  // A clear from another surface or ordinary eviction can free capacity.
+  // Keep a historical eviction notification, but never claim the pool is full.
+  return notice?.kind === 'capacity' ? null : notice
+}

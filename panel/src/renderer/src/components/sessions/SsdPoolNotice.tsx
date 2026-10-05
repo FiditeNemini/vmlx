@@ -3,7 +3,7 @@ import { AlertTriangle, X } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../ui/Modal'
 import { formatCacheStorageBytes } from './CachePanel'
-import { readSsdPoolSnapshot, ssdPoolNoticeKind, type SsdPoolSnapshot } from './ssdPoolNoticeState'
+import { readSsdPoolSnapshot, reconcileSsdPoolNotice, type SsdPoolSnapshot } from './ssdPoolNoticeState'
 import { isImageSession } from '../../../../shared/sessionUtils'
 
 export interface SsdPoolSession {
@@ -45,9 +45,13 @@ export function SsdPoolNotice({ sessionId, host, port, pid }: { sessionId: strin
           const value = readSsdPoolSnapshot({ block_disk_cache: { global_budget: data.ssdPool } })
           setSnapshot(value)
           if (value) {
-            const kind = ssdPoolNoticeKind(value, previous.current)
-            if (kind) setNotice({ kind, key: `${value.root}:${value.cap}:${value.capacityEvicted}:${kind}` })
-            else if (previous.current?.root !== value.root || previous.current?.cap !== value.cap) setNotice(null)
+            const prior = previous.current
+            setNotice(current => reconcileSsdPoolNotice(value, prior, current))
+            // A later full episode must be visible even if an earlier capacity
+            // notice was dismissed and the eviction counter did not change.
+            if (value.cap > 0 && value.used < value.cap) {
+              setDismissed(current => current.endsWith(':capacity') ? '' : current)
+            }
             previous.current = value
           } else setNotice(null)
         }

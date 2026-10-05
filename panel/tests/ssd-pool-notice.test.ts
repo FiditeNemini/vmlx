@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readSsdPoolSnapshot, ssdPoolNoticeKind } from '../src/renderer/src/components/sessions/ssdPoolNoticeState'
+import { readSsdPoolSnapshot, ssdPoolNoticeKind, reconcileSsdPoolNotice } from '../src/renderer/src/components/sessions/ssdPoolNoticeState'
 import { readManagedSsdPoolBudget } from '../src/shared/ssdPoolHealth'
 
 const snapshot = { root: '/cache', used: 950, cap: 1000, capacityEvicted: 0 }
@@ -65,5 +65,35 @@ describe('SSD pool capacity notice', () => {
     expect(readSsdPoolSnapshot({ block_disk_cache: { disk_size_bytes: 1, global_budget: {
       root: '/cache', bytes_after: 950, max_size_bytes: 1000, evicted_entries_total: 0, accounted: true,
     } } })).toEqual(snapshot)
+  })
+})
+
+describe('SSD notice recovery across surfaces', () => {
+  const full = { ...snapshot, used: snapshot.cap }
+  const capacity = reconcileSsdPoolNotice(full, snapshot, null)!
+  it('clears a full notice when another surface clears or frees even one byte', () => {
+    for (const used of [0, 100, 960, 999]) {
+      expect(reconcileSsdPoolNotice({ ...snapshot, used }, full, capacity)).toBeNull()
+    }
+  })
+  it('keeps reporting capacity while at or above the cap', () => {
+    expect(reconcileSsdPoolNotice({ ...full, used: 1100 }, full, capacity)?.kind).toBe('capacity')
+  })
+  it('turns capacity into an eviction notification only on an observed new eviction', () => {
+    const recovered = { ...snapshot, capacityEvicted: 1 }
+    const eviction = reconcileSsdPoolNotice(recovered, full, capacity)
+    expect(eviction?.kind).toBe('evicted')
+    expect(reconcileSsdPoolNotice({ ...recovered, used: 10 }, recovered, eviction)).toEqual(eviction)
+  })
+  it('drops historical notices on root or cap changes including unlimited', () => {
+    const eviction = { key: 'old', kind: 'evicted' as const }
+    for (const current of [{ ...snapshot, root: '/new' }, { ...snapshot, cap: 2000 }, { ...snapshot, cap: 0 }]) {
+      expect(reconcileSsdPoolNotice(current, snapshot, eviction)).toBeNull()
+    }
+  })
+  it('creates a new full episode after recovery with no eviction counter change', () => {
+    const recovered = { ...snapshot, used: 10 }
+    expect(reconcileSsdPoolNotice(recovered, full, capacity)).toBeNull()
+    expect(reconcileSsdPoolNotice(full, recovered, null)?.kind).toBe('capacity')
   })
 })

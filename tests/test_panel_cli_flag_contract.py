@@ -279,16 +279,15 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_advanced_modes() ->
 
     assert "buildNativeMtpLaunchArgs" in runtime_native
     assert "buildNativeMtpLaunchArgs" in preview_native
-    # Adaptive mode emits NO explicit depth (an explicit --native-mtp-depth
-    # becomes the engine's VMLINUX_NATIVE_MTP_DEPTH override, pinning the
-    # start depth and bypassing tuning sidecars and the session profile);
-    # only a user Fixed override sends a sanitized depth.
-    assert "input.depthOverride !== true" in mtp_helper
-    assert "input.configuredDepth" in mtp_helper
-    assert "resolveFixedNativeMtpDepth(input.configuredDepth, input.detectedDepth)" in mtp_helper
-    assert "finitePositiveInteger(configuredDepth)" in mtp_helper
-    assert "'--native-mtp-depth-policy', 'adaptive'" in mtp_helper
-    assert "'fixed'" in mtp_helper
+    # Two product modes only (2026-10-04): Adaptive emits the adaptive policy +
+    # compatible-only sampling and NO explicit depth (an explicit
+    # --native-mtp-depth becomes the engine's VMLINUX_NATIVE_MTP_DEPTH
+    # override); AR emits --disable-native-mtp. No user depth/fixed path.
+    assert "'--native-mtp-depth-policy'," in mtp_helper and "'adaptive'," in mtp_helper
+    assert "NATIVE_MTP_SAMPLING_POLICY = 'compatible-only'" in mtp_helper
+    assert "return ['--disable-native-mtp']" in mtp_helper
+    for retired in ("depthOverride", "configuredDepth", "resolveFixedNativeMtpDepth", "'fixed'", "'greedy-only'"):
+        assert retired not in mtp_helper.split("export function buildNativeMtpLaunchArgs", 1)[1]
     assert "Math.round(Number(configuredDepth" not in preview_native
     for expression in (
         "finitePositiveInteger((config as any).smeltExperts)",
@@ -733,37 +732,27 @@ def test_mm3_and_gemma_live_stress_harnesses_gate_actual_launch_argv() -> None:
     assert "cfg.usePagedCache === false" in gemma
     assert "cfg.kvCacheQuantization === 'auto'" in gemma
 
-def test_native_mtp_auto_pins_greedy_startup_defaults_and_deterministic_is_hard() -> None:
-    """Enabled native MTP pins greedy STARTUP DEFAULTS for every mode.
+def test_native_mtp_two_product_modes_keep_the_request_sampler() -> None:
+    """Native MTP has exactly two product modes (Eric, 2026-10-04).
 
-    2026-09-02: 7972082c had switched Auto to compatible-only, which kept the
-    bundle's sampled temperature as the default — so 27B/Flash-Next app
-    sessions silently ran stochastic MTP at nonzero temperature. Restored
-    contract: Auto launches deterministic-defaults (greedy defaults, explicit
-    request kwargs still win) and Deterministic launches hard greedy-only. Off
-    disables the runtime outright.
+    Adaptive launches the adaptive depth policy with the compatible-only
+    sampling policy: greedy requests verify by identity, sampled requests by
+    rejection sampling, and the bundle/request sampler is never pinned. AR
+    launches --disable-native-mtp. The retired Auto (deterministic-defaults)
+    and Deterministic (greedy-only) launch policies are gone; they were sampler
+    clamps hidden inside an MTP control.
     """
 
-    sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
-        encoding="utf-8"
-    )
-    shared = (
-        ROOT / "panel" / "src" / "shared" / "nativeMtpLaunchArgs.ts"
-    ).read_text(encoding="utf-8")
+    sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(encoding="utf-8")
+    shared = (ROOT / "panel" / "src" / "shared" / "nativeMtpLaunchArgs.ts").read_text(encoding="utf-8")
 
     assert "buildNativeMtpLaunchArgs" in sessions
-    assert "--native-mtp-sampling-policy" in shared
     assert "const mode = resolveNativeMtpMode(input)" in shared
-    assert (
-        "mode === 'deterministic' ? 'greedy-only' : 'deterministic-defaults'"
-        in shared
-    )
-    assert "'greedy-only'" in shared
-    assert "'deterministic-defaults'" in shared
-    # Auto must NOT emit compatible-only any more (that was the regression).
-    assert "'compatible-only'" not in shared
-    # off must still disable the runtime outright
+    assert "NATIVE_MTP_SAMPLING_POLICY = 'compatible-only'" in shared
     assert "return ['--disable-native-mtp']" in shared
+    assert "'greedy-only'" not in shared
+    assert "'deterministic-defaults'" not in shared
+
 
 def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> None:
     """2026-08-17: depth fell through to a hardcoded 3 and tanked acceptance.
@@ -813,7 +802,8 @@ def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> Non
     assert "?? 3," not in registry
     assert "buildNativeMtpLaunchArgs" in sessions
     assert "buildNativeMtpLaunchArgs" in settings
-    assert "resolveFixedNativeMtpDepth(input.configuredDepth, input.detectedDepth)" in shared
-    assert "finitePositiveInteger(detectedDepth)" in shared
-    assert "|| 1" in shared
+    # The app no longer sends any depth (2026-10-04 two-mode contract): the
+    # engine derives the ceiling from tuning > bundle declaration > default,
+    # so no panel-side depth fallback (and in particular no "|| 3") exists.
+    assert "--native-mtp-depth'," not in shared
     assert "|| 3" not in shared

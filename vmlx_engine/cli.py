@@ -4306,35 +4306,24 @@ Examples:
              "Higher values = more potential speedup but lower acceptance rate. "
              "Typical sweet spot is 2-5. (default: 3)",
     )
+    # Native MTP has exactly two product modes, matching the app's single "Native MTP" control:
+    #   Adaptive (default when the bundle carries a supported head): engine-governed depth ladder from the bundle's
+    #   ceiling, measured against its own AR baseline, with the AR-safety valve; sampler untouched.
+    #   AR: --disable-native-mtp.
+    # --native-mtp-depth / --native-mtp-depth-policy fixed remain only as hidden benchmark/diagnostic levers (pin a
+    # starting depth or disable depth adaptation for A/B work). They are not product settings and the app never emits
+    # them; they are suppressed from --help so the CLI surface matches the app.
     serve_parser.add_argument(
         "--native-mtp-depth",
         type=int,
         default=None,
-        help="Starting depth for native in-model MTP heads on preserved-MTP "
-             "bundles. This flag WINS over VMLX_NATIVE_MTP_DEPTH (it is applied "
-             "as VMLINUX_NATIVE_MTP_DEPTH, which is checked first); omit it to "
-             "use the bundle's own tuned best_depth. Note this is only the "
-             "STARTING depth -- the runtime adapts it per request from measured "
-             "acceptance. Tool metadata does not change the selected depth; "
-             "terminal-boundary rewind protects cache correctness.",
+        help=argparse.SUPPRESS,
     )
     serve_parser.add_argument(
         "--native-mtp-depth-policy",
         choices=["adaptive", "fixed"],
         default=None,
-        help="Depth policy for native MTP. Both policies start every request at "
-             "--native-mtp-depth and never exceed it. fixed keeps that depth; it "
-             "steps down only through the explicit AR-safety valve (depth 1, then "
-             "plain decoding) when a measured window is slower than plain decoding, "
-             "each transition logged with its reason, and climbs back when the "
-             "configured depth wins again. adaptive may also lower the depth on "
-             "measured acceptance and tries depth 1 once against the configured "
-             "depth's measured cost, keeping the measured winner. "
-             "VMLX_NATIVE_MTP_AR_SAFETY=0 disables the valve (fixed then never leaves "
-             "its depth, even when slower than plain decoding); "
-             "VMLX_NATIVE_MTP_DEPTH_PROBE overrides the depth-1 comparison for either "
-             "policy. If omitted, the existing environment/default adaptive policy is "
-             "preserved.",
+        help=argparse.SUPPRESS,
     )
     serve_parser.add_argument(
         "--native-mtp-sampling-policy",
@@ -4352,7 +4341,8 @@ Examples:
         "--disable-native-mtp",
         action="store_true",
         default=False,
-        help="Disable native in-model MTP even when the loaded bundle has MTP tensors.",
+        help="AR mode: disable native in-model MTP even when the loaded bundle has MTP tensors. Without this flag a "
+             "bundle with a supported MTP head runs Adaptive MTP (engine-governed depth with an AR-safety fallback).",
     )
     serve_parser.add_argument(
         "--omni-backend",

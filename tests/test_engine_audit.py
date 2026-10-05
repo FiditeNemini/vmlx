@@ -14540,13 +14540,11 @@ class TestTurboQuantKVTelemetry:
             "./panel/src/shared/nativeMtpLaunchArgs.ts"
         ).read_text()
         assert "buildNativeMtpLaunchArgs" in native_mtp_launch_block
-        # Adaptive mode emits NO explicit depth (an explicit --native-mtp-depth
-        # becomes the engine's env override, pinning the start depth and
-        # bypassing tuning sidecars + the session profile — b251abb4e); only a
-        # user Fixed override sends a sanitized depth.
-        assert "input.depthOverride !== true" in native_mtp_helper
-        assert "'--native-mtp-depth-policy', 'adaptive'" in native_mtp_helper
-        assert "'fixed'" in native_mtp_helper
+        # Two product modes (2026-10-04): Adaptive emits the adaptive policy and
+        # NO explicit depth (b251abb4e); AR emits --disable-native-mtp.
+        launch = native_mtp_helper.split("export function buildNativeMtpLaunchArgs", 1)[1]
+        assert "'--native-mtp-depth-policy'," in launch and "'adaptive'," in launch
+        assert "depthOverride" not in launch and "'fixed'" not in launch
         assert "args.push('--default-min-p'" not in native_mtp_launch_block
         assert "args.push('--default-min-p'" not in sessions_outside_native_mtp
         assert "args.push('--no-continuous-batching')" in sessions_source

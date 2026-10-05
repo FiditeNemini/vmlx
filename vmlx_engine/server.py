@@ -30796,14 +30796,13 @@ Examples:
         "--native-mtp-depth",
         type=int,
         default=None,
-        help="Depth for native in-model MTP heads on preserved-MTP bundles (1-3).",
+        help=argparse.SUPPRESS,  # benchmark lever only; product modes are Adaptive (default) and --disable-native-mtp
     )
     parser.add_argument(
         "--native-mtp-depth-policy",
         choices=["adaptive", "fixed"],
         default=None,
-        help="Native-MTP depth policy: adaptive may change the selected starting "
-        "depth per request; fixed keeps it exact for non-tool requests.",
+        help=argparse.SUPPRESS,  # benchmark lever only (fixed disables depth adaptation for A/B work)
     )
     parser.add_argument(
         "--native-mtp-sampling-policy",

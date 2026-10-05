@@ -560,7 +560,9 @@
       "finalizingAnswer": "正在整理最终回答...",
       "noVisibleResponse": "未生成可见响应。",
       "justNow": "刚刚",
-      "yesterdayAt": "昨天 {time}"
+      "yesterdayAt": "昨天 {time}",
+      "videoPreviewUnavailable": "视频预览不可用",
+      "videoPreviewUnavailableDetail": "此应用无法播放该视频。原始附件已保留，供模型使用。"
     },
     "messages": {
       "emptyPrimary": "发送消息以开始对话",
@@ -643,7 +645,9 @@
       "elapsedTitle": "已用时间",
       "totalLabel": "共 {v} 秒",
       "totalTitle": "请求总时间",
-      "ppsLabel": "{speed} 输入令牌/秒（输入 ÷ TTFT）"
+      "ppsLabel": "{speed} 输入令牌/秒（输入 ÷ TTFT）",
+      "estimatedRateLabel": "~{speed} 词元/秒",
+      "estimatedRateTitle": "根据流式输出的到达时间估算；一个或多个生成轮次未提供引擎解码耗时。"
     },
     "message": {
       "tokenCount": "{n} 个 token"

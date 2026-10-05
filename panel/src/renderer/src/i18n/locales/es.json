@@ -560,7 +560,9 @@
       "finalizingAnswer": "Finalizando la respuesta...",
       "noVisibleResponse": "No se generó ninguna respuesta visible.",
       "justNow": "Justo ahora",
-      "yesterdayAt": "Ayer {time}"
+      "yesterdayAt": "Ayer {time}",
+      "videoPreviewUnavailable": "Vista previa de vídeo no disponible",
+      "videoPreviewUnavailableDetail": "La aplicación no pudo reproducir el vídeo. El archivo adjunto original se conserva para el modelo."
     },
     "messages": {
       "emptyPrimary": "Envíe un mensaje para iniciar la conversación",
@@ -643,7 +645,9 @@
       "elapsedTitle": "Tiempo transcurrido",
       "totalLabel": "{v}s en total",
       "totalTitle": "Tiempo total de la solicitud",
-      "ppsLabel": "{speed} tokens de entrada/s (entrada ÷ TTFT)"
+      "ppsLabel": "{speed} tokens de entrada/s (entrada ÷ TTFT)",
+      "estimatedRateLabel": "~{speed} tokens/s",
+      "estimatedRateTitle": "Estimación basada en los tiempos de llegada de la salida en streaming; el tiempo de decodificación del motor no estaba disponible para una o más etapas de generación."
     },
     "message": {
       "tokenCount": "{n} tokens"

@@ -560,7 +560,9 @@
       "finalizingAnswer": "回答を仕上げています...",
       "noVisibleResponse": "表示可能な応答は生成されませんでした。",
       "justNow": "たった今",
-      "yesterdayAt": "昨日 {time}"
+      "yesterdayAt": "昨日 {time}",
+      "videoPreviewUnavailable": "動画をプレビューできません",
+      "videoPreviewUnavailableDetail": "このアプリでは動画を再生できませんでした。元の添付ファイルはモデル用に保持されています。"
     },
     "messages": {
       "emptyPrimary": "メッセージを送信して会話を開始",
@@ -643,7 +645,9 @@
       "elapsedTitle": "経過時間",
       "totalLabel": "合計 {v}秒",
       "totalTitle": "リクエストの合計時間",
-      "ppsLabel": "入力 {speed} トークン/秒（入力 ÷ TTFT）"
+      "ppsLabel": "入力 {speed} トークン/秒（入力 ÷ TTFT）",
+      "estimatedRateLabel": "約{speed} トークン/秒",
+      "estimatedRateTitle": "ストリーミング出力の到着時刻から推定しています。一部の生成処理でエンジンのデコード時間を取得できませんでした。"
     },
     "message": {
       "tokenCount": "{n} トークン"

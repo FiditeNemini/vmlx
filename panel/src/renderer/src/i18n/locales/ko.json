@@ -560,7 +560,9 @@
       "finalizingAnswer": "답변을 마무리하는 중...",
       "noVisibleResponse": "표시할 응답이 생성되지 않았습니다.",
       "justNow": "방금 전",
-      "yesterdayAt": "어제 {time}"
+      "yesterdayAt": "어제 {time}",
+      "videoPreviewUnavailable": "동영상을 미리 볼 수 없습니다",
+      "videoPreviewUnavailableDetail": "이 앱에서 동영상을 재생하지 못했습니다. 모델이 사용할 원본 첨부 파일은 유지됩니다."
     },
     "messages": {
       "emptyPrimary": "메시지를 보내 대화를 시작하세요",
@@ -643,7 +645,9 @@
       "elapsedTitle": "경과 시간",
       "totalLabel": "총 {v}초",
       "totalTitle": "총 요청 시간",
-      "ppsLabel": "입력 {speed} 토큰/초 (입력 ÷ TTFT)"
+      "ppsLabel": "입력 {speed} 토큰/초 (입력 ÷ TTFT)",
+      "estimatedRateLabel": "약 {speed} 토큰/초",
+      "estimatedRateTitle": "스트리밍 출력의 도착 시간을 기준으로 추정합니다. 하나 이상의 생성 단계에서 엔진 디코딩 시간을 제공하지 않았습니다."
     },
     "message": {
       "tokenCount": "{n} 토큰"

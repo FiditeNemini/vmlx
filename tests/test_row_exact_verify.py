@@ -202,3 +202,17 @@ def test_row_exact_default_is_per_family_and_env_wins(monkeypatch):
         assert not R.row_exact_qmv_requested()
     finally:
         R.set_row_exact_family(None)
+
+
+@pytest.mark.parametrize("shape", [(1, 2560), (4, 1024), (512, 2560), (324, 10240)])
+@pytest.mark.parametrize("rows", [2, 3, 4])
+def test_dense_rows_form_is_identical_for_one_row_and_many(shape, rows):
+    """Decode (1 row) and verify (rows) use the same row-invariant dense form."""
+    out_dim, in_dim = shape
+    weight = (mx.random.normal(shape, key=mx.random.key(11)) * 0.02).astype(mx.float16)
+    for trial in range(40):
+        x = mx.random.normal((1, rows, in_dim), key=mx.random.key(100 + trial)).astype(mx.float16)
+        many = R._dense_rows(x, weight)
+        for r in range(rows):
+            one = R._dense_rows(x[:, r:r + 1], weight)
+            assert bool(mx.array_equal(many[:, r:r + 1], one).item()), f"trial {trial} row {r}"

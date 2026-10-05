@@ -49,9 +49,25 @@ _DENSE_SPEED_FIRST = frozenset({"qwen3_5", "qwen3_5_text", "qwen3_6", "qwen3_6_t
 _ACTIVE_FAMILY = {"value": None}
 
 
+_DENSE_ROW_INVARIANT = {"on": False}
+
+
+def dense_row_invariant_active() -> bool:
+    return _DENSE_ROW_INVARIANT["on"]
+
+
 def set_row_exact_family(model_type) -> None:
-    """Record the loaded model family (the generator calls this once at load)."""
+    """Record the loaded model family (the generator calls this once at load).
+
+    Where row-exact verification is on, small dense projections (router,
+    gates, hyper-connections) switch to the row-invariant form EVERYWHERE,
+    including ordinary AR decode, so AR steps and verify rows run the same
+    per-row arithmetic by construction (see ``_dense_rows``).
+    """
     _ACTIVE_FAMILY["value"] = str(model_type or "") or None
+    _DENSE_ROW_INVARIANT["on"] = bool(model_type) and row_exact_qmv_requested()
+    if _DENSE_ROW_INVARIANT["on"]:
+        _install()
 
 
 def row_exact_qmv_requested() -> bool:
@@ -869,12 +885,50 @@ def row_exact_linear(x, weight, bias=None):
     return y + bias if bias is not None else y
 
 
+def _dense_rows(x, weight, bias=None):
+    """Row-invariant dense projection for 1..MAX_ROWS rows.
+
+    Every row is its own matrix-vector product over a broadcast (uncopied)
+    view of the weight, so a row's result does not depend on how many rows
+    share the call. Used for BOTH single-token decode and verify rows, which
+    makes them bit-identical by construction. (MLX's own one-row ``x @ W.T``
+    and this form reduce in different orders; the difference is rare but
+    real: 1 in 900 rows on a 2560->1 gate, and it broke greedy identity.)
+    """
+    if x.ndim < 2 or weight.ndim != 2 or x.dtype not in (mx.float16, mx.bfloat16, mx.float32):
+        return None
+    if weight.dtype != x.dtype:
+        return None
+    rows = 1
+    for dim in x.shape[:-1]:
+        rows *= int(dim)
+    if not 1 <= rows <= MAX_ROWS:
+        return None
+    out_dim, in_dim = weight.shape
+    x2d = x.reshape(rows, in_dim)
+    if out_dim < 8 and rows > 1:
+        # Degenerate widths (e.g. the 2560->1 shared-expert gate): the batched
+        # form is NOT batch-invariant there (measured on Allosaurus layer 6), so
+        # every row runs the exact one-row call.
+        y = mx.concatenate([
+            mx.matmul(weight[None], x2d[r:r + 1].reshape(1, in_dim, 1)) for r in range(rows)
+        ], axis=0).reshape(*x.shape[:-1], out_dim)
+    else:
+        y = mx.matmul(mx.broadcast_to(weight, (rows, out_dim, in_dim)),
+                      x2d.reshape(rows, in_dim, 1)).reshape(*x.shape[:-1], out_dim)
+    return y + bias if bias is not None else y
+
+
 def _install() -> None:
     if _INSTALLED["done"]:
         return
     original_dense = nn.Linear.__call__
 
     def patched_dense(self, x):  # type: ignore[no-untyped-def]
+        if _DENSE_ROW_INVARIANT["on"]:
+            y = _dense_rows(x, self["weight"], self["bias"] if "bias" in self else None)
+            if y is not None:
+                return y
         if _SCOPE.get():
             y = row_exact_linear(x, self["weight"], self["bias"] if "bias" in self else None)
             if y is not None:

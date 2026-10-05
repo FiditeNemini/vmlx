@@ -45,7 +45,15 @@ logger = logging.getLogger(__name__)
 
 
 def _parallel_ple_read_requested() -> bool:
-    value = os.environ.get("VMLX_QWEN4_PLE_PARALLEL_READ", "0").strip().lower()
+    # Default ON (2026-10-04). Novel text pages PLE rows in from SSD on the
+    # decode critical path; serial memmap faults cost ~4.5 ms/token on Flash-Next
+    # JANGH4 (in-process probe: same-length new-words prompt 24.5 ms/step vs
+    # 20.0 for an identical repeat). Concurrent pread across shards cut that to
+    # ~1.0 ms; served on novel prompts (3 per class, medians, M5 Max, MLX 0.32.3):
+    # AR 41.4 -> 42.9 tok/s, Adaptive MTP prose 47.9 -> 54.1, code 69.9 -> 78-81
+    # (MTP verify feeds several tokens' rows per cycle). Cost: +0.7 ms/step on
+    # an exact repeat whose rows are already in the page cache. Set 0 for A/B.
+    value = os.environ.get("VMLX_QWEN4_PLE_PARALLEL_READ", "1").strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 
 

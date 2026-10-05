@@ -27,6 +27,8 @@ def test_default_does_not_construct_advisor(tmp_path, monkeypatch):
 @pytest.mark.parametrize("status", ["advised", "resident", "error", "partial", "limit"])
 def test_exact_mixed_layout_and_failure_fallback(tmp_path, monkeypatch, caplog, dtype, status):
     monkeypatch.setenv("VMLX_QWEN4_PLE_READ_ADVICE", "1")
+    # Read advice only applies on the serial path; parallel reads are the default.
+    monkeypatch.setenv("VMLX_QWEN4_PLE_PARALLEL_READ", "0")
     calls = []
     def advise(selections):
         calls.append([(reader, local.copy()) for reader, local in selections])

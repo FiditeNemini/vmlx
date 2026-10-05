@@ -22,6 +22,8 @@ def test_prefetch_exact_mixed_layouts_only_upload_on_caller(tmp_path, monkeypatc
     monkeypatch.setenv("VMLX_QWEN4_PLE_HOST_GATHER", "1")
     monkeypatch.setenv("VMLX_QWEN4_PLE_PREFETCH", "1")
     monkeypatch.delenv("VMLX_QWEN4_PLE_PREFETCH_PREAD", raising=False)
+    # The parallel read pool is on by default; this test owns it explicitly.
+    monkeypatch.setenv("VMLX_QWEN4_PLE_PARALLEL_READ", "0")
     if pread:
         monkeypatch.setenv("VMLX_QWEN4_PLE_PREFETCH_PREAD", "1")
     table = _table(tmp_path, [(1, 32), (2, 64), (6, 32), (8, 128)], dtype)
@@ -289,3 +291,10 @@ def test_changed_ple_context_rejects_prepared_rows_without_cache_update(tmp_path
         assert table._prefetch_ticket is None
     finally:
         table.close()
+
+
+def test_parallel_read_pool_is_on_by_default_and_opt_out(tmp_path, monkeypatch):
+    monkeypatch.delenv("VMLX_QWEN4_PLE_PARALLEL_READ", raising=False)
+    assert table_reader._parallel_ple_read_requested() is True
+    monkeypatch.setenv("VMLX_QWEN4_PLE_PARALLEL_READ", "0")
+    assert table_reader._parallel_ple_read_requested() is False

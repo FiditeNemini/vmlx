@@ -1086,7 +1086,8 @@
       "bundledDflash2Available": "此模型包内置 DFlash2 草稿模型（{{name}}），当前未使用。在“推测解码”中启用可加速文本。",
       "useBundledDflash2": "使用内置的 DFlash2 草稿模型（{{name}}）",
       "useBundledDflash2Tooltip": "模型包包含 DFlash2 草稿模型时默认开启。下方填写的草稿模型优先。关闭后使用模型包自带的原生 MTP（自适应/AR）。",
-      "nativeMtpOffForDrafter": "选择 DFlash2 草稿模型时原生 MTP 关闭（两者不能共享同一解码步骤）。清空草稿模型或关闭内置草稿模型即可恢复自适应 MTP。"
+      "nativeMtpOffForDrafter": "选择 DFlash2 草稿模型时原生 MTP 关闭（两者不能共享同一解码步骤）。清空草稿模型或关闭内置草稿模型即可恢复自适应 MTP。",
+      "dflash2FixedBlockNote": "DFlash2 每步固定草拟 5 个 token 的块（引擎验证过的宽度）；“每步草稿 token 数”不适用。"
     },
     "create": {
       "title": "创建会话",

@@ -1834,9 +1834,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             max={20}
             step={1}
             defaultValue={DEFAULT_CONFIG.numDraftTokens}
-            disabled={dsv4Active || (!dflash2Speculative && (config.continuousBatching || multimodalActive))}
+            disabled={dsv4Active || dflash2Speculative || (config.continuousBatching || multimodalActive)}
           />
         )}
+        {dflash2Speculative && <InfoNote text={t('sessions.config.dflash2FixedBlockNote')} />}
       </Section>
 
       {/* Speculative Decoding */}

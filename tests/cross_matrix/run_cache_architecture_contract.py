@@ -24,8 +24,10 @@ from typing import Any
 
 try:
     from tests.cross_matrix.output_counts import parse_counts
+    from tests.cross_matrix import run_api_surface_contract as api_surface_gate
 except ModuleNotFoundError:  # direct script execution
     from output_counts import parse_counts
+    import run_api_surface_contract as api_surface_gate
 
 
 DEFAULT_OUT = Path(
@@ -57,6 +59,7 @@ SOURCE_HASH_FILES = (
     "vmlx_engine/model_config_registry.py",
     "vmlx_engine/tq_disk_store.py",
     "tests/cross_matrix/run_noheavy_api_cache_contract.py",
+    "tests/cross_matrix/run_api_surface_contract.py",
     "tests/cross_matrix/run_cache_architecture_contract.py",
     "tests/test_engine_audit.py",
     "tests/test_batching.py",
@@ -576,10 +579,17 @@ def _build_cache_family_matrix(
     return matrix
 
 
-def build_artifact(root: Path) -> dict[str, Any]:
-    results = {name: _run(root, name, cmd) for name, cmd in COMMANDS.items()}
+def build_artifact(root: Path, retained_api_cache: Path | None = None) -> dict[str, Any]:
+    retained = None
+    if retained_api_cache is not None:
+        api_artifact, retained = api_surface_gate._load_retained_api_cache(root, retained_api_cache)
+    results = {
+        name: _run(root, name, cmd) for name, cmd in COMMANDS.items()
+        if retained is None or name != "api_cache_status_contracts"
+    }
     failed = [name for name, result in results.items() if result["returncode"] != 0]
-    api_artifact = _load_api_cache_artifact(root)
+    if retained is None:
+        api_artifact = _load_api_cache_artifact(root)
     api_checks = api_artifact.get("checks", {})
     cache_stdout = str(results["cache_family_pytest"].get("stdout", ""))
     missing_markers = [
@@ -754,6 +764,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             for name, result in results.items()
         },
         "api_cache_artifact_status": api_artifact.get("status"),
+        **({"retained_api_cache": retained} if retained is not None else {}),
         "deferred_open_capabilities": {
             "dsv4_native_same_process_reuse_equivalence": (
                 "Requires exact-source cold-vs-restored SWA+CSA/HCA state and output comparison."
@@ -769,9 +780,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument(
+        "--retained-api-cache", type=Path,
+        help="Reuse an original passing, source-matched API/cache receipt instead of rerunning that child",
+    )
     args = parser.parse_args()
 
-    artifact = build_artifact(args.root)
+    try:
+        artifact = build_artifact(args.root, args.retained_api_cache)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
     print(args.out)

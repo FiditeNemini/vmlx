@@ -1,4 +1,8 @@
 from pathlib import Path
+import hashlib
+import json
+
+import pytest
 
 
 def test_cache_architecture_contract_default_out_tracks_current_release_proof_artifact():
@@ -297,3 +301,83 @@ def test_cache_architecture_contract_publishes_structured_family_matrix():
 
     assert "tests/test_model_config_registry.py" in gate.COMMANDS["cache_family_pytest"].cmd
     assert "tests/test_model_config_registry.py" in gate.SOURCE_HASH_FILES
+
+
+def test_cache_architecture_retains_validated_api_child_without_replay(tmp_path, monkeypatch):
+    from tests.cross_matrix import run_cache_architecture_contract as gate
+
+    owner = gate.api_surface_gate.api_cache_gate
+    source = tmp_path / "owner.py"
+    source.write_text("original owner\n")
+    command = ["/original/python", "-m", "pytest", "owner.py", "-k",
+               " or ".join(gate.REQUIRED_API_CACHE_COMMAND_MARKERS)]
+    monkeypatch.setattr(owner, "SOURCE_HASH_FILES", ("owner.py",))
+    monkeypatch.setattr(owner, "COMMANDS", {"api": command})
+    receipt = {
+        "created_at": "2026-10-05T13:03:42-0700", "status": "pass",
+        "checks": {name: True for name in (
+            *gate.api_surface_gate.REQUIRED_NESTED_API_CHECKS, "all_required_named_rows_ran",
+        )},
+        "missing_markers": [],
+        "source_hashes": {"owner.py": gate._sha256(source)},
+        "commands": {"api": {
+            "name": "api", "command": command, "returncode": 0,
+            "elapsed_sec": 2.37, "counts": {"passed": 42},
+        }},
+    }
+    path = tmp_path / "retained.json"
+    path.write_text(json.dumps(receipt))
+    original_bytes = path.read_bytes()
+    calls = []
+
+    def fake_run(root, name, spec):
+        calls.append(name)
+        assert name != "api_cache_status_contracts"
+        return {"returncode": 0, "counts": {"passed": 100}, "stdout": "\n".join(
+            (*gate.REQUIRED_CACHE_TEST_MARKERS, *gate.REQUIRED_PANEL_CACHE_MARKERS)
+        )}
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+    artifact = gate.build_artifact(tmp_path, path)
+    assert artifact["status"] == "pass"
+    assert calls == ["cache_family_pytest", "panel_cache_launch_policy"]
+    assert "api_cache_status_contracts" not in artifact["results"]
+    retained = artifact["retained_api_cache"]
+    assert retained["commands"] == receipt["commands"]
+    assert retained["created_at"] == receipt["created_at"]
+    assert retained["source_hashes"] == receipt["source_hashes"]
+    assert retained["sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert retained["executed_in_this_run"] is False
+    assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("payload", [None, "invalid JSON", '{"status":"fail"}'])
+def test_cache_architecture_rejects_invalid_retention_before_running_children(tmp_path, monkeypatch, payload):
+    from tests.cross_matrix import run_cache_architecture_contract as gate
+
+    path = tmp_path / "retained.json"
+    if payload is not None:
+        path.write_text(payload)
+
+    def never_run(*args):
+        pytest.fail("invalid retained child must fail before any test execution")
+
+    monkeypatch.setattr(gate, "_run", never_run)
+    with pytest.raises((OSError, ValueError)):
+        gate.build_artifact(tmp_path, path)
+
+
+def test_cache_architecture_default_still_runs_original_children(tmp_path, monkeypatch):
+    from tests.cross_matrix import run_cache_architecture_contract as gate
+
+    calls = []
+
+    def fake_run(root, name, spec):
+        calls.append(name)
+        return {"returncode": 0, "counts": {"passed": 100}, "stdout": ""}
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+    monkeypatch.setattr(gate, "_load_api_cache_artifact", lambda root: {})
+    artifact = gate.build_artifact(tmp_path)
+    assert calls == list(gate.COMMANDS)
+    assert "retained_api_cache" not in artifact

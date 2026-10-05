@@ -1657,6 +1657,8 @@ def serve_command(args):
     ):
         args.disable_native_mtp = True
         args.native_mtp_depth = None
+        # Remember why: if the drafter is dropped later, native MTP comes back.
+        args._native_mtp_disabled_for_drafter = True
         logger.info(
             "Native MTP disabled: an external speculative model is in use "
             "(%s). The two cannot share a decode step, so the explicitly "
@@ -2371,6 +2373,25 @@ def serve_command(args):
         )
 
     _spec_incompat = _speculative_incompatibility_reason(args)
+    if _spec_incompat == "--continuous-batching":
+        from .speculative import _is_dflash2_model
+
+        if _is_dflash2_model(args.speculative_model):
+            # The drafter was asked for explicitly and the DFlash2 lane runs on
+            # the non-batched engine; batching is merely the default. Honour the
+            # explicit choice instead of silently serving plain AR.
+            args.continuous_batching = False
+            print(
+                "  NOTE: DFlash2 drafter requested — using the non-batched "
+                "engine it runs on (continuous batching off for this launch).",
+                file=sys.stderr,
+            )
+            logger.info(
+                "DFlash2 drafter %s: continuous batching turned off for this "
+                "launch (the DFlash2 lane is non-batched)",
+                args.speculative_model,
+            )
+            _spec_incompat = _speculative_incompatibility_reason(args)
     if _spec_incompat:
         print(
             f"  WARNING: --speculative-model is incompatible with {_spec_incompat}.",
@@ -2388,6 +2409,16 @@ def serve_command(args):
                 file=sys.stderr,
             )
         args.speculative_model = None
+        if getattr(args, "_native_mtp_disabled_for_drafter", False):
+            # The drafter that displaced native MTP is gone; do not leave the
+            # bundle on plain AR.
+            args.disable_native_mtp = False
+            args._native_mtp_disabled_for_drafter = False
+            print(
+                "     Native MTP restored (it was only disabled for the drafter).",
+                file=sys.stderr,
+            )
+            logger.info("Native MTP restored: the external drafter was not loaded")
 
     # Security summary at startup
     print("=" * 60)

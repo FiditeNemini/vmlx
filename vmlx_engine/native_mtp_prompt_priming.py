@@ -42,6 +42,29 @@ def priming_enabled() -> bool:
     }
 
 
+def tail_priming_enabled() -> bool:
+    """Fold the uncached prompt tail into a fresh head when no exact sidecar exists.
+
+    The MTP head is only a proposer: every emitted token is verified by the
+    target, so the head's history changes acceptance, never output. Without
+    this, any prefix-cache hit that lacks an exact head sidecar (always true
+    for the chat template's shared first tokens, which persist on SSD across
+    restarts) left the head with ZERO history for the whole request, and the
+    sidecar could then never be published, so a conversation never primed.
+    The fresh head starts at position zero exactly like the existing unprimed
+    path; it just carries the tail's history. A tail-relative head is never
+    published as an exact prefix sidecar.
+
+    Opt-in (set 1). Measured 2026-10-04 on Qwen3.8 Flash-Next JANGH4, served,
+    greedy, novel prompts, two runs per arm: tokens per cycle and decode tok/s
+    were unchanged within noise (prose 60.8/57.0/54.6 vs 59.5/55.6/53.0 and
+    60.8/56.3/54.2 untailed), so it is not on by default.
+    """
+    return os.environ.get("VMLX_NATIVE_MTP_TAIL_PRIMING", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def prime_window() -> int:
     """Maximum newly folded prompt tokens; zero means no explicit cap."""
     try:
@@ -95,6 +118,9 @@ class _PrimeContext:
     parked: bool = False
     backbone_entries: tuple[Any, ...] = ()
     pending_pairs: list[tuple[Any, Any]] = field(default_factory=list)
+    # History covers only the uncached tail (no exact sidecar was restored):
+    # usable for proposals, never publishable as an exact prefix sidecar.
+    tail_relative: bool = False
 
 
 def _eligible(host: Any) -> bool:
@@ -461,6 +487,8 @@ def prepare_prompt(
 
 
 def _capture_boundary(ctx: _PrimeContext, hidden: Any, start: int, end: int) -> None:
+    if ctx.tail_relative:
+        return
     block = int(ctx.block_size or 0)
     if block <= 0 or ctx.prefix_cache is None or not ctx.prompt_tokens:
         return
@@ -564,7 +592,8 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
         # represented by starting a fresh head cache at the uncached tail: its
         # QSA positions and attention history would begin at zero.  Stay on
         # the existing unprimed activation path instead.
-        if start != 0:
+        tail_relative = start != 0
+        if tail_relative and not tail_priming_enabled():
             _record(host, "capture_nonzero_start", actual_start=start)
             return
         if seq_len <= 1:
@@ -575,7 +604,10 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
         if not mtp_cache:
             _record(host, "capture_empty_mtp_cache")
             return
+        if tail_relative:
+            _record(host, "capture_tail_relative_start", actual_start=start, tail_tokens=seq_len)
         ctx = _PrimeContext(
+            tail_relative=tail_relative,
             mtp_cache=mtp_cache,
             request_id=plan.request_id,
             prompt_tokens=plan.prompt_tokens,
@@ -629,6 +661,8 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
 
 
 def _publish_boundary(ctx: _PrimeContext) -> None:
+    if ctx.tail_relative:
+        return
     candidate = ctx.boundary_candidate
     store = getattr(ctx.prefix_cache, "store_mtp_prefix_snapshot", None)
     if candidate is None or not callable(store):
@@ -703,6 +737,8 @@ def take_primed(host: Any, backbone_cache: Any, main_token: Any) -> Optional[tup
         logger.debug("native MTP priming seam failed closed", exc_info=True)
         return None
     _publish_boundary(ctx)
+    if ctx.tail_relative:
+        _record(host, "seam_tail_relative", folded_pairs=ctx.folded + 1)
     if ctx.parked:
         _record(host, "park_resumed", folded_pairs=ctx.folded + 1)
         logger.info(

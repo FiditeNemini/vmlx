@@ -18094,8 +18094,12 @@ class MLLMBatchGenerator:
             prime_source = "unprimed"
         else:
             mtp_cache, primed_pairs = primed
+            from .native_mtp_prompt_priming import prime_stats as _prime_stats
+            _last_prime = (_prime_stats(self.language_model).get("last") or {})
             if was_parked:
                 prime_source = "parked_ar_history"
+            elif _last_prime.get("reason") == "seam_tail_relative":
+                prime_source = "uncached_tail_only"
             elif int(getattr(request, "_cached_tokens", 0) or 0) > 0:
                 prime_source = "restored_prefix_and_tail"
             else:

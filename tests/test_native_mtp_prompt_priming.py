@@ -261,7 +261,9 @@ def test_refaulted_sidecar_restores_native_history_and_folds_only_suffix():
                               cached_tokens=3, prefix_cache=sidecar)
 
 
-def test_warm_backbone_without_sidecar_does_not_invent_tail_only_history():
+def test_warm_backbone_without_sidecar_does_not_invent_tail_only_history(monkeypatch):
+    """With tail priming disabled (A/B switch) the legacy unprimed behaviour holds."""
+    monkeypatch.setenv("VMLX_NATIVE_MTP_TAIL_PRIMING", "0")
     host = _Host()
     sidecar = _SidecarStore()
     assert not prepare_prompt(
@@ -281,6 +283,37 @@ def test_warm_backbone_without_sidecar_does_not_invent_tail_only_history():
     assert host.calls == []
     backbone[0].offset = 7
     assert take_primed(host, backbone, mx.array([7])) is None
+
+
+def test_warm_backbone_without_sidecar_folds_the_uncached_tail_and_never_publishes_it(monkeypatch):
+    """Default: a prefix hit without an exact head sidecar folds the uncached tail into a fresh head.
+
+    The head is a proposer only (the target verifies every emitted token), so tail history changes acceptance, never
+    output. A tail-relative head must never be stored as an exact prefix sidecar.
+    """
+    monkeypatch.setenv("VMLX_NATIVE_MTP_TAIL_PRIMING", "1")
+    host = _Host()
+    sidecar = _SidecarStore()
+    assert not prepare_prompt(
+        host,
+        request_id="warm-miss-tail",
+        prompt_tokens=[1, 2, 3, 4, 5, 6],
+        cached_tokens=4,
+        prefix_cache=sidecar,
+    )
+    backbone = [_Cache(offset=6)]
+    capture_prefill(host, mx.array([[5, 6]]), mx.ones((1, 2, 2)), backbone)
+    # The tail's internal pair (5 -> 6) is folded; the last hidden waits for the seam.
+    assert host.calls == [[6]]
+    assert prime_stats(host)["folded_pairs"] == 1
+    backbone[0].offset = 7
+    primed = take_primed(host, backbone, mx.array([7]))
+    assert primed is not None
+    cache, pairs = primed
+    assert pairs == 2 and cache[0].offset == 2          # fresh head, local positions, like the unprimed path
+    assert host.calls == [[6], [7]]
+    assert prime_stats(host)["last"]["reason"] == "seam_tail_relative"
+    assert sidecar.snapshot is None                     # never published as an exact sidecar
 
 
 def test_cold_priming_does_not_depend_on_prefix_cache_being_enabled():

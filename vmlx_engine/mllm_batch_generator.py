@@ -4972,6 +4972,12 @@ def _native_mtp_sample_one(
     logits_2d: mx.array,
     sampler: Callable[[mx.array], mx.array],
 ) -> Tuple[mx.array, Optional[mx.array]]:
+    preprocess = getattr(sampler, "_vmlx_mtp_preprocess_logits", None)
+    if preprocess is not None:
+        # Preserve the exact biased logits used for the draw. Reconstructing
+        # bias after log-softmax is not equivalent in finite precision.
+        logits_2d = preprocess(logits_2d)
+        sampler = sampler._vmlx_mtp_base_sampler
     if _native_mtp_sampler_accepts_logits(sampler):
         token = _native_mtp_ensure_uint32(sampler(logits_2d))
         if _native_mtp_sampler_is_greedy(sampler):
@@ -4996,6 +5002,10 @@ def _native_mtp_sample_rows(
     the per-cycle stalls; the caller's later ``mx.eval`` on the same arrays is
     then a no-op.
     """
+    preprocess = getattr(sampler, "_vmlx_mtp_preprocess_logits", None)
+    if preprocess is not None:
+        logits_2d = preprocess(logits_2d)
+        sampler = sampler._vmlx_mtp_base_sampler
     if _native_mtp_sampler_accepts_logits(sampler):
         sampled = _native_mtp_ensure_uint32(sampler(logits_2d))
         normalized = (
@@ -17422,6 +17432,36 @@ class MLLMBatchGenerator:
             # This wrapper now owns the raw-logit -> processed -> normalized
             # transition, so callers must not normalize before invoking it.
             sampler_with_processors._vmlx_accepts_logits = True
+            # Static bias is compatible with native MTP, unlike history-based
+            # penalties. Keep greedy verification greedy and use the same biased
+            # distribution for speculative acceptance as for the actual draw.
+            # Leave the unwrapped/default sampler path below unchanged.
+            if (
+                openai_processor is not None
+                and len(logits_processors) == 1
+                and not float(getattr(request, "frequency_penalty", 0.0) or 0.0)
+                and not float(getattr(request, "presence_penalty", 0.0) or 0.0)
+            ):
+                sampler_with_processors._vmlx_is_greedy = _native_mtp_sampler_is_greedy(base_sampler)
+                for attr in ("temp", "top_p", "top_k", "min_p", "min_tokens_to_keep",
+                             "_vmlx_random_uniform", "_vmlx_categorical"):
+                    if hasattr(base_sampler, attr):
+                        setattr(sampler_with_processors, attr, getattr(base_sampler, attr))
+
+                def biased_logits(logits):
+                    return openai_processor([], logits)
+
+                def processed_acceptance_logprobs(logprobs):
+                    from .native_mtp_acceptance import accept_lp_for
+
+                    # Draft/verify helpers now return LPs of the actual biased
+                    # draw inputs. Never add the bias a second time here.
+                    return accept_lp_for(base_sampler, logprobs)
+
+                sampler_with_processors._vmlx_mtp_preprocess_logits = biased_logits
+                sampler_with_processors._vmlx_mtp_base_sampler = base_sampler
+                sampler_with_processors._vmlx_acceptance_logprobs = processed_acceptance_logprobs
+                sampler_with_processors._vmlx_acceptance_batch_contract = processed_acceptance_logprobs
             request._cached_sampler = sampler_with_processors
             return sampler_with_processors
 

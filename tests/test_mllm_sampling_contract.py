@@ -225,3 +225,66 @@ def test_decode_second_request_token_control_is_not_dropped():
     tokens, _ = generator._step(mx.array([[2], [2]]), [])
     mx.eval(tokens)
     assert tokens.tolist() == [2, 1]
+
+
+@pytest.mark.parametrize('temperature', [0.0, 0.7])
+def test_static_bias_native_mtp_contract_matches_processed_distribution(temperature):
+    from vmlx_engine.native_mtp_acceptance import accept_lp_for
+    from vmlx_engine.mllm_batch_generator import _native_mtp_sample_one, _native_mtp_sample_rows
+    from vmlx_engine.utils.token_logits_processors import make_openai_token_penalty_processor
+
+    request = SimpleNamespace(
+        temperature=temperature, top_p=0.8, top_k=3, min_p=0.1,
+        repetition_penalty=1.0, frequency_penalty=0.0, presence_penalty=0.0,
+        logit_bias={0: -3.0, 3: 2.0}, enable_thinking=True,
+        _original_token_ids=[0, 1], output_tokens=[],
+    )
+    sampler = MLLMBatchGenerator._make_request_sampler(SimpleNamespace(_model_type='qwen4_exp'), request)
+    logits = mx.array([[4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0]])
+    _, target_lps, target_ids = _native_mtp_sample_rows(logits, sampler)
+    if temperature == 0:
+        assert sampler._vmlx_is_greedy
+        assert target_lps == [None, None]
+        assert target_ids == [1, 3]
+        _, draft_lp = _native_mtp_sample_one(logits[:1], sampler)
+        assert draft_lp is None
+    else:
+        base = make_sampler(temp=temperature, top_p=.8, top_k=3, min_p=.1)
+        processor = make_openai_token_penalty_processor(logit_bias=request.logit_bias)
+        biased = processor([], logits)
+        expected = accept_lp_for(base, biased - mx.logsumexp(biased, axis=-1, keepdims=True))
+        actual = mx.stack([accept_lp_for(sampler, row) for row in target_lps])
+        assert bool(mx.allclose(mx.exp(actual), mx.exp(expected), atol=1e-6))
+        _, draft_lp = _native_mtp_sample_one(logits[:1], sampler)
+        assert bool(mx.allclose(mx.exp(accept_lp_for(sampler, draft_lp)), mx.exp(actual[0]), atol=1e-6))
+
+
+@pytest.mark.parametrize('dtype', [mx.float16, mx.bfloat16, mx.float32])
+@pytest.mark.parametrize('offset', [8.0, 1000.0])
+@pytest.mark.parametrize('top_p,top_k,min_p', [(.7, 3, 0.), (.8, 0, .3)])
+def test_native_mtp_bias_preserves_finite_precision_draw_inputs(dtype, offset, top_p, top_k, min_p):
+    """Normalize-then-bias loses raw-logit rounding and can change filter support."""
+    from vmlx_engine.native_mtp_acceptance import accept_lp_for
+    from vmlx_engine.mllm_batch_generator import _native_mtp_sample_one, _native_mtp_sample_rows
+    from vmlx_engine.utils.token_logits_processors import make_openai_token_penalty_processor
+
+    request = SimpleNamespace(
+        temperature=.7, top_p=top_p, top_k=top_k, min_p=min_p,
+        repetition_penalty=1., frequency_penalty=0., presence_penalty=0.,
+        logit_bias={0: .2, 1: .4}, enable_thinking=True,
+        _original_token_ids=[0, 1], output_tokens=[],
+    )
+    wrapper = MLLMBatchGenerator._make_request_sampler(SimpleNamespace(_model_type='qwen4_exp'), request)
+    base = make_sampler(temp=.7, top_p=top_p, top_k=top_k, min_p=min_p)
+    logits = mx.array([[offset, offset - 1, offset - 2, offset - 3]], dtype=dtype)
+    processor = make_openai_token_penalty_processor(logit_bias=request.logit_bias)
+    actual_biased_logits = processor([], logits)
+    _, expected_lps, _ = _native_mtp_sample_rows(actual_biased_logits, base)
+    _, actual_lps, _ = _native_mtp_sample_rows(logits, wrapper)
+    _, draft_lp = _native_mtp_sample_one(logits, wrapper)
+    assert bool(mx.array_equal(actual_lps[0], expected_lps[0]))
+    assert bool(mx.array_equal(draft_lp, expected_lps[0]))
+    expected = accept_lp_for(base, expected_lps[0])
+    actual = accept_lp_for(wrapper, actual_lps[0])
+    assert bool(mx.array_equal(mx.isfinite(actual), mx.isfinite(expected)))
+    assert bool(mx.array_equal(actual, expected))

@@ -14050,7 +14050,7 @@ async def health():
                 scheduler_stats.get("batch_generator", {}) or {}
             ).get("single_active_decode", False)
             or _scheduler_single_active_admission(scheduler_stats),
-            "ewma_ttft_seconds": scheduler_stats.get("ewma_ttft_seconds", 0),
+            "ewma_ttft_seconds": scheduler_stats.get("ewma_ttft_seconds"),
             "cache_hit_requests": scheduler_stats.get("cache_hit_requests", 0),
             "cache_hit_tokens": scheduler_stats.get("cache_hit_tokens", 0),
             "cache_hit_tokens_by_detail": scheduler_stats.get(
@@ -14695,7 +14695,7 @@ async def cache_stats():
             "num_requests_processed": stats.get("num_requests_processed", 0),
             "total_prompt_tokens": stats.get("total_prompt_tokens", 0),
             "total_completion_tokens": stats.get("total_completion_tokens", 0),
-            "ewma_ttft_seconds": stats.get("ewma_ttft_seconds", 0),
+            "ewma_ttft_seconds": stats.get("ewma_ttft_seconds"),
             "cache_hit_requests": stats.get("cache_hit_requests", 0),
             "cache_hit_tokens": stats.get("cache_hit_tokens", 0),
             "cache_hit_tokens_by_detail": stats.get("cache_hit_tokens_by_detail", {}),

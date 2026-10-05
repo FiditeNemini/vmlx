@@ -4,6 +4,23 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.74] - Unreleased
+
+- Improve Qwen Flash Next affine and JANGH execution with fused kernels and adaptive native MTP. Preserve request sampling parameters and fall back toward ordinary decoding when measured drafting overhead outweighs its benefit; performance depends on the workload and hardware.
+- Preserve SSD prefix and media-cache reuse across tool continuations, and clear stale capacity notices after cache usage recovers.
+- Report producer decode timing for negotiated Chat streams, preserve unavailable TTFT values, and record actual tool execution timing without inventing legacy durations.
+- Clarify prefill chunk controls, show configured power mode beside native MTP settings, and explain unavailable video previews while retaining the original attachment for inference.
+- Preserve authenticated HTTP MCP connections with MCP SDK 2 while retaining legacy SDK compatibility.
+- Correct localized Adaptive MTP guidance, restore collection of five cache/prefill test modules, and normalize contributor attribution.
+
+## [1.6.73] - 2026-10-01
+
+- Update the macOS runtime to MLX 0.32.3 and include the published JANG 2.5.49 quantization tools.
+- Qualify GLM and Qwen execution paths for MLX 0.32.3, including native sigmoid arithmetic and JANGH prefill reduction.
+- Compact detached Naive sliding-window snapshots, restore complete rotating partial checkpoints, and release settled SSD companion payloads before notifying waiters.
+- Separate warm suffix timing from cold prefill admission, report completed Naive prefill timing, and keep tool-turn metrics scoped to their exchange.
+- Preserve native prose and tool stream boundaries and validate nested reasoning-effort types before template execution.
+
 ## [1.6.72] - 2026-09-30
 
 - Add Naive N0.5 Flash loading, native reasoning/tool templates and JANGH execution. Improve decode overlap and account for native cache memory when admitting output budgets.

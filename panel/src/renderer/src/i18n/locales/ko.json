@@ -1035,7 +1035,7 @@
       "nativeMtpModeTooltip": "적응형 MTP: 엔진이 번들의 초안 상한에서 시작해 각 검증 창을 자체 AR 기준과 비교하고, 창이 지면 깊이 1로, 그다음 AR로 내리며, 백오프로 재탐색하고 더 깊은 단계가 이기면 다시 올립니다. 요청/번들 샘플링은 바꾸지 않습니다. AR(MTP 끔): 일반 자기회귀 디코딩.",
       "nativeMtpModeAdaptive": "적응형 MTP",
       "nativeMtpModeAr": "AR (MTP 끔)",
-      "nativeMtpAdaptiveNote": "적응형 MTP는 스스로 제어합니다. 응답 전체에서 일반 디코딩보다 느려지지 않으며 temperature, top-p, top-k, min-p를 고정하거나 다시 쓰지 않습니다. greedy 요청은 동일성으로 검증하고 샘플링 요청은 거부 샘플링 수락을 사용하므로 출력 분포는 모델 자체의 것입니다. 실시간 깊이, 수락률, 폴백 이유는 성능 탭에 표시됩니다.",
+      "nativeMtpAdaptiveNote": "적응형 MTP는 디코딩 성능을 모니터링하며, 측정된 오버헤드가 이점보다 크면 드래프트 깊이를 줄이거나 일반 디코딩으로 돌아갈 수 있습니다. temperature, top-p, top-k, min-p를 고정하거나 다시 쓰지 않습니다. greedy 요청은 동일성으로 검증하고 샘플링 요청은 거부 샘플링 수락을 사용하므로 출력 분포는 모델 자체의 것입니다. 실시간 깊이, 수락률, 폴백 이유는 성능 탭에 표시됩니다.",
       "nativeMtpDefaultOffNote": "이 번들의 현재 MTP 검증기가 일반 디코딩보다 느리게 측정되어 AR로 시작합니다. 적응형 MTP를 선택하면 옵트인됩니다. AR 안전 밸브는 여전히 모든 요청을 보호합니다.",
       "nativeMtpDetectedNote": "감지된 범위: {scope}; 네이티브 캐시: {cache}; 초안 상한 소스: {depthSource}. 하이브리드 번들은 KV 블록과 타입 SSM 상태를 SSD 캐시 계약에 저장하며 유지 페이지 RAM은 비활성 상태입니다.",
       "specDecodeHint": "작은 드래프트 모델로 토큰을 제안한 다음 타깃 모델의 단일 패스로 검증합니다. 품질 손실 없이 20-90% 속도 향상이 가능합니다.",

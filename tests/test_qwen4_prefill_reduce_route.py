@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_cache_cleanup_phase_timing import ROOT, load_functions
+from .test_cache_cleanup_phase_timing import ROOT, load_functions
 
 
 def fixture(monkeypatch, enabled=True):

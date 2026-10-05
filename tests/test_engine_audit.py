@@ -14868,13 +14868,14 @@ class TestTurboQuantKVTelemetry:
         assert _panel_label_is_rendered(form_source, "compiled router/SwiGLU operations")
         assert _panel_label_is_rendered(form_source, "fused Metal mHC single-token decode kernel")
         assert "native compiled router/SwiGLU and fused Metal mHC decode remain automatic" in sessions_source
-        # DFlash2 speculative sessions keep the draft-tokens slider live on
-        # the multimodal lane (the matched Qwen3.8 VLM draft is the feature);
-        # everything else keeps the old batching/VLM gate.
+        # DFlash2 owns its validated block width; the legacy draft-token
+        # slider must not suggest that it changes that width. Other external
+        # draft models keep the batching/VLM gate.
         assert (
-            "disabled={dsv4Active || (!dflash2Speculative && "
-            "(config.continuousBatching || multimodalActive))}"
+            "disabled={dsv4Active || dflash2Speculative || "
+            "(config.continuousBatching || multimodalActive)}"
         ) in form_source
+        assert "dflash2Speculative && <InfoNote text={t('sessions.config.dflash2FixedBlockNote')}" in form_source
 
     def test_responses_long_context_tool_cache_gate_script_pins_artifacts(self):
         gate_source = Path(

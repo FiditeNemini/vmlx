@@ -22,9 +22,14 @@ import mlx.nn as nn
 from . import kernels as K
 from .format import codebook
 
+import logging
 import os
 
 SORT_THRESHOLD = 64
+# One-shot log witness per process of which prefill kernel path the routed experts took (effective kernel
+# evidence for served proofs; the env/identity flags alone cannot prove a path armed).
+_PREFILL_PATH_WITNESSED: dict = {}
+logger = logging.getLogger(__name__)
 # generic fused weighted unsort for prefill (any D / k; fp32 accumulate). JANGH_WEIGHTED_UNSORT=0 to disable.
 from .runtime_identity import WEIGHTED_UNSORT  # default off; Qwen opts in per module
 ROTATIONS = ("none", "hadamard32")
@@ -100,7 +105,8 @@ class TQSwitchGLU(nn.Module):
     def _use_expert_tiles(self, x, kk):
         g, u, d = self.gate_proj, self.up_proj, self.down_proj
         return (
-            EXPERT_TILES == "1" and x.dtype == mx.bfloat16 and x.shape[-1] == 4096 and kk == 8
+            (EXPERT_TILES == "1" or getattr(self, "use_expert_tiles", False))
+            and x.dtype == mx.bfloat16 and x.shape[-1] == 4096 and kk == 8
             and g.num_experts in (256, 288)
             and (g.input_dims, g.output_dims) == (4096, 2048)
             and (u.input_dims, u.output_dims, u.num_experts) == (4096, 2048, g.num_experts)
@@ -117,9 +123,15 @@ class TQSwitchGLU(nn.Module):
         idx_s = idx[order]
         xs = rotate_rows(x, g)[order // kk]
         if self._use_expert_tiles(x, kk):
+            if not _PREFILL_PATH_WITNESSED.get("tiles"):
+                _PREFILL_PATH_WITNESSED["tiles"] = True
+                logger.info("JANGH prefill path witness: expert tiles E=%d bits=%d/%d h32_epilogue=%s (rows=%d)",
+                            g.num_experts, g.bits, d.bits,
+                            (GATEUP_H32 == "1" or getattr(self, "use_gateup_h32", False)) and g.num_experts == 288, int(x.shape[0]))
             plan = K.expert_tile_plan(idx_s, g.num_experts)
-            # Fused output rotation is separately qualified for GLM only.
-            rotate_output = GATEUP_H32 == "1" and g.num_experts == 288
+            # Fused output rotation is separately qualified for GLM only (E=288); the glm5_next
+            # loader opts its modules in (runtime_identity.GLM_FUSED_TILES), env is the diagnostic switch.
+            rotate_output = (GATEUP_H32 == "1" or getattr(self, "use_gateup_h32", False)) and g.num_experts == 288
             h = K.gather_qmm_expert_sorted(
                 xs, g.tq2_packed, g.tq2_scales, idx_s, g.bits, plan,
                 packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit,
@@ -127,6 +139,10 @@ class TQSwitchGLU(nn.Module):
             y = K.gather_qmm_expert_sorted(
                 h if rotate_output else rotate_rows(h, d), d.tq2_packed, d.tq2_scales, idx_s, d.bits, plan)
         else:
+            if not _PREFILL_PATH_WITNESSED.get("sorted"):
+                _PREFILL_PATH_WITNESSED["sorted"] = True
+                logger.info("JANGH prefill path witness: generic sorted NAX/steel E=%d bits=%d/%d host_rotation=%s (rows=%d)",
+                            g.num_experts, g.bits, d.bits, bool(d.rotated), int(x.shape[0]))
             h = K.gather_qmm_sorted(xs, g.tq2_packed, g.tq2_scales, g._cb, idx_s, g.bits,
                                     packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit)
             y = K.gather_qmm_sorted(rotate_rows(h, d), d.tq2_packed, d.tq2_scales, d._cb, idx_s, d.bits)

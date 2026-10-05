@@ -15,6 +15,7 @@ FLAGS = {
     "QWEN4_PREFILL_FUSED": "1",
     "WEIGHTED_UNSORT": "0",
     "TAIL_SPLIT": "1",
+    "GLM_FUSED_TILES": "0",
 }
 
 

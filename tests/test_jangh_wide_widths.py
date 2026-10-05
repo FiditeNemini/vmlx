@@ -159,3 +159,36 @@ class TestDecodeVsSortedPathSelection:
     def test_qwen4_loader_default_matches_measured_crossover(self):
         from vmlx_engine.jangh import runtime_identity as R
         assert R.QWEN4_DECODE_MAX_TOKENS == 96
+
+
+class TestGlmExpertTileOptIn:
+    """The GLM-5.3 geometry (E=288, 4096->2048, k=8, bf16, 2/3-bit) takes the expert-tile NAX path with the H32
+    output epilogue when the loader opts the module in; the env switches stay diagnostic; other geometry never."""
+
+    @staticmethod
+    def _glm_module():
+        m = S.TQSwitchGLU(4096, 2048, 288, 2, 2, 0.0, rotation_gate_up="hadamard32", rotation_down="hadamard32")
+        return m
+
+    def test_opt_in_arms_only_for_qualified_shapes(self, monkeypatch):
+        monkeypatch.setattr(S, "EXPERT_TILES", "0")
+        m = self._glm_module()
+        x = mx.zeros((8, 4096), dtype=mx.bfloat16)
+        assert m._use_expert_tiles(x, 8) is False
+        m.use_expert_tiles = True
+        assert m._use_expert_tiles(x, 8) is S.K.nax_available()
+        assert m._use_expert_tiles(x.astype(mx.float16), 8) is False      # bf16 only
+        assert m._use_expert_tiles(x, 10) is False                          # k=8 only
+        q = S.TQSwitchGLU(D, I, E, 4, 6, 0.0, rotation_gate_up="hadamard32", rotation_down="hadamard32")
+        q.use_expert_tiles = True
+        assert q._use_expert_tiles(mx.zeros((8, D), dtype=mx.bfloat16), KK) is False   # qwen4 geometry never
+
+    def test_env_switch_still_arms_without_opt_in(self, monkeypatch):
+        monkeypatch.setattr(S, "EXPERT_TILES", "1")
+        m = self._glm_module()
+        assert m._use_expert_tiles(mx.zeros((8, 4096), dtype=mx.bfloat16), 8) is S.K.nax_available()
+
+    def test_glm_loader_default_flag(self):
+        from vmlx_engine.jangh import runtime_identity as R
+        assert R.GLM_FUSED_TILES in ("0", "1")
+        assert ";glm_fused_tiles=" + R.GLM_FUSED_TILES in R.runtime_identity()

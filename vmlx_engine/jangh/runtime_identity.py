@@ -20,6 +20,13 @@ TAIL_SPLIT = _producer_binary_flag("JANGH_TAIL_SPLIT", "1")
 # prefill chunk below the limit runs the gather kernels (fp32 weighted accumulate) instead of the
 # sorted NAX path, which is a different (both exact-gated) rounding path for stored KV.
 DECODE_MAX_TOKENS = os.environ.get("JANGH_DECODE_MAX_TOKENS", "").strip()
+# GLM-5.3 JANGH2 (E=288, D=4096, I=2048, k=8, bf16): the glm5_next loader can opt its modules into the expert-tile NAX
+# prefill with the fused Hadamard-32 output epilogue (JANGH_GLM_FUSED_TILES=1). Served A/B/A/B on M5 Max / MLX 0.32.3,
+# 2026-10-04 (fresh server per arm, 90 s cool-downs, ~5.1k-token prompts): fused 402.7 / 406.1 vs host-rotation
+# 343.2 / 370.8 tok/s prefill (1.133x), decode 1.017x, greedy 400-char text byte-identical across 16 rounds. A later
+# default/control pair on the warmed box was inconclusive (fused 405->364 within one arm vs control 386), so the
+# default stays OFF until a rested A/B/A/B confirms it; the path, its kernel witness log and tests are in place.
+GLM_FUSED_TILES = _producer_binary_flag("JANGH_GLM_FUSED_TILES", "0")
 # Measured 2026-10-04 on M5 Max / MLX 0.32.3 for qwen4_exp (D=2560, I=640, E=512, k=10, JANGH 4/6-bit),
 # jangh_crossover_bench.py, interleaved A/B/A/B, medians of 14 rounds: the gather decode path wins
 # through 96 tokens and the sorted NAX path from 128.
@@ -67,4 +74,5 @@ def runtime_identity() -> str:
         + ";weighted_unsort=" + WEIGHTED_UNSORT
         + ";tail_split=" + TAIL_SPLIT
         + ";decode_max_tokens=" + DECODE_MAX_TOKENS
+        + ";glm_fused_tiles=" + GLM_FUSED_TILES
     )

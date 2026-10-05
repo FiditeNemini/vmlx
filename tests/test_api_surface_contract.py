@@ -1,4 +1,8 @@
 from pathlib import Path
+import hashlib
+import json
+
+import pytest
 
 
 def test_api_surface_contract_default_out_tracks_current_release_proof_artifact():
@@ -56,7 +60,7 @@ def test_api_surface_contract_pins_named_public_surface_edges():
     assert "preserves DSV4 Responses max_output_tokens for Max thinking" in panel
     assert "omits malformed Ollama context values instead of poisoning max_prompt_tokens" in panel
     assert "omits unset and negative sentinels while forwarding explicit neutral sampling overrides" in panel
-    assert "omits malformed Ollama num_predict values instead of poisoning max_tokens" in panel
+    assert "preserves malformed Ollama num_predict for backend validation instead of silently changing budgets" in panel
     assert "applies gateway timeout handling to Ollama embeddings proxy requests" in panel
     assert "auto-switches by model id in single-model mode before preserving streaming deltas" in panel
     assert "refuses auto-switch when previous local model cannot unload before starting target" in panel
@@ -275,3 +279,125 @@ def test_metal_headroom_guard_contract_covers_all_public_text_surfaces():
     assert "requested=8192" in source
     assert "safe_cap=1" in source
     assert "projected safe Metal headroom" in source
+
+
+@pytest.fixture
+def retained_api_cache_fixture(tmp_path, monkeypatch):
+    from tests.cross_matrix import run_api_surface_contract as gate
+
+    (tmp_path / "owner.py").write_text("original owner\n")
+    monkeypatch.setattr(gate.api_cache_gate, "SOURCE_HASH_FILES", ("owner.py",))
+    command = ["/original/venv/bin/python", "-m", "pytest", "-vv", "owner.py"]
+    monkeypatch.setattr(gate.api_cache_gate, "COMMANDS", {"api": command})
+    receipt = {
+        "status": "pass",
+        "created_at": "2026-10-05T13:03:42-0700",
+        "checks": {name: True for name in (*gate.REQUIRED_NESTED_API_CHECKS, "all_required_named_rows_ran")},
+        "missing_markers": [],
+        "source_hashes": {"owner.py": gate._sha256(tmp_path / "owner.py")},
+        "commands": {"api": {
+            "name": "api", "command": command, "returncode": 0,
+            "elapsed_sec": 2.37, "counts": {"passed": 42},
+            "stdout_tail": ["42 passed"],
+        }},
+    }
+    return gate, tmp_path, tmp_path / "retained.json", receipt
+
+
+def test_api_surface_retains_original_child_without_replaying_it(retained_api_cache_fixture, monkeypatch):
+    gate, root, path, receipt = retained_api_cache_fixture
+    path.write_text(json.dumps(receipt))
+    original_bytes = path.read_bytes()
+    session = root / "panel/src/main/ipc/sessions.ts"
+    session.parent.mkdir(parents=True)
+    session.write_text("\n".join([
+        "function isExpectedSessionLifecycleDisconnectError",
+        "function formatSessionLifecycleError",
+        "Server connection lost. The model server may have stopped or restarted. Try restarting the session.",
+        "formatSessionLifecycleError(error)", "formatSessionLifecycleError(data.error)",
+    ]))
+    monkeypatch.setattr(gate, "SOURCE_HASH_FILES", ("owner.py",))
+    calls = []
+
+    def fake_run(root, name, cwd, command):
+        calls.append(name)
+        assert name == "panel_api_request_builders"
+        return {"name": name, "command": command, "returncode": 0,
+                "counts": {"passed": 100},
+                "stdout": "\n".join(gate.REQUIRED_PANEL_API_TEST_MARKERS)}
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+    artifact = gate.build_artifact(root, path)
+    assert artifact["status"] == "pass"
+    assert calls == ["panel_api_request_builders"]
+    assert "server_api_surface" not in artifact["results"]
+    retained = artifact["retained_api_cache"]
+    assert retained["executed_in_this_run"] is False
+    assert retained["created_at"] == receipt["created_at"]
+    assert retained["commands"] == receipt["commands"]
+    assert retained["source_hashes"] == receipt["source_hashes"]
+    assert retained["sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("defect", [
+    "absent", "invalid_json", "nonpass", "missing_check", "failed_check",
+    "missing_markers", "missing_hash", "stale_source", "missing_source",
+    "missing_command", "changed_command", "failed_command", "missing_time",
+    "missing_command_time", "no_passed_tests",
+])
+def test_api_surface_rejects_invalid_retained_child_before_any_execution(
+    retained_api_cache_fixture, monkeypatch, defect,
+):
+    gate, root, path, receipt = retained_api_cache_fixture
+    if defect == "nonpass":
+        receipt["status"] = "open"
+    elif defect == "missing_check":
+        receipt["checks"].pop(gate.REQUIRED_NESTED_API_CHECKS[0])
+    elif defect == "failed_check":
+        receipt["checks"]["additional_child_check"] = False
+    elif defect == "missing_markers":
+        receipt["missing_markers"] = ["unproven row"]
+    elif defect == "missing_hash":
+        receipt["source_hashes"] = {}
+    elif defect == "stale_source":
+        (root / "owner.py").write_text("changed owner\n")
+    elif defect == "missing_source":
+        (root / "owner.py").unlink()
+    elif defect == "missing_command":
+        receipt["commands"] = {}
+    elif defect == "changed_command":
+        receipt["commands"]["api"]["command"] = ["true"]
+    elif defect == "failed_command":
+        receipt["commands"]["api"]["returncode"] = 1
+    elif defect == "missing_time":
+        receipt.pop("created_at")
+    elif defect == "missing_command_time":
+        receipt["commands"]["api"].pop("elapsed_sec")
+    elif defect == "no_passed_tests":
+        receipt["commands"]["api"]["counts"]["passed"] = 0
+    if defect != "absent":
+        path.write_text("not json" if defect == "invalid_json" else json.dumps(receipt))
+
+    def never_run(*args, **kwargs):
+        pytest.fail("invalid retention must fail before any child execution")
+
+    monkeypatch.setattr(gate, "_run", never_run)
+    with pytest.raises((OSError, ValueError)):
+        gate.build_artifact(root, path)
+
+
+def test_api_surface_default_still_runs_both_children(monkeypatch):
+    from tests.cross_matrix import run_api_surface_contract as gate
+
+    calls = []
+
+    def fake_run(root, name, cwd, command):
+        calls.append(name)
+        return {"returncode": 0, "counts": {"passed": 100}, "stdout": ""}
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+    monkeypatch.setattr(gate, "_load_nested", lambda root: {})
+    artifact = gate.build_artifact(Path("."))
+    assert calls == list(gate.COMMANDS)
+    assert "retained_api_cache" not in artifact

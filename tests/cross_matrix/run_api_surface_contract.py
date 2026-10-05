@@ -17,13 +17,16 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 try:
     from tests.cross_matrix.output_counts import parse_counts
+    from tests.cross_matrix import run_noheavy_api_cache_contract as api_cache_gate
 except ModuleNotFoundError:  # direct script execution
     from output_counts import parse_counts
+    import run_noheavy_api_cache_contract as api_cache_gate
 
 
 DEFAULT_OUT = Path(
@@ -215,13 +218,85 @@ def _load_nested(root: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build_artifact(root: Path) -> dict[str, Any]:
+def _load_retained_api_cache(root: Path, path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate an original child receipt without executing or rewriting it."""
+    raw = path.read_bytes()
+    nested = json.loads(raw)
+    if not isinstance(nested, dict) or nested.get("status") != "pass":
+        raise ValueError("retained API/cache receipt must have status=pass")
+    checks = nested.get("checks")
+    if (
+        not isinstance(checks, dict)
+        or not checks
+        or checks.get("all_required_named_rows_ran") is not True
+        or any(value is not True for value in checks.values())
+        or any(checks.get(name) is not True for name in REQUIRED_NESTED_API_CHECKS)
+        or nested.get("missing_markers") != []
+    ):
+        raise ValueError("retained API/cache receipt has missing or nonpassing checks")
+    created_at = nested.get("created_at")
+    if not isinstance(created_at, str) or not datetime.fromisoformat(created_at).tzinfo:
+        raise ValueError("retained API/cache receipt needs its original timestamp with timezone")
+    hashes = nested.get("source_hashes")
+    if not isinstance(hashes, dict):
+        raise ValueError("retained API/cache receipt lacks source_hashes")
+    for rel in api_cache_gate.SOURCE_HASH_FILES:
+        if not (root / rel).is_file() or hashes.get(rel) != _sha256(root / rel):
+            raise ValueError(f"retained API/cache source missing or stale: {rel}")
+    commands = nested.get("commands")
+    if not isinstance(commands, dict) or set(commands) != set(api_cache_gate.COMMANDS):
+        raise ValueError("retained API/cache receipt lacks the original child commands")
+    for name, expected in api_cache_gate.COMMANDS.items():
+        result = commands[name]
+        if not isinstance(result, dict):
+            raise ValueError(f"invalid retained API/cache command: {name}")
+        command = result.get("command")
+        # The original Python executable may live in another checkout/venv.
+        # Preserve it verbatim, while requiring the same module/test selection.
+        same_command = command == expected
+        if expected[1:3] == ["-m", "pytest"] and isinstance(command, list):
+            same_command = (
+                bool(command and isinstance(command[0], str) and command[0])
+                and command[1:] == expected[1:]
+            )
+        elapsed = result.get("elapsed_sec")
+        counts = result.get("counts")
+        if (
+            result.get("name") != name
+            or not same_command
+            or type(result.get("returncode")) is not int
+            or result["returncode"] != 0
+            or type(elapsed) not in (int, float)
+            or not 0 <= elapsed < float("inf")
+            or not isinstance(counts, dict)
+            or type(counts.get("passed")) is not int
+            or counts["passed"] <= 0
+        ):
+            raise ValueError(f"retained API/cache command incomplete or nonpassing: {name}")
+    return nested, {
+        "path": str(path.resolve()),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "created_at": created_at,
+        "status": nested["status"],
+        "source_hashes": hashes,
+        "commands": commands,
+        "executed_in_this_run": False,
+    }
+
+
+def build_artifact(root: Path, retained_api_cache: Path | None = None) -> dict[str, Any]:
+    retained = None
+    if retained_api_cache is not None:
+        # Fail before running even the panel slice if the child cannot be retained.
+        nested, retained = _load_retained_api_cache(root, retained_api_cache)
     results = {
         name: _run(root, name, cwd_rel, cmd)
         for name, (cwd_rel, cmd) in COMMANDS.items()
+        if retained is None or name != "server_api_surface"
     }
     failed = [name for name, result in results.items() if result["returncode"] != 0]
-    nested = _load_nested(root)
+    if retained is None:
+        nested = _load_nested(root)
     nested_checks = nested.get("checks", {})
     nested_missing_markers = nested.get("missing_markers", [])
     panel_stdout = str(results["panel_api_request_builders"].get("stdout", ""))
@@ -402,6 +477,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         },
         "results": public_results,
         "nested_api_cache_status": nested.get("status"),
+        **({"retained_api_cache": retained} if retained is not None else {}),
     }
 
 
@@ -409,9 +485,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument(
+        "--retained-api-cache", type=Path,
+        help="Reuse an original passing, source-matched API/cache receipt instead of rerunning that child",
+    )
     args = parser.parse_args()
 
-    artifact = build_artifact(args.root)
+    try:
+        artifact = build_artifact(args.root, args.retained_api_cache)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
     print(args.out)

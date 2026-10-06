@@ -1136,7 +1136,7 @@ class SimpleEngine(BaseEngine):
                             thinking_enabled,
                         )
 
-                    yield GenerationOutput(
+                    output = GenerationOutput(
                         text=accumulated_text,
                         new_text=new_text,
                         prompt_tokens=last_prompt_tokens,
@@ -1146,6 +1146,22 @@ class SimpleEngine(BaseEngine):
                         cached_tokens=last_cached_tokens,
                         cache_detail=last_cache_detail,
                     )
+
+                    receipt = getattr(chunk, "persistence_future", None)
+                    if finished and receipt is not None:
+                        from ..utils.terminal_persistence import terminal_persistence_outputs
+
+                        self._pending_terminal_request_id = request_id
+                        try:
+                            async for terminal_output in terminal_persistence_outputs(
+                                output, receipt, request_id,
+                                lambda record: setattr(self, "_last_durability", record),
+                            ):
+                                yield terminal_output
+                        finally:
+                            self._pending_terminal_request_id = None
+                    else:
+                        yield output
 
                     if finished:
                         break
@@ -1276,6 +1292,13 @@ class SimpleEngine(BaseEngine):
         ):
             yield output
 
+    async def request_graceful_stop(self, request_id: str) -> bool:
+        # A parser can recognize the tool in the final content delta before
+        # its SSD fence settles. Let the server drain that existing terminal
+        # instead of aborting and bypassing the write receipt.
+        pending = getattr(self, "_pending_terminal_request_id", None)
+        return pending is not None and pending == request_id
+
     async def abort_request(self, request_id: str) -> bool:
         """Abort the current generation if request_id matches (or unconditionally if no tracking)."""
         if self._current_request_id and request_id != self._current_request_id:
@@ -1297,7 +1320,8 @@ class SimpleEngine(BaseEngine):
             "loaded": self._loaded,
             "engine_collector_count": len(current_request_ids),
             "engine_collector_request_ids": current_request_ids,
-            "terminal_cleanup_pending": False,
+            "terminal_cleanup_pending": bool(getattr(self, "_pending_terminal_request_id", None)),
+            "last_durability": getattr(self, "_last_durability", None),
             "num_waiting": 0,
             "waiting_request_ids": [],
             "num_running": len(current_request_ids),

@@ -36,9 +36,11 @@ torn files are misses, never wrong state).
 COST / TRADE-OFFS
 -----------------
 * Writes happen on a background thread after the arrays are evaluated on the
-  generation thread, so the reply is not delayed.  A full queue drops the
-  newest write (counted); the RAM tier still has that entry.
-* Two writes per turn (boundary + turn entry).  Both are needed: reasoning
+  generation thread. Final content is delivered before SimpleEngine waits
+  for the turn's write receipt and publishes the terminal event. A reserved
+  queue slot protects the turn snapshot from prefill snapshots; queue
+  refusals and write failures never report durable storage.
+* Up to three writes per turn (system + boundary + turn entry). They are needed: reasoning
   templates strip <think> from history, so the next USER turn only matches
   the boundary entry, while a TOOL continuation matches the turn entry.
 * Size is bounded by the same aggregate SSD budget as every other managed
@@ -57,6 +59,7 @@ import queue
 import threading
 import time
 from array import array
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -134,12 +137,14 @@ class DFlash2SessionSSD:
         )
         self.stats = {"writes": 0, "write_bytes": 0, "write_s": 0.0, "write_errors": 0,
                       "dropped": 0, "hits": 0, "hit_tokens": 0, "load_s": 0.0, "misses": 0}
-        self._q: "queue.Queue[tuple]" = queue.Queue(maxsize=self.queue_depth)
+        # Two prefill snapshots plus a reserved final-turn slot. Requests
+        # settle their terminal receipt before releasing the generation lock.
+        self._q: "queue.Queue[tuple]" = queue.Queue(maxsize=self.queue_depth + 1)
         self._worker = threading.Thread(target=self._run, name="dflash2-ssd-writer", daemon=True)
         self._worker.start()
 
     # ---- write ---------------------------------------------------------------
-    def put(self, entry: dict) -> None:
+    def put(self, entry: dict) -> Future:
         """Snapshot ``entry`` (a RAM-store dict) and queue it for SSD."""
         import mlx.core as mx
 
@@ -158,18 +163,28 @@ class DFlash2SessionSSD:
         mx.eval(list(arrays.values()))
         meta = {"kind": entry.get("kind", "turn"), "cache_len": int(entry["cache_len"]),
                 "target": target_layers, "draft": draft_layers}
+        receipt = Future()
+        # Cancelling an HTTP consumer must not cancel an already-owned write.
+        receipt.set_running_or_notify_cancel()
         try:
-            self._q.put_nowait((signature_for(tokens), arrays, meta))
+            if meta["kind"] != "turn" and self._q.qsize() >= self.queue_depth:
+                raise queue.Full
+            self._q.put_nowait((signature_for(tokens), arrays, meta, receipt))
         except queue.Full:
             self.stats["dropped"] += 1
             logger.info("DFlash2 SSD write skipped (writer busy); entry stays in RAM only")
+            receipt.set_result({"outcome": "refused", "durable": False,
+                                "retained_tokens": 0, "detail": "DFlash2 SSD writer queue full"})
+        return receipt
 
     def _run(self) -> None:
         import mlx.core as mx
 
         while True:
-            sig, arrays, meta = self._q.get()
+            sig, arrays, meta, receipt = self._q.get()
             t0 = time.perf_counter()
+            outcome = {"outcome": "failed", "durable": False,
+                       "retained_tokens": 0, "detail": "DFlash2 SSD write failed"}
             try:
                 path = self.store.save(
                     sig,
@@ -181,6 +196,9 @@ class DFlash2SessionSSD:
                 logger.info("DFlash2 SSD stored %s entry: %s tokens, %.0f MB, %.2fs",
                             meta["kind"], sig.split(":")[0], path.stat().st_size / 1e6,
                             time.perf_counter() - t0)
+                outcome = {"outcome": "stored", "durable": True,
+                           "retained_tokens": meta["cache_len"],
+                           "detail": "DFlash2 SSD " + meta["kind"] + " snapshot"}
             except Exception:
                 self.stats["write_errors"] += 1
                 logger.warning("DFlash2 SSD write failed", exc_info=True)
@@ -190,6 +208,8 @@ class DFlash2SessionSSD:
                 # Release completed payloads before signalling the write done.
                 del arrays, meta
                 self._q.task_done()
+                if not receipt.cancelled():
+                    receipt.set_result(outcome)
 
     def flush(self, timeout: float = 60.0) -> bool:
         """Wait for queued writes (tests / shutdown)."""
@@ -197,6 +217,10 @@ class DFlash2SessionSSD:
         while self._q.unfinished_tasks and time.monotonic() < end:
             time.sleep(0.01)
         return not self._q.unfinished_tasks
+
+    def wait_pending_writes(self) -> None:
+        """Settle writes left by a disconnected request before the next one."""
+        self._q.join()
 
     # ---- read ----------------------------------------------------------------
     def take_matching(self, prompt: list[int], *, im_start_id: Optional[int], eos_ids: Iterable[int],

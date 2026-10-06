@@ -3699,6 +3699,9 @@ class MLLMOutput:
     completion_tokens: int = 0
     cached_tokens: int = 0
     cache_detail: str = ""
+    # Request-owned background SSD write; consumed by SimpleEngine only at
+    # the terminal boundary, after delivering the final content delta.
+    persistence_future: Any = None
 
 
 def is_base64_image(s: str) -> bool:
@@ -6646,6 +6649,7 @@ class MLXMultimodalLM:
                         completion_tokens=token_count,
                         cached_tokens=int(getattr(chunk, "cached_tokens", 0) or 0),
                         cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
+                        persistence_future=getattr(chunk, "persistence_future", None),
                     )
 
                 if not stats_logged:

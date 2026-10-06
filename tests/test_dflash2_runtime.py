@@ -61,6 +61,7 @@ def test_qwen_mtp_model_wrapper_accepts_upstream_capture_contract():
 
 
 def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
+    from concurrent.futures import Future
     from vmlx_engine.models.mllm import MLXMultimodalLM
 
     model = object.__new__(MLXMultimodalLM)
@@ -80,6 +81,7 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
     )
     model._apply_chat_template = lambda messages, enable_thinking, tools=None, reasoning_effort=None: "PROMPT"
 
+    receipt = Future()
     chunks = [
         SimpleNamespace(
             text="one",
@@ -96,6 +98,7 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
             prompt_tokens=7,
             generation_tps=55.0,
             finish_reason="stop",
+            persistence_future=receipt,
         ),
     ]
 
@@ -123,3 +126,4 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
     assert [output.text for output in outputs] == ["one", " two"]
     assert outputs[-1].completion_tokens == 3
     assert outputs[-1].finish_reason == "stop"
+    assert outputs[-1].persistence_future is receipt

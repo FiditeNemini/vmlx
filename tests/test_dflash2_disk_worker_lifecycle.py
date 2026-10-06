@@ -5,6 +5,7 @@ import sys
 import threading
 import types
 import weakref
+from concurrent.futures import Future
 
 import pytest
 
@@ -49,7 +50,8 @@ def test_idle_writer_releases_finished_snapshot(monkeypatch, tmp_path, save_fail
     ssd.stats = {"writes": 0, "write_bytes": 0, "write_s": 0.0, "write_errors": 0}
     payload = Payload()
     reference = weakref.ref(payload)
-    ssd._q.put(("3:digest", {"t0.0": payload}, {"kind": "turn"}))
+    receipt = Future()
+    ssd._q.put(("3:digest", {"t0.0": payload}, {"kind": "turn", "cache_len": 2}, receipt))
     del payload
     worker = threading.Thread(target=ssd._run, daemon=True)
     worker.start()
@@ -60,7 +62,32 @@ def test_idle_writer_releases_finished_snapshot(monkeypatch, tmp_path, save_fail
         assert reference() is None, "idle writer retained a completed snapshot"
         assert ssd.stats["write_errors"] == int(save_fails)
         assert ssd.stats["writes"] == int(not save_fails)
+        assert receipt.result()["durable"] is (not save_fails)
+        assert receipt.result()["outcome"] == ("failed" if save_fails else "stored")
     finally:
         stop.set()
         worker.join(5)
         assert not worker.is_alive()
+
+
+def test_turn_has_reserved_queue_capacity_and_refusals_are_explicit(monkeypatch):
+    core = types.ModuleType("mlx.core")
+    core.array = lambda tokens, dtype: tokens
+    core.uint32 = object()
+    core.eval = lambda arrays: None
+    mlx = types.ModuleType("mlx")
+    mlx.core = core
+    monkeypatch.setitem(sys.modules, "mlx", mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    ssd = DFlash2SessionSSD.__new__(DFlash2SessionSSD)
+    ssd._q = queue.Queue(maxsize=ssd.queue_depth + 1)
+    ssd.stats = {"dropped": 0}
+    entry = {"tokens": [1, 2], "cache_len": 2, "target_cache": []}
+    for kind in ("system", "boundary"):
+        assert not ssd.put(dict(entry, kind=kind)).done()
+    refused = ssd.put(dict(entry, kind="boundary"))
+    assert refused.result()["outcome"] == "refused"
+    turn = ssd.put(dict(entry, kind="turn"))
+    assert not turn.done() and not turn.cancel()
+    assert ssd._q.qsize() == 3
+    assert ssd.stats["dropped"] == 1

@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import Future
 from typing import Any, Iterator, Optional
 
 logger = logging.getLogger(__name__)
@@ -350,14 +351,18 @@ def configure_session_ssd(*, root, max_size_bytes: int, target_path: str, draft_
     )
 
 
-def _store_session(entry: dict) -> None:
+def _store_session(entry: dict):
     """RAM store + SSD write-behind (when configured)."""
     _SESSION_STORE.put(entry)
     if _SESSION_SSD is not None:
         try:
-            _SESSION_SSD.put(entry)
+            return _SESSION_SSD.put(entry)
         except Exception:
             logger.warning("DFlash2 SSD snapshot failed; RAM entry kept", exc_info=True)
+            receipt = Future()
+            receipt.set_result({"outcome": "failed", "durable": False,
+                                "retained_tokens": 0, "detail": "DFlash2 SSD snapshot failed"})
+            return receipt
 
 
 def clear_sessions(include_ssd: bool) -> int:
@@ -464,6 +469,11 @@ def _stream_generate_resumable(
     import mlx.core as mx
     import dflash.model_mlx as runtime
 
+    # A disconnected consumer may not have awaited its terminal receipt.
+    # Settle outstanding writes before another request can enqueue snapshots.
+    if _SESSION_SSD is not None:
+        _SESSION_SSD.wait_pending_writes()
+
     runtime._patch_model(adapter, draft.config.target_layer_ids)
     sampler = runtime.make_sampler(temperature, top_p, top_k)
 
@@ -530,11 +540,14 @@ def _stream_generate_resumable(
     # (RAM or SSD), carried on every response as cached_tokens/cache_detail.
     _cached = int(cache_len)
     _detail = (resume.get("source", "dflash2-ram") if resume is not None else "")
+    _terminal_write = None
 
     def _respond(*args):
         r = runtime._make_response(*args)
         r.cached_tokens = _cached
         r.cache_detail = _detail
+        if getattr(r, "finish_reason", None) is not None:
+            r.persistence_future = _terminal_write
         return r
 
     draft.bind(adapter)
@@ -680,6 +693,7 @@ def _stream_generate_resumable(
         cycle_kept = 0
 
         def _checkpoint() -> None:
+            nonlocal _terminal_write
             if not _prefix_reuse_enabled():
                 return
             correction = _checkpoint_correction(cycle_committed, cycle_kept)
@@ -710,7 +724,7 @@ def _stream_generate_resumable(
                     store_draft = None
             elif gap_needed < 0:
                 store_draft = None
-            _store_session(
+            _terminal_write = _store_session(
                 {
                     "model_key": model_key,
                     "kind": "turn",

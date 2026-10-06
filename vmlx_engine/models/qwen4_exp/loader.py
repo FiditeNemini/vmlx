@@ -962,6 +962,10 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     if not lazy:
         mx.eval(model.parameters())
     model.eval()
+    # After the weights are read: fill the page cache with the file-mapped
+    # n-gram tables so cold prompts do not page-fault every new row from the
+    # model drive (table_reader.FileBackedQuantizedNGramTable.start_page_cache_warm).
+    table.start_page_cache_warm()
     image_processor = load_image_processor(model_path)
     processor = load_processor(
         model_path,

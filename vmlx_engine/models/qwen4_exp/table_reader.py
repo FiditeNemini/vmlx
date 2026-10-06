@@ -349,6 +349,8 @@ class SafetensorsRowReader:
         self.row_bytes = int(np.dtype(_DTYPES[self.dtype_tag]).itemsize)
         self.row_bytes *= int(np.prod(self.shape[1:], dtype=np.int64))
         self._pread_file = pread_file
+        self.path = path
+        self.data_nbytes = int(self.row_bytes) * int(self.shape[0])
         self.random_access_advised = _advise_random_access(self.mm)
 
     def rows(
@@ -1062,3 +1064,69 @@ class FileBackedQuantizedNGramTable:
         stats["shards"] += shard_count
         stats["layout_groups"] += len(groups)
         return out
+
+
+    def start_page_cache_warm(self):
+        """Read every n-gram table byte once, sequentially, on a daemon thread.
+
+        Why: the tables (~27 GB on Flash-Next 4M) stay file-mapped and every
+        new token's n-gram rows are random page faults on the model drive.
+        Measured on M5 Max, CRACK-4M on the external model drive, one forward
+        of the same prompt with cold vs warm table pages: 1,800 tokens 6.77 s
+        vs 0.96 s (266 vs 1,885 tok/s); 6,750 tokens 14.7 s vs 4.0 s.  Served
+        cold prefill sat at 275-640 tok/s for exactly this reason.  One
+        sequential pass at drive bandwidth fills the unified page cache;
+        afterwards lookups are RAM hits.  Pages stay reclaimable: under memory
+        pressure macOS evicts them and lookups fall back to drive reads, which
+        is the pre-warm behaviour, never an error.  TensorFold does the same
+        after load.  VMLX_QWEN4_PLE_WARM=0 disables it.
+        """
+        if os.environ.get("VMLX_QWEN4_PLE_WARM", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return None
+        spans = {}
+        for shard in self.shards:
+            for reader in (shard.weight, shard.scales, shard.biases):
+                spans.setdefault(str(reader.path), []).append(
+                    (int(reader.data_offset), int(reader.data_nbytes))
+                )
+        total = sum(n for v in spans.values() for _o, n in v)
+
+        def run():
+            import time as _time
+            started = _time.perf_counter()
+            chunk = 32 << 20
+            buf = bytearray(chunk)
+            view = memoryview(buf)
+            done = 0
+            for path, ranges in spans.items():
+                try:
+                    fd = os.open(path, os.O_RDONLY)
+                except OSError:
+                    continue
+                try:
+                    for offset, nbytes in sorted(ranges):
+                        end = offset + nbytes
+                        while offset < end:
+                            want = min(chunk, end - offset)
+                            got = os.preadv(fd, [view[:want]], offset) if hasattr(os, "preadv") \
+                                else len(os.pread(fd, want, offset))
+                            if got <= 0:
+                                break
+                            offset += got
+                            done += got
+                finally:
+                    os.close(fd)
+            secs = _time.perf_counter() - started
+            self.page_cache_warm = {"bytes": done, "seconds": round(secs, 2)}
+            logger.info(
+                "Qwen4 PLE n-gram table page-cache warm done: %.2f GB in %.1f s (%.2f GB/s, %d files)",
+                done / 1e9, secs, done / 1e9 / max(secs, 1e-6), len(spans),
+            )
+
+        import threading
+        logger.info("Qwen4 PLE n-gram table page-cache warm started: %.2f GB across %d files",
+                    total / 1e9, len(spans))
+        thread = threading.Thread(target=run, name="vmlx-ple-page-warm", daemon=True)
+        thread.start()
+        self.page_cache_warm = {"bytes": 0, "total": total, "running": True}
+        return thread

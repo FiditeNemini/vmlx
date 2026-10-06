@@ -357,6 +357,15 @@ class XMLFunctionToolParser(ToolParser):
                         content=cleaned_text if cleaned_text else None,
                     )
         if tool_calls:
+            # A length-limited parallel-call turn may end inside its next
+            # envelope. It is neither executable nor visible prose. Keep
+            # completed calls, but do not expose the unfinished native XML.
+            partial = re.match(r"^<tool_call>\s*<function=([^>]+)>", cleaned_text)
+            if partial and partial.group(1).strip() in (allowed_names_for_recovery or set()):
+                from ..request_diagnostics import record
+
+                record("xml_function: incomplete trailing tool call omitted; completed calls retained")
+                cleaned_text = ""
             return ExtractedToolCallInformation(
                 tools_called=True,
                 tool_calls=self._coerce_nullable_arguments(tool_calls, request),

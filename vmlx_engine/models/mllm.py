@@ -5486,6 +5486,7 @@ class MLXMultimodalLM:
         enable_thinking: bool | None = None,
         tools: list[dict] | None = None,
         reasoning_effort: str | None = None,
+        chat_template_kwargs: dict | None = None,
     ) -> str:
         """
         Apply chat template to structured messages with enable_thinking support.
@@ -5504,7 +5505,14 @@ class MLXMultimodalLM:
         """
         from mlx_vlm.prompt_utils import get_chat_template
 
-        template_kwargs = {}
+        # Keep caller template variables in the renderer only. Explicit
+        # request controls win, matching the shared text-engine contract.
+        template_kwargs = {
+            k: v for k, v in (chat_template_kwargs or {}).items()
+            if k not in ("tokenize", "add_generation_prompt")
+        }
+        if enable_thinking is not None and "thinking" in template_kwargs:
+            template_kwargs["thinking"] = bool(enable_thinking)
         model_type = ""
         try:
             config = getattr(self, "config", None)
@@ -6205,11 +6213,13 @@ class MLXMultimodalLM:
             )
         enable_thinking = kwargs.pop("enable_thinking", None)
         reasoning_effort = kwargs.pop("reasoning_effort", None)
+        extra_template = kwargs.pop("chat_template_kwargs", None)
         formatted_prompt = self._apply_chat_template(
             chat_messages,
             enable_thinking,
             tools=template_tools,
             reasoning_effort=reasoning_effort,
+            **({"chat_template_kwargs": extra_template} if extra_template else {}),
         )
 
         # Post-template image count guard: VLM chat templates may not expand
@@ -6543,11 +6553,13 @@ class MLXMultimodalLM:
         template_tools = kwargs.pop("tools", None)
         enable_thinking = kwargs.pop("enable_thinking", None)
         reasoning_effort = kwargs.pop("reasoning_effort", None)
+        extra_template = kwargs.pop("chat_template_kwargs", None)
         formatted_prompt = self._apply_chat_template(
             chat_messages,
             enable_thinking,
             tools=template_tools,
             reasoning_effort=reasoning_effort,
+            **({"chat_template_kwargs": extra_template} if extra_template else {}),
         )
 
         # Post-template image count guard: VLM chat templates may not expand

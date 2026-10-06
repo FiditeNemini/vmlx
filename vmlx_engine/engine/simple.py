@@ -842,11 +842,8 @@ class SimpleEngine(BaseEngine):
                 if reasoning_effort:
                     mllm_kwargs["reasoning_effort"] = reasoning_effort
                 if extra_ct_kwargs:
-                    # Strip reserved keys (Concern #14): see above.
-                    mllm_kwargs.update({
-                        k: v for k, v in extra_ct_kwargs.items()
-                        if k not in ("tokenize", "add_generation_prompt")
-                    })
+                    # Template variables are not generation function arguments.
+                    mllm_kwargs["chat_template_kwargs"] = dict(extra_ct_kwargs)
                 if template_tools:
                     mllm_kwargs["tools"] = template_tools
                 output = await self._run_model_call(
@@ -1055,11 +1052,8 @@ class SimpleEngine(BaseEngine):
             if reasoning_effort:
                 mllm_kwargs["reasoning_effort"] = reasoning_effort
             if extra_ct_kwargs:
-                # Strip reserved keys (Concern #14): see above.
-                mllm_kwargs.update({
-                    k: v for k, v in extra_ct_kwargs.items()
-                    if k not in ("tokenize", "add_generation_prompt")
-                })
+                # Template variables are not generation function arguments.
+                mllm_kwargs["chat_template_kwargs"] = dict(extra_ct_kwargs)
             if template_tools:
                 mllm_kwargs["tools"] = template_tools
 

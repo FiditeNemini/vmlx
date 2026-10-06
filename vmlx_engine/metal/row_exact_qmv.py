@@ -702,6 +702,44 @@ def _admit(key, weight, scales, biases, bits, group_size, rows, in_dim, dtype, v
     return chosen
 
 
+def _efficient_rows(bits: int) -> int:
+    """Widest single launch before the multi-row walk spills registers.
+
+    Measured on M5 Max, MLX 0.32.3, 8-bit g64, Flash-Next dense shapes
+    (36 chained GDN qkv 2560->10240): R1 1.91, R4 2.15, R6 2.58 ms, then
+    R7 12.76 and R8 14.55 ms (5x: register spill). lm_head 2560->248320:
+    R6 1.68, R7 5.41 ms. 2-5-bit already cap at 4 rows (_max_rows).
+    """
+    return 6 if bits == 8 else 4
+
+
+def _row_blocks(x, rows, in_dim, out_dim, weight, scales, biases, group_size, bits, mode):
+    """Run a window wider than ``_efficient_rows`` as consecutive row blocks.
+
+    Every row's result is computed by the same per-row arithmetic whatever
+    block it lands in (that is the kernel's admission contract), so the
+    concatenation is bit-identical to one launch -- and to the M=1 call --
+    while each launch stays in registers.  Cost: the weight is read once
+    per block instead of once (2 reads at 7-8 rows), still ~3x cheaper
+    than the spilled single launch.  Blocks are balanced and never 1 row
+    (a 1-row block would leave the admitted multi-row kernel).
+    """
+    flat = x.reshape(rows, in_dim)
+    n_blocks = -(-rows // 4)
+    base, extra = divmod(rows, n_blocks)
+    outs, start = [], 0
+    for b in range(n_blocks):
+        size = base + (1 if b < extra else 0)
+        y = row_exact_qmv(flat[start:start + size][None], weight, scales, biases,
+                          group_size=group_size, bits=bits, mode=mode)
+        if y is None:
+            return None
+        outs.append(y.reshape(size, out_dim))
+        start += size
+    STATS["blocked_calls"] = STATS.get("blocked_calls", 0) + 1
+    return mx.concatenate(outs, axis=0).reshape(*x.shape[:-1], out_dim)
+
+
 def row_exact_qmv(x, weight, scales, biases, *, group_size: int, bits: int, mode: str = "affine"):
     """``x @ dequant(weight).T`` with each row bit-equal to its M=1 call, or None.
 
@@ -715,6 +753,8 @@ def row_exact_qmv(x, weight, scales, biases, *, group_size: int, bits: int, mode
     for dim in x.shape[:-1]:
         rows *= int(dim)
     out_dim = weight.shape[0]
+    if _efficient_rows(bits) < rows <= MAX_ROWS:
+        return _row_blocks(x, rows, in_dim, out_dim, weight, scales, biases, group_size, bits, mode)
     variants = _variants(rows, in_dim, out_dim, bits, group_size, x.dtype)
     if not variants:
         return None

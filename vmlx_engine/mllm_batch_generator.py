@@ -161,6 +161,7 @@ from .native_mtp_adaptive import (
     finish_armed_depth_cycle,
     note_forced_depth_change,
 )
+from .native_mtp_copy import SuffixCopyProposer, copy_drafts_enabled
 from .native_mtp_profile import (
     NativeMTPProfileStore,
     profile_key as native_mtp_profile_key,
@@ -4729,6 +4730,13 @@ class MLLMNativeMTPState:
     # head cache during the last draft phase.  Trimmed after every verify so an
     # unverified draft can never persist in the head's context.
     head_chain_pairs: int = 0
+    # Copy drafts (native_mtp_copy): the request's suffix-match proposer, and
+    # whether the drafts now pending verification are copied tokens rather
+    # than head drafts.  Copy cycles stay out of the head's depth/acceptance
+    # statistics and value/safety controllers (they would inflate them).
+    copy_proposer: Optional[Any] = None
+    copy_cycle: bool = False
+    _copy_pending: List[int] = field(default_factory=list)
     # In-flight prefetched verify: {snapshot, logits, hidden, n_inputs} or None.
     pending_verify: Optional[Dict[str, Any]] = None
     # Snapshot and emission ledger for the verify cycle currently being
@@ -14542,7 +14550,7 @@ class MLLMBatchGenerator:
                 # Request-level opt-in: no per-token work or extra GPU fences.
                 req._glm_native_media_timing = (
                     {"postprocess_finished": time.perf_counter()}
-                    if self.native_glm_cache is not None
+                    if getattr(self, "native_glm_cache", None) is not None
                     and os.environ.get("VMLX_GLM5_MEDIA_TIMING", "").lower() in {"1", "true", "yes", "on"}
                     else None
                 )
@@ -14609,7 +14617,7 @@ class MLLMBatchGenerator:
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (
                 _glm_native_prompt_token_ids(req.input_ids)
-                if self.native_glm_cache is not None
+                if getattr(self, "native_glm_cache", None) is not None
                 else req.input_ids.tolist()
                 if req.input_ids is not None and req.input_ids.ndim == 1
                 else req.input_ids[0].tolist()
@@ -18589,6 +18597,22 @@ class MLLMBatchGenerator:
             (time.perf_counter() - _diag_acceptance_start) * 1000.0
             if _diag_acceptance_start is not None else 0.0
         )
+        if state.copy_cycle:
+            # Copied drafts were verified: record them on the proposer only.
+            # The head's per-depth acceptance, value cycles and the safety /
+            # depth controllers measure head drafts; a copy window would
+            # inflate every one of them.  The value timer is re-armed so the
+            # next head cycle measures only itself.
+            state.copy_cycle = False
+            if state.copy_proposer is not None:
+                state.copy_proposer.observe(depth, accepted)
+            _native_mtp_arm_value_cycle(state, now=time.perf_counter())
+            self._finish_native_mtp_verify_outcome(
+                request, cache, state, depth, accepted, hidden, target_tokens,
+                target_ids, target_lps, replay_snapshot, acceptance_rows,
+                sampler, copy=True,
+            )
+            return
         state.stats.cycles += 1
         if 0 <= depth < len(state.stats.cycles_by_depth):
             state.stats.cycles_by_depth[depth] += 1
@@ -18661,8 +18685,75 @@ class MLLMBatchGenerator:
             state._trace_prev_t = _value_cycle_now
         _native_mtp_step_depth_controllers(request.request_id, state)
         _native_mtp_arm_value_cycle(state, now=_value_cycle_now)
+        self._finish_native_mtp_verify_outcome(
+            request, cache, state, depth, accepted, hidden, target_tokens,
+            target_ids, target_lps, replay_snapshot, acceptance_rows, sampler,
+        )
+
+    def _native_mtp_head_depth_for_next(
+        self, request: MLLMBatchRequest, state: MLLMNativeMTPState
+    ) -> int:
+        """Head depth for the next draft call; 1 when a copy window will replace the head's drafts.
+
+        Called after this cycle's confirmed tokens were queued, so the proposer
+        sees prompt + emitted + queued (the verify window's first row,
+        ``next_main``, is the last queued token).  With a copy proposal the head
+        still runs one level: that forward commits this cycle's confirmed pairs
+        to the aligned head cache (it must, or later head drafts lose context),
+        and its single draft is simply superseded by the copies.
+        """
+        state._copy_pending = []
+        if not copy_drafts_enabled():
+            return state.depth
+        proposer = state.copy_proposer
+        if proposer is None:
+            ids = getattr(request, "input_ids", None)
+            if ids is None:
+                return state.depth
+            try:
+                prompt = [int(t) for t in ids.reshape(-1).tolist()]
+            except Exception:
+                return state.depth
+            proposer = state.copy_proposer = SuffixCopyProposer.from_prompt(prompt)
+        proposer.sync(request.output_tokens, [int(q[0]) for q in state.queue])
+        room = int(request.max_tokens) - int(request.num_tokens) - len(state.queue) - 1
+        state._copy_pending = proposer.propose(room)
+        return 1 if state._copy_pending else state.depth
+
+    def _native_mtp_apply_copy(self, state: MLLMNativeMTPState) -> None:
+        """Replace the just-drafted head tokens with the pending copy window, if any."""
+        copied = getattr(state, "_copy_pending", None) or []
+        state._copy_pending = []
+        if not copied:
+            return
+        state.drafts = [mx.array([t], dtype=mx.uint32) for t in copied]
+        state.draft_lps = [None] * len(copied)
+        state.draft_ids = list(copied)
+        state.copy_cycle = True
+
+    def _finish_native_mtp_verify_outcome(
+        self,
+        request: MLLMBatchRequest,
+        cache: List[Any],
+        state: MLLMNativeMTPState,
+        depth: int,
+        accepted: int,
+        hidden: mx.array,
+        target_tokens: Any,
+        target_ids: Any,
+        target_lps: Any,
+        replay_snapshot: Any,
+        acceptance_rows: Any,
+        sampler: Any,
+        *,
+        copy: bool = False,
+    ) -> None:
+        """Commit one verified window (head or copied drafts): queue tokens,
+        roll back on rejection, align the head cache and draft the next window.
+        ``copy`` only keeps copied windows out of the head's accept/reject counts."""
         if accepted == depth:
-            state.stats.accepts += 1
+            if not copy:
+                state.stats.accepts += 1
             _native_mtp_clear_rollback(cache)
             for draft_id, draft_lp in zip(state.draft_ids, state.draft_lps):
                 state.queue.append((draft_id, draft_lp, "draft"))
@@ -18708,10 +18799,11 @@ class MLLMBatchGenerator:
                     commit_hidden,
                     commit_tokens,
                     state.mtp_cache,
-                    state.depth,
+                    self._native_mtp_head_depth_for_next(request, state),
                     state.stats,
                 )
                 state.head_chain_pairs = max(0, len(state.drafts) - 1)
+                self._native_mtp_apply_copy(state)
                 return
             # The head cache accumulated across accepted cycles is GAPPY: each
             # cycle emits draft + bonus but only the draft passes through the
@@ -18733,12 +18825,14 @@ class MLLMBatchGenerator:
                 next_hidden,
                 bonus_tok,
                 state.mtp_cache,
-                state.depth,
+                self._native_mtp_head_depth_for_next(request, state),
                 state.stats,
             )
+            self._native_mtp_apply_copy(state)
             return
 
-        state.stats.rejects += 1
+        if not copy:
+            state.stats.rejects += 1
         accepted_drafts = state.drafts[:accepted]
         skipped_replay = False
         if _NATIVE_MTP_SKIP_REPLAY and accepted < depth:
@@ -18835,10 +18929,11 @@ class MLLMBatchGenerator:
                 aligned_hidden,
                 aligned_tokens,
                 state.mtp_cache,
-                state.depth,
+                self._native_mtp_head_depth_for_next(request, state),
                 state.stats,
             )
             state.head_chain_pairs = max(0, len(state.drafts) - 1)
+            self._native_mtp_apply_copy(state)
             return
         if _NATIVE_MTP_RECREATE_HEAD_CACHE_ON_REJECT:
             state.mtp_cache = self.language_model.make_mtp_cache()
@@ -18859,9 +18954,10 @@ class MLLMBatchGenerator:
             replay_hidden,
             correction,
             state.mtp_cache,
-            state.depth,
+            self._native_mtp_head_depth_for_next(request, state),
             state.stats,
         )
+        self._native_mtp_apply_copy(state)
 
     def _park_native_mtp_head_for_ar(
         self, request: Any, cache: Any, state: "MLLMNativeMTPState",

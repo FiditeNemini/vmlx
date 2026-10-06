@@ -1103,6 +1103,10 @@ _VERIFY_MAX_ROWS = 4  # depth 3 + 1 bonus row
 # rows=4 (three connected turns to a 20k-token prompt, coherent) and the raw
 # API tool probe on the same app engine (3/3 calls with arguments).
 _DEFAULT_GROUP_ROWS = _VERIFY_MAX_ROWS
+# Widest GDN piece of a verify window whose conv/recurrence arithmetic is
+# proven bit-identical to single-token decode; wider windows are chained in
+# pieces of this size (GatedDeltaNet._process_rows_exact).
+_GDN_EXACT_PIECE_ROWS = 4
 
 
 def _gdn_group_max_rows() -> int:
@@ -1244,6 +1248,39 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             use_kernel=not self.training,
         )
         return out, new_conv_state, new_ssm_state
+
+    def _process_rows_exact(self, qkv, a, b, conv_state, ssm_state, mask=None):
+        """``_process_chunk`` over verify rows in pieces of at most
+        ``_GDN_EXACT_PIECE_ROWS`` rows, carrying conv/recurrent state between
+        pieces.
+
+        Why: a verify window must reproduce, row for row, the arithmetic of
+        single-token decode.  ``_process_chunk``'s depthwise ``conv1d`` and the
+        recurrence match the decode path bit for bit for short chunks, but MLX
+        changes its convolution algorithm for longer inputs, so wider verify
+        windows (copy drafts verify up to 16 rows) diverged from decode
+        (measured on Qwen3.8-Flash-Next-CRACK-4M: exact through 5 rows,
+        first divergence at 6 rows in layer 17's GDN output, which flipped a
+        greedy token).  A piece of <= 4 rows is the shape every existing
+        exactness test covers; chaining pieces is the same recurrence, so the
+        whole window stays exact.  Piece boundaries cost one extra small
+        conv + recurrence launch per piece; projections are untouched.
+        """
+        rows = qkv.shape[1]
+        step = _GDN_EXACT_PIECE_ROWS
+        if rows <= step:
+            return self._process_chunk(qkv, a, b, conv_state, ssm_state, mask)
+        outs = []
+        conv_f, ssm_f = conv_state, ssm_state
+        for start in range(0, rows, step):
+            end = min(rows, start + step)
+            piece, conv_f, ssm_f = self._process_chunk(
+                qkv[:, start:end], a[:, start:end], b[:, start:end],
+                conv_f, ssm_f,
+                mask[:, start:end] if mask is not None else None,
+            )
+            outs.append(piece)
+        return mx.concatenate(outs, axis=1), conv_f, ssm_f
 
     def __call__(
         self,
@@ -1402,7 +1439,7 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
                     _m=draft_mask,
                     _self=self,
                 ):
-                    _, conv_k, ssm_k = _self._process_chunk(
+                    _, conv_k, ssm_k = _self._process_rows_exact(
                         _q[:, :count],
                         _a[:, :count],
                         _b[:, :count],
@@ -1413,7 +1450,7 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
                     return conv_k, ssm_k
 
                 cache.rollback_to = rollback_to
-            out_d, conv_f, ssm_f = self._process_chunk(
+            out_d, conv_f, ssm_f = self._process_rows_exact(
                 qkv[:, n_confirmed:],
                 a[:, n_confirmed:],
                 b[:, n_confirmed:],

@@ -57,7 +57,7 @@ def qsa_score_reduce(dots, *, head_dim, enabled):
             or head_dim <= 0 or dots.shape[1] < 1 or dots.shape[3] < 1):
         return None
     if (_failed or mx.default_device() != mx.gpu
-            or mx.__version__ != "0.32.2"):
+            or mx.__version__ not in ("0.32.2", "0.32.3")):
         return None
     rows, pools = int(dots.shape[1]), int(dots.shape[3])
     return _launch(dots, head_dim, rows, pools)

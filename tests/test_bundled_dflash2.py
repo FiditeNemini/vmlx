@@ -31,3 +31,17 @@ def test_cli_exposes_the_opt_out():
     command = [sys.executable, "-m", "vmlx_engine.cli", "ser" + "ve", "--help"]
     out = subprocess.run(command, check=True, capture_output=True, text=True).stdout
     assert "--no-bundled-dflash2" in out
+
+
+def test_malformed_architecture_is_not_a_bundled_drafter(tmp_path):
+    bundle = tmp_path / "target"
+    for architecture in ("DFlash2DraftModel", "NotDFlash2DraftModel", {"DFlash2DraftModel": True}):
+        _write(bundle / "dflash2" / "config.json", {"architectures": architecture})
+        assert find_bundled_dflash2(str(bundle)) is None
+
+
+def test_empty_model_path_does_not_scan_working_directory(tmp_path, monkeypatch):
+    _write(tmp_path / "dflash2" / "config.json", {"architectures": ["DFlash2DraftModel"]})
+    monkeypatch.chdir(tmp_path)
+    for model_path in ("", "   ", None):
+        assert find_bundled_dflash2(model_path) is None

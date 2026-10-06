@@ -89,7 +89,8 @@ def _is_dflash2_model(model: str) -> bool:
     if path.is_dir():
         try:
             config = json.loads((path / "config.json").read_text())
-            return "DFlash2DraftModel" in (config.get("architectures") or [])
+            architectures = config.get("architectures")
+            return isinstance(architectures, list) and "DFlash2DraftModel" in architectures
         except Exception:
             return False
     return "dflash2" in model.lower()
@@ -101,7 +102,10 @@ def find_bundled_dflash2(model_path: str) -> str | None:
     Any immediate subfolder whose config.json declares DFlash2DraftModel
     (convention: ``<bundle>/dflash2``). Bundles without one return None.
     """
-    root = Path(str(model_path or "")).expanduser()
+    model_path = str(model_path or "").strip()
+    if not model_path:
+        return None
+    root = Path(model_path).expanduser()
     if not root.is_dir():
         return None
     try:

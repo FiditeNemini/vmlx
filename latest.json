@@ -1,21 +1,21 @@
 {
-  "version": "1.6.73",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.73/vMLX-1.6.73-tahoe-arm64.dmg",
-  "sha256": "33910313a1ca6dfc96028fbe8fb22233f314765398b00aa292fadd1f24f7d6f1",
-  "sha512": "BSH7QVxmlzpZQGbIsBTTxcTFnRJyIXD3rOGyAkqCrBx4DFPwD0zja6YbUrQtUWw09tyTUKJ3mRNLnsWTRSIYwA==",
+  "version": "1.6.74",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.74/vMLX-1.6.74-tahoe-arm64.dmg",
+  "sha256": "758ee02459a2887d253f25de33a6964de031833557d887f5f968c140e3e458dc",
+  "sha512": "2tMcXdCS3NXeFelaJ03JDMptm3BOtb8cNpTuic7qybmm7Vt6iQR5fX/5h+qeaV34wjsQVvzpCZyIzDJ2PEuJJQ==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.73/vMLX-1.6.73-sequoia-arm64.dmg",
-      "bytes": 573431276,
-      "sha256": "63d8194572545cef907470e88ea84e09236d1c1fe5c45f085ca12bce83502737",
-      "sha512": "qaBVBCx28Uvh1Ovso20nkivzLA0ZSSic2VD9vI1/SrlDHZD6LyJtXy6hGQJITlEXh/gO4q/GTCvcYh4z5LSNkA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.74/vMLX-1.6.74-sequoia-arm64.dmg",
+      "bytes": 573316053,
+      "sha256": "13e83ef4d7d27d2ec37b3031bc1dbd429b582dbf552a622c39b3021134f71d90",
+      "sha512": "cWMRRIjri9aTRSMEpn06xi6p3GABJQUZ5zWKi4Xlf1zi3jaF2rQEYokAsrChiLkjbU+8VJpdvAgiaR235VnBbg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.73/vMLX-1.6.73-tahoe-arm64.dmg",
-      "bytes": 598961318,
-      "sha256": "33910313a1ca6dfc96028fbe8fb22233f314765398b00aa292fadd1f24f7d6f1",
-      "sha512": "BSH7QVxmlzpZQGbIsBTTxcTFnRJyIXD3rOGyAkqCrBx4DFPwD0zja6YbUrQtUWw09tyTUKJ3mRNLnsWTRSIYwA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.74/vMLX-1.6.74-tahoe-arm64.dmg",
+      "bytes": 598941648,
+      "sha256": "758ee02459a2887d253f25de33a6964de031833557d887f5f968c140e3e458dc",
+      "sha512": "2tMcXdCS3NXeFelaJ03JDMptm3BOtb8cNpTuic7qybmm7Vt6iQR5fX/5h+qeaV34wjsQVvzpCZyIzDJ2PEuJJQ=="
     }
   },
-  "notes": "# vMLX 1.6.73\n\nThis release improves GLM 5.3 Flash and Naive N0.5 loading, native caching, reasoning controls and streamed responses, and updates the macOS runtime to MLX 0.32.3 with JANG 2.5.49.\n\n- Preserve native prose and tool-call boundaries in streamed Chat and Responses output, including code examples.\n- Normalize supported reasoning-effort values consistently before forwarding them to native model templates; reject malformed nested effort types.\n- Reuse the longest valid Naive sliding-window checkpoint after cache normalization and compact detached prompt snapshots.\n- Avoid duplicate GLM disk-checkpoint reconstruction and release completed SSD companion payloads promptly.\n- Preserve configured allocator limits during multimodal generation.\n- Report completed Naive prefill timing and keep tool-turn timing statistics scoped to the exchange.\n- Preserve qualified GLM and Qwen prefill/decode paths with MLX 0.32.3.\n\nPerformance depends on model, quantization, context and hardware. Experimental JANGH weighted-prefill reduction and GLM DSA score tiling remain opt-in; this release does not promise universal throughput gains or eliminate model-owned answer-quality limitations.\n\nTahoe is the default macOS build; Sequoia is the compatibility build. Both Apple Silicon DMGs are Developer ID signed, notarized and stapled. Python wheel and source distributions accompany the release."
+  "notes": "# vMLX 1.6.74\n\nQwen Flash Next improvements for affine and JANGH bundles, with adaptive native MTP and fused execution paths. User sampling settings are preserved; drafting adapts to measured overhead. Gains depend on hardware, power mode and workload.\n\n- SSD prefix and native recurrent-state reuse across tool continuations, with cache writes settled before terminal delivery and accurate cache-capacity notices.\n- Image/video history and tool continuation checks on the packaged Flash Next affine 4M and JANGH4 builds.\n- Negotiated Chat streaming timing, accurate missing-TTFT handling, tool durations, and clearer prefill and power-mode settings.\n- Authenticated HTTP MCP compatibility with MCP SDK 2, while preserving legacy SDK support.\n- Corrected translated Adaptive guidance and restored collection of five prefill/cache test modules.\n\nIncludes MLX 0.32.3 and JANG 2.5.49. This release does not promise a universal AR/MTP speed floor or qualify every quantization and context length.\n\nDownload the Sequoia compatibility build or the Tahoe build for your macOS version. Python: `pip install --upgrade vmlx==1.6.74`."
 }

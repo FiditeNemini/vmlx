@@ -95,3 +95,12 @@ def test_clear_removes_entries(ssd):
     assert ssd.flush()
     assert ssd.clear() > 0
     assert _take(ssd, tokens + [IM_START]) is None
+
+
+def test_empty_draft_cache_is_stored_without_draft_state(ssd):
+    tokens = [IM_START, 1, IM_END]
+    ssd.put({"kind": "turn", "tokens": tokens, "cache_len": 2, "target_cache": _target(2),
+             "draft_cache": [RotatingKVCache(max_size=4)], "draft_hidden_gap": None})   # never ran
+    assert ssd.flush()
+    got = _take(ssd, tokens + [IM_START])
+    assert got is not None and got["draft_cache"] is None and got["cache_len"] == 2

@@ -153,10 +153,19 @@ class DFlash2SessionSSD:
         _pack("t", entry["target_cache"], arrays, target_layers)
         draft_layers = None
         if entry.get("draft_cache") is not None:
-            draft_layers = []
-            _pack("d", entry["draft_cache"], arrays, draft_layers)
-            if entry.get("draft_hidden_gap") is not None:
-                arrays["gap"] = entry["draft_hidden_gap"]
+            # A drafter cache that never ran (e.g. a max_tokens=1 request) has empty layers whose
+            # `state` raises; store the entry without drafter state (it is rebuilt on resume).
+            try:
+                d_arrays: dict = {}
+                d_layers: list = []
+                _pack("d", entry["draft_cache"], d_arrays, d_layers)
+            except (AttributeError, TypeError):
+                d_layers = None
+            if d_layers is not None:
+                arrays.update(d_arrays)
+                draft_layers = d_layers
+                if entry.get("draft_hidden_gap") is not None:
+                    arrays["gap"] = entry["draft_hidden_gap"]
         tokens = [int(t) for t in entry["tokens"]]
         arrays["tokens"] = mx.array(tokens, dtype=mx.uint32)
         # Evaluate on the generation thread; the writer only copies bytes.

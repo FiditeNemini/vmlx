@@ -4090,7 +4090,7 @@ class TestXMLFunctionDoubledWrapperRecovery:
             XMLFunctionToolParser,
         )
 
-        return XMLFunctionToolParser.__new__(XMLFunctionToolParser)
+        return XMLFunctionToolParser(None)
 
     def test_recovers_the_real_call_and_miskeyed_parameter(self):
         import json
@@ -4265,7 +4265,7 @@ class TestMiskeyedParameterWithProperName:
         )
 
         return [QwenToolParser.__new__(QwenToolParser),
-                XMLFunctionToolParser.__new__(XMLFunctionToolParser)]
+                XMLFunctionToolParser(None)]
 
     def test_miskeyed_parameter_recovered_on_both_routes(self):
         import json
@@ -4318,7 +4318,7 @@ class TestSplitKeyParameterVariant:
         )
 
         return [QwenToolParser.__new__(QwenToolParser),
-                XMLFunctionToolParser.__new__(XMLFunctionToolParser)]
+                XMLFunctionToolParser(None)]
 
     def test_split_key_parameter_recovered_on_both_routes(self):
         import json

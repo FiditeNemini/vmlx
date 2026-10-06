@@ -67,7 +67,7 @@ async def test_request_preparation_preserves_native_history_order(tmp_path, monk
         request = ChatCompletionRequest(model='test', messages=messages, enable_thinking=thinking)
         handler = server.create_chat_completion
     else:
-        monkeypatch.setattr(server, '_responses_get_history', lambda response_id: messages[:3])
+        monkeypatch.setattr(server, '_responses_get_history', lambda response_id, *, required=False: messages[:3])
         request = ResponsesRequest(model='test', previous_response_id='prior', input=messages[3:], enable_thinking=thinking)
         handler = server.create_response
     with pytest.raises(Prepared):
@@ -230,7 +230,7 @@ async def test_responses_restored_history_and_instructions_keep_associations(his
     monkeypatch.setattr(server, '_model_path', str(tmp_path))
     monkeypatch.setattr(server, '_resolve_model_name', lambda: 'test')
     monkeypatch.setattr(server, 'get_engine', lambda: SimpleNamespace(is_mllm=True))
-    monkeypatch.setattr(server, '_responses_get_history', lambda response_id: history[:2])
+    monkeypatch.setattr(server, '_responses_get_history', lambda response_id, *, required=False: history[:2])
     class Prepared(Exception):pass
     def capture(messages):
         assert [m['tool_call_id'] for m in messages if m['role']=='tool'] == ['a','b']

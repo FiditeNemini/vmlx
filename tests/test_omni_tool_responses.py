@@ -101,7 +101,7 @@ def test_previous_id_tool_result_with_repeated_request_instructions(monkeypatch)
         'bundle_compatible': True, 'modalities': ['text', 'image']})
     stored = {}; dispatched = []
     monkeypatch.setattr(server, '_responses_store_history', lambda identifier, messages, **kw: stored.update({identifier: messages}))
-    monkeypatch.setattr(server, '_responses_get_history', lambda identifier: stored.get(identifier))
+    monkeypatch.setattr(server, '_responses_get_history', lambda identifier, *, required=False: stored.get(identifier))
     async def dispatch(request, *args, **kwargs):
         messages = [m.model_dump(exclude_none=True) for m in request.messages]
         prepare_native_tools(request.tools, request.tool_choice, messages)

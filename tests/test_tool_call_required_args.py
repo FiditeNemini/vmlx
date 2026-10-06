@@ -215,7 +215,9 @@ def test_unavailable_name_drop_keeps_the_text_as_plain_answer(monkeypatch):
     raw = "<tool_call>" + json.dumps({"name": "not_a_tool", "arguments": {"x": 1}}) + "</tool_call>"
     text, calls = _parse_tool_calls_with_parser(raw, _request_with_strict_tool())
     assert not calls
-    assert text == raw
+    # 8e314db0: a rejected (unavailable) envelope is hidden, never revived as
+    # prose; only the visible prefix before it (here: nothing) remains.
+    assert text == ""
     assert any("not_a_tool" in d for d in _take_tool_call_drop_diagnostics())
 
 

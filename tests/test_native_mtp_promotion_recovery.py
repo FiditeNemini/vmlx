@@ -29,7 +29,8 @@ def test_scheduled_promotion_requires_winning_d1_not_attempt_budget(
     m._native_mtp_maybe_ar_safety_fallback("scheduled-recovery", state)
     expected = due and winning and ceiling > 1
     assert state.promote_probe is expected
-    assert state.depth == (ceiling if expected else 1)
+    # Promotion probes the ADJACENT rung (ef569ba0), never jumps to the ceiling.
+    assert state.depth == (2 if expected else 1)
     assert state.promotions == attempts + int(expected)
     if not winning:
         assert state.ar_fallback_pending

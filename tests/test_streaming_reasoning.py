@@ -1946,9 +1946,11 @@ class TestToolCallBufferingStructure:
         import vmlx_engine.server as server_mod
         source = inspect.getsource(server_mod.stream_chat_completion)
 
-        # Uses trailing window to catch split-chunk markers without false positives
-        assert "_reasoning_tail" in source
-        assert "_text_ends_with_tool_marker(\n                            _reasoning_tail" in source
+        # The 30-char trailing window was replaced by a structural check over the
+        # accumulated reasoning that starts at the new delta (line/quote context,
+        # split-chunk safe, no false positives from earlier mentions).
+        assert "_reasoning_has_native_tool_boundary(" in source
+        assert "len(accumulated_reasoning) - len(delta_msg.reasoning)" in source
 
     def test_deepseek_unicode_marker_in_markers_list(self):
         """DeepSeek Unicode tool call marker must be in _TOOL_CALL_MARKERS."""

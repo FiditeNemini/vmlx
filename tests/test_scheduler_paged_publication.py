@@ -43,6 +43,8 @@ def test_text_cleanup_uses_publication_boundary_before_companion(retained):
         "cache_data": [object()], "store_tokens": list(range(63)),
         "prompt_tokens": list(range(64)), "cache_key_override": list(range(63)),
         "_PERSIST": ledger, "time": time, "logger": logging.getLogger(__name__),
+        # keyword parameter of _cleanup_finished (default False) used inside the sliced block
+        "_defer_final_store_gc": False,
     })
     outcome = ledger.take("store-test")
     assert outcome["retained_tokens"] == retained

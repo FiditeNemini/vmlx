@@ -142,7 +142,11 @@ def test_selection_agreement_old_vs_new_on_random_keys():
 def test_attention_exact_rope_is_opt_in(monkeypatch):
     from vmlx_engine.models.qwen4_exp.language import _qsa_exact_rope_attn_enabled
 
-    monkeypatch.delenv("VMLX_QWEN4_EXACT_ROPE_ATTN", raising=False)
+    from vmlx_engine import qwen4_rope_policy as policy
+
+    # The option is frozen at process start (qwen4_rope_policy): default off,
+    # and a process started with VMLX_QWEN4_EXACT_ROPE_ATTN=1 reports it on.
+    monkeypatch.setattr(policy, "_EXACT_ROPE_ATTN_ENABLED", False)
     assert not _qsa_exact_rope_attn_enabled()
-    monkeypatch.setenv("VMLX_QWEN4_EXACT_ROPE_ATTN", "1")
+    monkeypatch.setattr(policy, "_EXACT_ROPE_ATTN_ENABLED", True)
     assert _qsa_exact_rope_attn_enabled()

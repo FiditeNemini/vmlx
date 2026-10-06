@@ -36,6 +36,12 @@ def test_failed_preflight_disables_without_retry(monkeypatch):
     monkeypatch.setattr(fused, "_state", "unproven")
     monkeypatch.setattr(fused, "_hardware_allowed", lambda: True)
     monkeypatch.setattr(fused.native, "_lane_unavailable_reason", lambda **kw: None)
+    # Isolate the preflight-failure logic from the build/runtime gates that
+    # ready() checks first (MLX version pin in enabled(), the optional native
+    # extension and its NAX export), which are absent in an unbuilt checkout.
+    monkeypatch.setattr(fused, "enabled", lambda: True)
+    monkeypatch.setattr(fused.native, "_EXT",
+                        SimpleNamespace(qwen4_qsa_sparse_gqa_attention_nax=lambda *a, **k: None))
     calls = []
     def fail():
         calls.append(1)

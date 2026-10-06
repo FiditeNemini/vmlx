@@ -16,7 +16,7 @@ def test_text_safety_descends_adjacent_rung_and_updates_telemetry(monkeypatch, d
     trip = SimpleNamespace(
         mtp_ms_per_tok=20.0, ar_baseline=10.0,
         reason=lambda d: f"windowed_ar_safety d{d}",
-        log_text=lambda d: f"losing d{d}",
+        log_text=lambda d, *, target_depth=0, baseline_label="AR": f"losing d{d} -> D{target_depth}",
     )
     monkeypatch.setattr(lane, "ar_safety_step", lambda *args, **kwargs: trip)
     fallback = lane._text_mtp_maybe_ar_safety_fallback("adjacent", state)

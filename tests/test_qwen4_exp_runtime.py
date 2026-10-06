@@ -30,6 +30,15 @@ def test_unified_gdn_fp16_softplus_matches_mlx_for_finite_inputs():
     assert mismatches == 0
 
 
+_UNIFIED_GDN_NOT_EXACT_ON_0323 = pytest.mark.xfail(
+    strict=True,
+    reason=("Opt-in unified GDN verify kernel (VMLX_QWEN4_UNIFIED_GDN_VERIFY, default off) is not bit-exact "
+            "against _process_chunk on MLX 0.32.3: gates match since 8c76ceab, but the fused conv/q-k RMS "
+            "order differs (prefix states differ from step 1). Kernel stays off; see ROUND2-CHANGES-AUDIT R2-06."),
+)
+
+
+@_UNIFIED_GDN_NOT_EXACT_ON_0323
 @pytest.mark.parametrize("steps", [3, 4])
 @pytest.mark.parametrize("a_dtype,dt_dtype", [
     (x, y) for x in ("float16", "bfloat16", "float32")
@@ -247,6 +256,7 @@ def _unified_gdn_layer_case(steps=4, coefficient_dtype=mx.float16):
     return layer, inputs, conv, state
 
 
+@_UNIFIED_GDN_NOT_EXACT_ON_0323
 @pytest.mark.parametrize("steps,accepted", [(3, 0), (3, 1), (4, 0), (4, 1), (4, 2)])
 @pytest.mark.parametrize("coefficient_dtype", [mx.float16, mx.bfloat16, mx.float32])
 def test_unified_gdn_layer_keeps_existing_rollback_and_auxiliary_cache(

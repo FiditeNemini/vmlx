@@ -2362,11 +2362,12 @@ class BatchedEngine(BaseEngine):
                             messages_arg, **fallback_kwargs
                         )
                         if enable_thinking is False and not tools:
-                            last_think = prompt.rfind("<think>")
+                            from ..utils.chat_template_kwargs import trailing_open_think_index
+                            # Only the generation prompt's trailing rail, never a
+                            # <think> quoted inside message content.
+                            last_think = trailing_open_think_index(prompt)
                             if last_think >= 0:
-                                after = prompt[last_think + 7:]
-                                if "</think>" not in after:
-                                    prompt = prompt[:last_think + 7] + "</think>\n"
+                                prompt = prompt[:last_think + 7] + "</think>\n"
                     return prompt
 
                 def _inject_processor_tool_fallback(prompt: str, messages_arg) -> str:

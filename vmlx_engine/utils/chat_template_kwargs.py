@@ -80,6 +80,26 @@ def build_chat_template_kwargs(
     return kwargs
 
 
+def trailing_open_think_index(prompt: str) -> int:
+    """Index of the generation prompt's open ``<think>`` rail, or -1.
+
+    A template's thinking prefill is always the very end of the rendered
+    prompt (``...assistant\n<think>\n``).  A ``<think>`` with any
+    non-whitespace after it is CONTENT -- a user quoting reasoning tags, a
+    pasted model transcript, source code -- never the rail.  The previous
+    rule (last ``<think>`` anywhere with no ``</think>`` after it) truncated
+    such prompts at the user's literal tag: measured on Qwen3.8 Flash-Next, a
+    64,442-token prompt whose content held ``<think>`` at token 54,041 had its
+    thinking-off render cut to 54,048 tokens, so the prefix-cache key and the
+    reported prompt_tokens lost the last ~10.4k tokens, and every repeat
+    re-prefilled them.
+    """
+    idx = prompt.rfind("<think>")
+    if idx < 0 or prompt[idx + len("<think>"):].strip():
+        return -1
+    return idx
+
+
 def ensure_thinking_off_sentinel(
     prompt: str,
     *,
@@ -113,7 +133,7 @@ def ensure_thinking_off_sentinel(
         and (fam == "minimax" or "minimax" in name)
     )
 
-    last_open = prompt.rfind("<think>")
+    last_open = trailing_open_think_index(prompt)
     if last_open >= 0:
         after_open = prompt[last_open + len("<think>") :]
         if "</think>" not in after_open:

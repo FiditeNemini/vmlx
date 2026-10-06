@@ -5551,8 +5551,10 @@ class MLXMultimodalLM:
             and formatted_prompt
             and self._synthesizes_thinking_prompt_when_enabled()
         ):
-            last_think = formatted_prompt.rfind("<think>")
-            has_open_unclosed = last_think >= 0 and "</think>" not in formatted_prompt[last_think:]
+            from ..utils.chat_template_kwargs import trailing_open_think_index
+            # An open rail is only the trailing generation-prompt <think>; a
+            # <think> quoted in user content must not suppress opening it.
+            has_open_unclosed = trailing_open_think_index(formatted_prompt) >= 0
             if not has_open_unclosed:
                 stripped = formatted_prompt.rstrip()
                 if stripped.endswith("assistant:"):

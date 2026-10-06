@@ -30284,9 +30284,22 @@ async def stream_responses_api(
                             f"Stream {response_id}: XML validation failed: {_err}"
                         )
         elif _rf_type in ("json_schema", "json_object") and display_text:
-            _, _pj, _valid, _err = parse_json_output(display_text, _text_fmt)
+            _strict = _text_fmt.get("json_schema", {}).get("strict", False)
+            if _strict:
+                # Streaming bytes are already delivered: extraction, syntax
+                # repair and type coercion cannot validate what the client saw.
+                from .api.tool_calling import validate_json_schema
+
+                try:
+                    _pj = json.loads(display_text)
+                    _valid, _err = validate_json_schema(
+                        _pj, _text_fmt.get("json_schema", {}).get("schema", {})
+                    )
+                except (ValueError, TypeError) as exc:
+                    _valid, _err = False, str(exc)
+            else:
+                _, _pj, _valid, _err = parse_json_output(display_text, _text_fmt)
             if not _valid:
-                _strict = _text_fmt.get("json_schema", {}).get("strict", False)
                 if _strict:
                     logger.warning(
                         f"Stream {response_id}: JSON schema validation failed (strict): {_err}"

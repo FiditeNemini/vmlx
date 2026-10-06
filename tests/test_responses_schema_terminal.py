@@ -6,7 +6,7 @@ from vmlx_engine import server
 from vmlx_engine.engine.base import GenerationOutput
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('text,expected', [('not JSON', 'response.failed'), ('{"total":"wrong type"}', 'response.failed'), ('{"total":3973}', 'response.completed')])
+@pytest.mark.parametrize('text,expected', [('not JSON', 'response.failed'), ('```json\n{"total":3973}\n```', 'response.failed'), ('{"total":"3973"}', 'response.failed'), ('{"total":"wrong type"}', 'response.failed'), ('{"total":3973}', 'response.completed')])
 async def test_strict_schema_terminal(monkeypatch, text, expected):
     class Engine:
         tokenizer = SimpleNamespace(has_thinking=False)

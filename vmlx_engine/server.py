@@ -5547,6 +5547,9 @@ _TOOL_CALL_MARKERS = [
     "<function=",
     "<parameter=",  # Native orphan parameter control must not stream as prose.
     "<minimax:tool_call>",
+    # MiniMax M2/M2.5 declare their closing tag as native control
+    # (MiniMaxToolParser.NATIVE_MARKERS); an orphan close must not stream as prose.
+    "</minimax:tool_call>",
     "]<]minimax[>[",  # MiniMax-M3 namespace separator before native XML elements
     "<dots_function_call>",  # dots3_note dots XML dialect wrapper
     "<dots_function_call",  # split-delta opener before '>' flushes
@@ -5716,6 +5719,21 @@ def _strip_tool_markup_residue_for_display(text: str) -> str:
     return re.sub(r"[ \t]*\n[ \t]*\n[ \t]*", "\n", cleaned).strip()
 
 
+def _is_complete_plain_named_json(text: str, pos: int) -> bool:
+    """True when ``text[pos:]`` starts a COMPLETE JSON object that is ordinary
+    data, not a raw tool call: it decodes, and has neither ``arguments`` nor
+    ``parameters``.  Such an object (``{"name": "demo", "ports": [...]}``) is
+    content by contract (cd4d2a2b, tests/test_plain_json_tool_identity.py); the
+    ``{"name":"`` anchor alone must not hide it.  Truncated JSON or a
+    call-shaped object keeps the fail-closed path (it may be a rejected call).
+    """
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(text, pos)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(obj, dict) and "arguments" not in obj and "parameters" not in obj
+
+
 def _visible_prefix_before_unparsed_tool_markup(
     text: str, *, minimum_partial: int = 1, preserve_whitespace: bool = False,
 ) -> str:
@@ -5737,7 +5755,7 @@ def _visible_prefix_before_unparsed_tool_markup(
         if (pos := _first_unquoted_marker_pos(text, marker)) >= 0
     ]
     raw_json_pos = text.find(_RAW_JSON_TOOL_ANCHOR)
-    if raw_json_pos >= 0:
+    if raw_json_pos >= 0 and not _is_complete_plain_named_json(text, raw_json_pos):
         marker_positions.append(raw_json_pos)
     harmony_match = re.search(r"\bto=\w[\w.]*\s+code\{", text)
     if harmony_match:

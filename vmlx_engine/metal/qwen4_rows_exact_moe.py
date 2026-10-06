@@ -24,8 +24,8 @@ Because only addressing changes, row r of the multi-row launch is bit-identical 
 row r -- by construction, and checked against W single-token decode steps on the real bundle.  The expert
 weight bytes are unchanged (each row still reads its own 10 experts); what goes away is ~10*(R-1) ops/layer.
 
-Scope: verify rows only (2..16 rows), q2-8 affine experts in the pair layout the decode path already admits
-(gate/up in one layout), the exact-down qualified shape (K640 -> N2560, top-10, fp16).  Anything else returns
+Scope: verify rows only (2..16 rows), q2-8 affine experts in any pair layout the decode path already admits
+(uniform or mixed gate/up bits/groups), the exact-down qualified shape (K640 -> N2560, top-10, fp16).  Anything else returns
 None and the caller keeps the per-row path.  VMLX_QWEN4_ROWS_EXACT_MOE=0 disables.
 """
 from __future__ import annotations
@@ -51,14 +51,14 @@ def _rowify_pair(src: str, hidden: int, top_k: int, inter: int) -> str:
     out = src.replace("uint tid = thread_position_in_grid.x;",
                       "uint tid = thread_position_in_grid.x;\n        uint trow = thread_position_in_grid.y;", 1)
     out = out.replace("expert_ids[route]", f"expert_ids[trow * {top_k}u + route]")
-    out = re.sub(r"\bx\[", f"x[trow * {hidden}u + ", out)
+    out = re.sub(r"\bx\[", f"x[trow * {hidden}u + ", out)  # both _pair_source and _pair_source_mixed
     out = out.replace("output[(size_t)route *", f"output[(size_t)trow * {top_k * inter}u + (size_t)route *")
     if out.count("trow") < 4:
         raise ValueError("pair source layout changed; refusing to build a row-indexed copy")
     return out
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=64)  # mixed-bit bundles carry several per-layer pair configs
 def _pair_rows_kernel(config):
     from .affine_moe_pair_decode import _pair_source
     src = _rowify_pair(_pair_source(config), config.hidden, config.top_k, config.intermediate)
@@ -97,7 +97,9 @@ def rows_exact_switchglu(switch: Any, x: mx.array, indices: mx.array, scores: mx
     from .affine_moe_pair_decode import _CONFIG_ATTR, _projection_reason
     from .qwen4_exact_down import _compatible_runtime
     config = getattr(switch, _CONFIG_ATTR, None)
-    if config is None or config.mixed_layout or config.clamp_limit is not None or bool(getattr(switch, "training", False)):
+    # mixed gate/up layouts (JANG_4S/6S) use _pair_source_mixed, whose addressing the same
+    # substitution rewrites; clamp_limit is the GLM-only epilogue and is not admitted here.
+    if config is None or config.clamp_limit is not None or bool(getattr(switch, "training", False)):
         return None
     rows = int(x.shape[1]) if x.ndim == 3 else 0
     down = switch.down_proj

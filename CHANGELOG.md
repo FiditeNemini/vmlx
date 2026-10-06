@@ -4,7 +4,17 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.74] - Unreleased
+## [1.6.75] - 2026-10-06
+
+- Enable bundled DFlash2 drafting automatically for compatible Qwen3.8-27B bundles, with explicit opt-out and manual drafter selection. Keep native Adaptive MTP for compatible Flash Next bundles.
+- Improve Flash Next affine/JANGH prefill and Adaptive decoding, and add fast batched verification and adaptive draft blocks for Qwen3.8-27B. Gains depend on quantization, workload and hardware; image/video turns on DFlash2 sessions use ordinary decoding.
+- Reduce long-context DFlash2 prefill memory retention and restore reusable target and drafter context from full-precision SSD snapshots. Preserve warm drafting efficiency across system-prefix reuse and restart.
+- Persist tool-turn prefixes before continuation, report actual SSD write outcomes and cached tokens, release completed writer payloads, and prevent pending writes from repopulating a cleared cache.
+- Honor reasoning efforts, nested chat-template controls and explicitly requested sampling penalties/logit bias on DFlash2 sessions without changing default sampling.
+- Support the Responses text.format schema envelope and report strict JSON validation failures honestly. Suppress incomplete trailing native tool envelopes while preserving completed tool calls.
+- Show DFlash2 cache usage and shared SSD capacity accurately; improve live tool status and keep Adaptive/Off controls clear.
+
+## [1.6.74] - 2026-10-05
 
 - Improve Qwen Flash Next affine and JANGH execution with fused kernels and adaptive native MTP. Preserve request sampling parameters and fall back toward ordinary decoding when measured drafting overhead outweighs its benefit; performance depends on the workload and hardware.
 - Preserve SSD prefix and media-cache reuse across tool continuations, and clear stale capacity notices after cache usage recovers.

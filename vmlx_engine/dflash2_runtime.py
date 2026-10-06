@@ -742,8 +742,8 @@ def _stream_generate_resumable(
 
         # Verify width per cycle (see _dflash2_block_plan / _BlockChooser):
         # the width with the best predicted tokens per measured second.
-        block_min, block_max = _dflash2_block_plan(block_size)
-        chooser = _BlockChooser(block_min, block_max, _width_costs(adapter, block_min, block_max))
+        widths = _dflash2_block_plan(block_size, _lane_flat(adapter))
+        chooser = _BlockChooser(widths, cost=_width_costs(adapter, widths))
         while n < max_tokens:
             bs = min(chooser.width, max_tokens - n + 1)
             if bs <= 1:
@@ -923,9 +923,16 @@ class _BlockChooser:
     probe_every = 32
     prior_p = 0.7
 
-    def __init__(self, low: int, high: int, cost: Optional[dict] = None):
-        self.widths = (low,) if high <= low else (low, high)
-        self.width = low
+    def __init__(self, low, high: Optional[int] = None, cost: Optional[dict] = None):
+        # ``low`` may be the whole tuple of candidate widths (from
+        # _dflash2_block_plan); (low, high) is kept for the two-width callers.
+        if isinstance(low, (tuple, list)):
+            widths = tuple(sorted(set(int(w) for w in low)))
+        else:
+            widths = (int(low),) if high is None or high <= low else (int(low), int(high))
+        self.widths = widths
+        self.width = widths[0]
+        self._last_timed: dict = {}
         top = max(self.widths)
         self.trials = [0.0] * top          # index k = draft position k (1-based)
         self.hits = [0.0] * top
@@ -971,13 +978,16 @@ class _BlockChooser:
             c = self.cost.get(width)
             self.cost[width] = seconds if c is None else c + self.cost_alpha * (seconds - c)
         self.cycles += 1
+        self._last_timed[width] = self.cycles
         if len(self.widths) == 1:
             return
         unseen = [w for w in self.widths if w not in self.cost]
         if unseen:
             self.width = unseen[0]
         elif self.cycles % self.probe_every == 0:
-            self.width = self.widths[0] if width == self.widths[1] else self.widths[1]
+            # re-time the other width measured longest ago
+            others = [w for w in self.widths if w != width]
+            self.width = min(others, key=lambda w: self._last_timed.get(w, -1))
         else:
             self.width = max(self.widths, key=lambda w: self.expected_tokens(w) / self.cost[w])
 
@@ -985,32 +995,71 @@ class _BlockChooser:
 _WIDTH_COSTS: dict = {}
 
 
-def _width_costs(adapter: Any, low: int, high: int) -> dict:
+def _width_costs(adapter: Any, widths: tuple) -> dict:
     """Process-wide measured cycle cost per verify width for one target (see _BlockChooser)."""
-    return _WIDTH_COSTS.setdefault((id(adapter), low, high), {})
+    return _WIDTH_COSTS.setdefault((id(adapter), tuple(widths)), {})
 
 
-def _dflash2_block_plan(trained_max: int) -> tuple[int, int]:
-    """(min, max) verify block for one request.
+def _lane_flat(adapter: Any) -> bool:
+    """True when every quantized projection of the target runs on the lane
+    matmul (metal/lane_qmm.py), i.e. verify cost is ~flat from 1 to 16 rows.
+    False when any dense JANGH codebook projection (jangh.dense.TQLinear) or
+    plain MLX QuantizedLinear remains: those still cost more per extra row."""
+    cached = getattr(adapter, "_vmlx_lane_flat", None)
+    if cached is not None:
+        return cached
+    flat = False
+    try:
+        import mlx.nn as nn
+        from .metal.lane_qmm import LaneQuantizedLinear
+
+        lane = other = 0
+        for _name, m in adapter._target.named_modules():
+            if isinstance(m, LaneQuantizedLinear):
+                lane += 1
+            elif isinstance(m, nn.QuantizedLinear) or type(m).__name__ == "TQLinear":
+                other += 1
+        flat = lane > 0 and other == 0
+    except Exception:
+        flat = False
+    try:
+        adapter._vmlx_lane_flat = flat
+    except Exception:
+        pass
+    return flat
+
+
+def _dflash2_block_plan(trained_max: int, lane_flat: bool = False) -> tuple:
+    """Candidate verify widths for one request, smallest first.
 
     DFlash2 drafts a whole block (``bs-1`` masked positions) in ONE drafter
     pass and verifies ``bs`` rows in one target forward, so a wider block costs
-    one wider verify while buying more tokens only when the drafter is right.
-    Default (``VMLX_DFLASH2_BLOCK`` unset or ``auto``): adaptive between 5 (the
-    measured default) and the drafter's trained maximum (8 for the Qwen3.8-27B
-    drafter). Setting VMLX_DFLASH2_BLOCK=<n> pins one fixed width for A/B.
+    one wider verify (and a slightly longer drafter pass) while buying more
+    tokens only when the drafter is right.  Default (``VMLX_DFLASH2_BLOCK``
+    unset or ``auto``): (5, trained, 2*trained), e.g. (5, 8, 16) for the
+    Qwen3.8-27B drafter, or (trained, 2*trained) when ``lane_flat``; _BlockChooser picks among them by expected tokens per
+    measured second.  2*trained follows mlx-serve, which drafts 16 positions
+    with this same block-8 drafter: the masked positions past the trained
+    block are still drafted, just with lower acceptance, and with the lane
+    matmul a 16-row verify costs about what 8 rows do.  ``<n>`` pins one width
+    (A/B tool), capped at 2*trained.
     """
     import os
     trained = max(2, int(trained_max))
     raw = os.environ.get("VMLX_DFLASH2_BLOCK", "auto").strip().lower()
     if raw not in ("", "auto"):
         try:
-            fixed = max(2, min(int(raw), trained))
-            return fixed, fixed
+            fixed = max(2, min(int(raw), 2 * trained))
+            return (fixed,)
         except ValueError:
             pass
-    low = min(5, trained)
-    return low, trained
+    if lane_flat:
+        # Verify cost is ~flat (lane matmul on every projection): width 5 is
+        # dominated by the trained width, which costs the same and drafts
+        # deeper.  Measured JANG_4D: fixed 8 prose 44.3 vs (5,8,16) 38-41,
+        # because the model sent many prose cycles to 5.
+        return (trained, 2 * trained)
+    return tuple(sorted({min(5, trained), trained, 2 * trained}))
 
 
 def stream_dflash2_generate(

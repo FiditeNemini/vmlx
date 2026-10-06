@@ -41,10 +41,13 @@ def test_clipped_final_block_is_ignored():
 
 def test_fixed_width_env(monkeypatch):
     monkeypatch.setenv("VMLX_DFLASH2_BLOCK", "8")
-    assert _dflash2_block_plan(8) == (8, 8)
+    assert _dflash2_block_plan(8) == (8,)
+    monkeypatch.setenv("VMLX_DFLASH2_BLOCK", "32")
+    assert _dflash2_block_plan(8) == (16,)                 # capped at 2x trained
     monkeypatch.setenv("VMLX_DFLASH2_BLOCK", "auto")
-    assert _dflash2_block_plan(8) == (5, 8)
-    assert _dflash2_block_plan(4) == (4, 4)
+    assert _dflash2_block_plan(8) == (5, 8, 16)
+    assert _dflash2_block_plan(4) == (4, 8)
+    assert _dflash2_block_plan(8, lane_flat=True) == (8, 16)     # flat verify cost: 5 is dominated
 
 
 def test_first_cycle_at_a_width_is_warmup_and_costs_persist_across_requests():
@@ -60,3 +63,16 @@ def test_first_cycle_at_a_width_is_warmup_and_costs_persist_across_requests():
     c2 = _BlockChooser(5, 8, shared)                       # the next request starts with measured costs
     c2.observe(5, 5, 0.05)
     assert c2.width == 8                                   # 5/5 accepted -> 8 predicted to pay at 1.2x cost
+
+
+def test_three_widths_pick_sixteen_when_cheap_and_accepted():
+    rng, c = random.Random(3), _BlockChooser((5, 8, 16))
+    seq = []
+    for _ in range(300):
+        w = c.width
+        seq.append(w)
+        accepted = 0
+        while accepted < w - 1 and rng.random() < 0.97:
+            accepted += 1
+        c.observe(w, accepted + 1, {5: 0.060, 8: 0.062, 16: 0.068}[w])
+    assert seq.count(16) > 250 and 5 in seq and 8 in seq     # still re-times the others

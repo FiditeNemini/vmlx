@@ -499,10 +499,10 @@ def test_mllm_processor_audio_outputs_are_promoted_to_request_fields():
     assert 'request.extra_kwargs.pop("audio_features", None)' in source
     assert 'request.extra_kwargs.pop("input_features", None)' in source
     assert 'request.extra_kwargs.pop("input_features_mask", None)' in source
-    assert "request.audio_codes = _ensure_mx_array(" in source
-    assert "request.audio_embeds = _ensure_mx_array(" in source
-    assert "request.audio_features = _ensure_mx_array(" in source
-    assert "request.audio_features_mask = _ensure_mx_array(" in source
+    assert "request.audio_codes = _mllm_processor_array(" in source
+    assert "request.audio_embeds = _mllm_processor_array(" in source
+    assert "request.audio_features = _mllm_processor_array(" in source
+    assert "request.audio_features_mask = _mllm_processor_array(" in source
 
 
 def test_mllm_processor_direct_loads_audio_paths_for_non_mimo_processor(tmp_path):

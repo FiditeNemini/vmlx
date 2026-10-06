@@ -114,7 +114,8 @@ def test_routed_prefill_optin_and_stock_fallback(monkeypatch):
         return mx.full((8, 4096), 17, dtype=mx.bfloat16)
     def experts(x, indices):
         return mx.ones((1, 8, 8, 4096), dtype=mx.bfloat16)
-    owner = SimpleNamespace(down_proj=None, _prefill=prefill, _experts=experts)
+    owner = SimpleNamespace(down_proj=None, _prefill=prefill, _experts=experts,
+                            _use_sorted=lambda rows, kk: rows >= 64)  # TQSwitchGLU legacy rule
     x = mx.zeros((1, 8, 4096), dtype=mx.bfloat16)
     idx = mx.zeros((1, 8, 8), dtype=mx.uint32)
     s = mx.ones((1, 8, 8))
@@ -153,7 +154,7 @@ def test_unweighted_entry_remains_independent(monkeypatch):
     pytest.importorskip('mlx.core')
     from vmlx_engine.jangh import switch
     sentinel = object()
-    owner = SimpleNamespace(_experts=lambda x, indices: sentinel)
+    owner = SimpleNamespace(_experts=lambda x, indices: sentinel, _use_sorted=lambda rows, kk: rows >= 64)
     monkeypatch.setattr(switch, 'PREFILL_REDUCE', '1')
     assert switch.TQSwitchGLU.__call__(owner, object(), object()) is sentinel
 
@@ -166,7 +167,8 @@ def test_batch_decode_and_unqualified_layout_keep_stock(monkeypatch, shape):
         raise AssertionError("non-single-sequence prefill entered candidate")
     def experts(x, ids):
         return mx.ones((*x.shape[:-1], 8, 4096), dtype=mx.bfloat16)
-    owner = SimpleNamespace(down_proj=None, _prefill=forbidden, _experts=experts)
+    owner = SimpleNamespace(down_proj=None, _prefill=forbidden, _experts=experts,
+                            _use_sorted=lambda rows, kk: rows >= 64)
     x = mx.zeros(shape, dtype=mx.bfloat16)
     ids = mx.zeros((*shape[:-1], 8), dtype=mx.uint32)
     scores = mx.ones(ids.shape)

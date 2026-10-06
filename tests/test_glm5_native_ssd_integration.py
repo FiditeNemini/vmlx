@@ -351,8 +351,11 @@ def test_failed_native_lookup_does_not_claim_disk_selection(error):
     assert request._cache_execution == {"selection": "miss", "disk_hit": False}
 
 
-def test_native_health_reports_real_pool_not_generic_blocks(tmp_path):
+def test_native_health_reports_real_pool_not_generic_blocks(tmp_path, monkeypatch):
     from vmlx_engine.server import _native_cache_status
+    # media SSD is default-on (glm5_native_media_ssd_enabled); pin the opt-out
+    # so this test keeps asserting the text-only policy surface it was written for
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_MEDIA_SSD", "0")
     native = native_facade(tmp_path)
     try:
         status = _native_cache_status(SimpleNamespace(native_glm_cache=native), family="glm5_next")

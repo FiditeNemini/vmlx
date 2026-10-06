@@ -56,7 +56,7 @@ def _compatible_sort_version() -> bool:
     # The public argpartition API does not promise this backend's order.
     # Retain stock behavior until a different MLX version is qualified.
     try:
-        return importlib.metadata.version("mlx") == "0.32.2"
+        return importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
     except importlib.metadata.PackageNotFoundError:
         return False
 

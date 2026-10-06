@@ -33,6 +33,16 @@ import pytest
 
 
 
+
+def _frames_stub(make_frames):
+    """extract_video_frames_smart stand-in honouring return_metadata (per-frame index/timestamp)."""
+    def stub(path, fps, max_frames, return_metadata=False):
+        frames = make_frames()
+        if not return_metadata:
+            return frames
+        return frames, [{"frame_index": i, "timestamp_seconds": i / (fps or 1)} for i in range(len(frames))]
+    return stub
+
 def _panel_label_is_rendered(panel_source: str, english: str) -> bool:
     """Is `english` still shown by this panel, literally or via i18n?
 
@@ -464,7 +474,7 @@ class TestBatchedEngineVideoTemplate:
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.extract_video_frames_smart",
-            lambda path, fps, max_frames: [_Frame(), _Frame()],
+            _frames_stub(lambda: [_Frame(), _Frame()]),
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.save_frames_to_temp",
@@ -492,13 +502,14 @@ class TestBatchedEngineVideoTemplate:
         )
 
         content = rewritten[0]["content"]
-        assert [part["type"] for part in content] == [
-            "image_url",
-            "image_url",
-            "text",
-        ]
-        assert content[0]["image_url"]["url"] == "/tmp/frame-0.png"
-        assert content[1]["image_url"]["url"] == "/tmp/frame-1.png"
+        # Factual frame metadata sits next to each frame (a text label before
+        # every image, framed by header/footer text), then the user's text.
+        images = [part for part in content if part["type"] == "image_url"]
+        assert [part["image_url"]["url"] for part in images] == ["/tmp/frame-0.png", "/tmp/frame-1.png"]
+        for index, part in enumerate(content):
+            if part["type"] == "image_url":
+                assert content[index - 1]["type"] == "text"
+        assert content[-1] == {"type": "text", "text": "What color?"}
         assert rewritten is not messages
 
     def test_qwen_video_frame_fallback_bounds_desktop_frames_before_image_expansion(
@@ -515,10 +526,10 @@ class TestBatchedEngineVideoTemplate:
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.extract_video_frames_smart",
-            lambda path, fps, max_frames: [
+            _frames_stub(lambda: [
                 np.zeros((1800, 2800, 3), dtype=np.uint8),
                 np.zeros((720, 480, 3), dtype=np.uint8),
-            ],
+            ]),
         )
 
         def _save(frames):
@@ -568,7 +579,7 @@ class TestBatchedEngineVideoTemplate:
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.extract_video_frames_smart",
-            lambda path, fps, max_frames: [_Frame(), _Frame()],
+            _frames_stub(lambda: [_Frame(), _Frame()]),
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.save_frames_to_temp",
@@ -747,7 +758,7 @@ class TestBatchedEngineVideoTemplate:
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.extract_video_frames_smart",
-            lambda path, fps, max_frames: [object(), object(), object(), object()],
+            _frames_stub(lambda: [object(), object(), object(), object()]),
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.save_frames_to_temp",
@@ -808,7 +819,7 @@ class TestBatchedEngineVideoTemplate:
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.extract_video_frames_smart",
-            lambda path, fps, max_frames: [object(), object(), object(), object()],
+            _frames_stub(lambda: [object(), object(), object(), object()]),
         )
         monkeypatch.setattr(
             "vmlx_engine.models.mllm.save_frames_to_temp",
@@ -9597,7 +9608,7 @@ class TestStartupCompatibilityGuards:
     def test_bundle_selects_native_mlx_wheels_with_compat_override(self):
         """Bundling can select Sequoia-compatible or Tahoe-native MLX wheels."""
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
-        assert 'MLX_VERSION="0.32.2"' in bundle_script
+        assert 'MLX_VERSION="0.32.3"' in bundle_script  # 1.6.74 moved to MLX 0.32.3
         assert 'MLX_LM_VERSION="0.31.3"' in bundle_script
         assert 'MLX_VLM_VERSION="0.5.0"' in bundle_script
         assert 'detect_mlx_wheel_platform()' in bundle_script

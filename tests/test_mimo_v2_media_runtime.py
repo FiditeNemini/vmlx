@@ -707,6 +707,9 @@ def test_mimo_v2_media_prefill_does_not_forward_processor_attention_mask(
         # the chunked/single-shot branch choice); a 3-token span is far below
         # its deep-context gate, so a no-op stands in for the real method.
         _turn_peak_walk_admit=lambda final_ctx, request=None: None,
+        # class-level default on MLLMBatchGenerator; the image-request cache
+        # limit helper reads it during vision encoding
+        _steady_cache_limit=None,
     )
     # The media forward now goes through _media_forward, which chunks when the
     # family exposes an embeddings seam and otherwise makes exactly the same

@@ -72,6 +72,9 @@ def test_dense_linear_rows_equal_single_row_gemv(dtype, shape):
 
 
 def test_scope_routes_quantized_and_dense_linears_only_inside_verify(monkeypatch):
+    # process-global dense row-invariant mode (set by set_row_exact_family in other tests)
+    # intercepts nn.Linear before the verify routing this test counts
+    monkeypatch.setitem(R._DENSE_ROW_INVARIANT, "on", False)
     monkeypatch.delenv("VMLX_ROW_EXACT_VERIFY_QMV", raising=False)
     q = nn.QuantizedLinear(512, 256, bias=False, group_size=64, bits=4)
     q.set_dtype(mx.float16)  # the kernel serves fp16/bf16 activations

@@ -91,7 +91,7 @@ for (uint rank = lane; rank < length; rank += THREADS) {
 @lru_cache(maxsize=1)
 def _compatible_sort_version() -> bool:
     try:
-        return importlib.metadata.version("mlx") == "0.32.2"
+        return importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
     except importlib.metadata.PackageNotFoundError:
         return False
 

@@ -10928,7 +10928,7 @@ class MLLMBatchGenerator:
         """
         model_type = str(getattr(self, "_model_type", "") or "").lower()
         if not _mllm_media_prefix_cache_family_enabled(
-            model_type, mimo_v26_runtime=getattr(self.model, "_mimo_v26_runtime", False),
+            model_type, mimo_v26_runtime=getattr(getattr(self, "model", None), "_mimo_v26_runtime", False),
         ):
             return False
         if getattr(request, "_bypass_prefix_cache", False):

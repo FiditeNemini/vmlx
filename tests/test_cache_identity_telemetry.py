@@ -32,6 +32,7 @@ class _FakeDisk:
 
     def store(self, key, states, is_complete, token_ids, num_tokens):
         self.entries[key] = (states, is_complete)
+        return True  # the real store returns whether the write queue accepted it
 
     def fetch(self, key):
         return self.entries.get(key)

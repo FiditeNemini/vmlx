@@ -72,7 +72,7 @@ def test_forced_text_only_capabilities_override_native_and_generic_detection(nat
 def test_forced_text_only_rejects_restored_response_media(native_bundle, monkeypatch):
     from fastapi.testclient import TestClient
     server, calls = native_bundle
-    monkeypatch.setattr(server, "_responses_get_history", lambda _: [
+    monkeypatch.setattr(server, "_responses_get_history", lambda _, *, required=False: [
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]},
         {"role": "assistant", "content": "previous answer"}])
     client = TestClient(server.app)

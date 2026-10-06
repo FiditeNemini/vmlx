@@ -224,20 +224,10 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
                 draft_model = dflash_runtime.load_draft(resolved_draft)
             finally:
                 dflash_runtime.snapshot_download = original_download
-            # 4-bit drafter weights, EXCEPT the candidate selector's
-            # predecessor/successor codebooks (two 248,320 x 256 nn.Embedding
-            # tables).  Their pairwise edge scores are ADDED to the drafter's
-            # logits to pick each draft token, so 4-bit codebook error changes
-            # which candidates win; keeping them bf16 costs ~190 MB.  The
-            # target's embed_tokens/lm_head are bound later (draft.bind) and
-            # are never touched here.
-            nn.quantize(
-                draft_model,
-                group_size=64,
-                bits=4,
-                class_predicate=lambda path, module: hasattr(module, "to_quantized")
-                and not path.endswith("_codebook"),
-            )
+            # All drafter weights 4-bit, selector codebooks included: keeping
+            # the two 248,320 x 256 codebooks bf16 (+190 MB) was measured with
+            # no acceptance change (R2-21 §4), so it is not done.
+            nn.quantize(draft_model, group_size=64, bits=4)
             mx.eval(draft_model.parameters())
             draft_tokenizer = None
             _spec_kind = "dflash2"

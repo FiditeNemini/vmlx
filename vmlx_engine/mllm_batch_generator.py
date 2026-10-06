@@ -4512,6 +4512,9 @@ class MLLMNativeMTPStats:
     accepts: int = 0
     rejects: int = 0
     init_emits: int = 0
+    # tokens confirmed from copy-draft windows (native_mtp_copy); kept apart
+    # from draft_emits so the head's cycle/accept counters stay consistent
+    copy_emits: int = 0
     draft_emits: int = 0
     bonus_emits: int = 0
     verify_emits: int = 0
@@ -4604,7 +4607,8 @@ class MLLMNativeMTPStats:
             )
             depth_rates[label] = _rate(accepted, drafted)
 
-        confirmed = self.init_emits + self.draft_emits + self.bonus_emits + self.verify_emits
+        confirmed = (self.init_emits + self.draft_emits + self.bonus_emits
+                     + self.verify_emits + self.copy_emits)
         draft_head = dict(self.draft_head)
         if draft_head:
             draft_head["calls"] = int(self.draft_head_calls)
@@ -4621,6 +4625,7 @@ class MLLMNativeMTPStats:
             "rejects": int(self.rejects),
             "init_emits": int(self.init_emits),
             "draft_emits": int(self.draft_emits),
+            "copy_emits": int(self.copy_emits),
             "bonus_emits": int(self.bonus_emits),
             "verify_emits": int(self.verify_emits),
             "drafted_tokens": int(self.drafted_tokens),
@@ -5982,6 +5987,8 @@ def _native_mtp_bump_emit(state: MLLMNativeMTPState, source: str) -> None:
         state.stats.init_emits += 1
     elif source == "draft":
         state.stats.draft_emits += 1
+    elif source == "copy":
+        state.stats.copy_emits += 1
     elif source == "bonus":
         state.stats.bonus_emits += 1
     elif source == "verify":
@@ -6032,13 +6039,14 @@ def _native_mtp_log_stats(
     occupancy = ",".join(
         f"d{d}={n}" for d, n in enumerate(stats.cycles_by_depth) if d > 0 and n > 0
     )
-    emitted = stats.init_emits + stats.draft_emits + stats.bonus_emits + stats.verify_emits
+    emitted = (stats.init_emits + stats.draft_emits + stats.bonus_emits
+               + stats.verify_emits + stats.copy_emits)
     confirmed_tok_s = (
         emitted / stats.span_seconds if stats.span_seconds > 0.0 and emitted > 0 else 0.0
     )
     logger.info(
         "MLLM MTP[%s] finish=%s cycles=%d accepted=%d/%d (%.1f%%) "
-        "emits[init=%d,draft=%d,bonus=%d,verify=%d] margin_truncated=%d "
+        "emits[init=%d,draft=%d,copy=%d,bonus=%d,verify=%d] margin_truncated=%d "
         "cycles_by_depth[%s] policy=%s configured=D%d "
         "confirmed_tok_s=%.1f span_s=%.2f",
         request_id,
@@ -6049,6 +6057,7 @@ def _native_mtp_log_stats(
         rate,
         stats.init_emits,
         stats.draft_emits,
+        stats.copy_emits,
         stats.bonus_emits,
         stats.verify_emits,
         stats.margin_truncated_cycles,
@@ -7963,6 +7972,10 @@ class MLLMBatchResponse:
     finish_reason: Optional[str] = None
     prompt_cache: Optional[Callable[[], List[Any]]] = None  # Cache extraction function
     prompt_token_ids: Optional[List[int]] = None  # Original tokenized prompt for prefix key
+    # Every rendered prompt token the model actually processes (INCLUDING the
+    # generation-prompt suffix that prompt_token_ids strips for the cache key);
+    # the OpenAI-compatible usage.prompt_tokens.  None -> fall back to len(prompt_token_ids).
+    usage_prompt_tokens: Optional[int] = None
     cached_tokens: int = 0  # Number of prompt tokens served from cache
     cache_detail: str = ""  # e.g. "paged+ssm", "paged+ssm+disk", "disk"
     # Request-associated cache execution truth. This is carried on every
@@ -14650,6 +14663,9 @@ class MLLMBatchGenerator:
             # Chat templates append assistant role tokens (e.g. <|im_start|>assistant\n<think>\n)
             # at the end. The store path in mllm_scheduler._cleanup_finished() strips these
             # before storing block hashes. The fetch key here MUST match.
+            # usage.prompt_tokens = every token the model processes, before the
+            # cache-key strip below (which only shapes the prefix-cache key).
+            req._usage_prompt_tokens = len(_all_tokens)
             _gpl = getattr(req, '_gen_prompt_len', 0)
             if _gpl > 0 and _gpl < len(_all_tokens):
                 # Capture the gen-prefix tokens BEFORE trimming so the
@@ -18448,7 +18464,7 @@ class MLLMBatchGenerator:
             return
         self._abandon_pending_native_mtp_verify(state, cache)
         residual_drafts = sum(
-            1 for _token, _logprobs, source in state.queue if source == "draft"
+            1 for _token, _logprobs, source in state.queue if source in ("draft", "copy")
         )
         if residual_drafts <= 0:
             return
@@ -18464,7 +18480,7 @@ class MLLMBatchGenerator:
         visible_drafts = [
             mx.array([int(token)], dtype=mx.uint32)
             for token, source in state.terminal_emitted
-            if source == "draft"
+            if source in ("draft", "copy")
         ]
         confirmed_tokens = [base_token] + visible_drafts
         state.stats.replay_main_forwards += 1
@@ -18765,7 +18781,7 @@ class MLLMBatchGenerator:
                 state.stats.accepts += 1
             _native_mtp_clear_rollback(cache)
             for draft_id, draft_lp in zip(state.draft_ids, state.draft_lps):
-                state.queue.append((draft_id, draft_lp, "draft"))
+                state.queue.append((draft_id, draft_lp, "copy" if copy else "draft"))
             bonus_tok = target_tokens[depth]
             bonus_id = int(target_ids[depth])
             state.queue.append((bonus_id, target_lps[depth], "bonus"))
@@ -18874,7 +18890,7 @@ class MLLMBatchGenerator:
                 raise RuntimeError("native MTP cache rejected rollback")
             _native_mtp_trace_stop(state.stats, "restore_ms", trace_t0)
         for draft_id, draft_lp in zip(state.draft_ids[:accepted], state.draft_lps[:accepted]):
-            state.queue.append((draft_id, draft_lp, "draft"))
+            state.queue.append((draft_id, draft_lp, "copy" if copy else "draft"))
         correction = target_tokens[accepted]
         correction_id = int(target_ids[accepted])
         if accepted < len(state.draft_lps) and accepted < len(target_lps):
@@ -19855,6 +19871,7 @@ class MLLMBatchGenerator:
                             else req.input_ids.tolist() if req.input_ids is not None
                             else [])
                     ),
+                    usage_prompt_tokens=getattr(req, '_usage_prompt_tokens', None),
                     prefill_usage=getattr(req, '_prefill_usage', None),
                     cached_tokens=getattr(req, '_cached_tokens', 0),
                     cache_detail=getattr(req, '_cache_detail', "") or "",

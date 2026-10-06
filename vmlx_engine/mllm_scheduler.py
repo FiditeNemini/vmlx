@@ -3426,7 +3426,10 @@ class MLLMScheduler:
                 for resp in burst:
                     prompt_ids = getattr(resp, "prompt_token_ids", None)
                     if prompt_ids:
-                        request.num_prompt_tokens = len(prompt_ids)
+                        # usage counts every processed token incl. the
+                        # generation-prompt suffix the cache key strips
+                        request.num_prompt_tokens = int(
+                            getattr(resp, "usage_prompt_tokens", None) or len(prompt_ids))
                         break
 
             tokens = [int(resp.token) for resp in burst]
@@ -3565,7 +3568,10 @@ class MLLMScheduler:
             if request.num_prompt_tokens == 0:
                 prompt_ids = getattr(response, "prompt_token_ids", None)
                 if prompt_ids:
-                    request.num_prompt_tokens = len(prompt_ids)
+                    # usage counts every processed token incl. the
+                    # generation-prompt suffix the cache key strips
+                    request.num_prompt_tokens = int(
+                        getattr(response, "usage_prompt_tokens", None) or len(prompt_ids))
 
             # Error responses carry a placeholder, not a sampled token. Do
             # not count or detokenize it, including errors after real output.

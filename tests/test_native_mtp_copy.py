@@ -56,3 +56,18 @@ def test_two_first_token_misses_silence_the_proposer():
 def test_self_position_is_never_a_candidate():
     p = _proposer(list(range(500, 500 + NGRAM + 10)))   # no repeat anywhere
     assert p.propose(room=10) == []
+
+
+def test_copy_emits_are_counted_apart_from_head_drafts_and_rewound_like_drafts():
+    import inspect
+    from types import SimpleNamespace
+    import vmlx_engine.mllm_batch_generator as g
+
+    stats = g.MLLMNativeMTPStats()
+    state = SimpleNamespace(stats=stats)
+    for source in ("init", "draft", "copy", "copy", "bonus", "verify"):
+        g._native_mtp_bump_emit(state, source)
+    assert (stats.draft_emits, stats.copy_emits) == (1, 2)
+    # the terminal-boundary rewind must treat copied tokens as accepted drafts
+    src = inspect.getsource(g.MLLMBatchGenerator._rewind_native_mtp_terminal_boundary)
+    assert src.count('source in ("draft", "copy")') == 2

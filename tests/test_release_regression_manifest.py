@@ -16556,3 +16556,18 @@ def test_scoped_dflash_release_requires_all_models_and_live_owners(tmp_path, mon
     data['exclusions'] = []
     data['models'].remove('qwen27b-dflash2-jangh2')
     assert validate()['status'] == 'fail'
+
+
+def test_scoped_capture_reader_requires_real_chunk_payloads_and_terminal():
+    from tests.cross_matrix.run_release_regression_manifest import _is_captured_chat_event_stream
+    rows = [
+        {"seconds": 0.1, "data": json.dumps({"id": "chat-1", "object": "chat.completion.chunk", "choices": [{"delta": {"content": "hi"}, "finish_reason": None}]})},
+        {"seconds": 0.2, "data": json.dumps({"id": "chat-1", "object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "stop"}]})},
+        {"seconds": 0.3, "data": "[DONE]"},
+    ]
+    encode = lambda values: "\n".join(json.dumps(x) for x in values).encode()
+    assert _is_captured_chat_event_stream(encode(rows))
+    assert not _is_captured_chat_event_stream(encode(rows[:-1]))
+    assert not _is_captured_chat_event_stream(encode([rows[0], rows[-1]]))
+    assert not _is_captured_chat_event_stream(b'{"status":"PASS","summary":"all good"}')
+    assert not _is_captured_chat_event_stream(b'null')

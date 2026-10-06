@@ -450,6 +450,32 @@ SCOPED_PENDING_STAGES = [
 ]
 
 
+def _is_captured_chat_event_stream(raw: bytes) -> bool:
+    """Recognize the timestamped, unmodified SSE data payload capture format.
+
+    This is an existing live recorder format, not a summary or reconstructed
+    response. Require actual Chat chunks and the stream terminator.
+    """
+    try:
+        rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        if len(rows) < 2 or rows[-1].get("data") != "[DONE]":
+            return False
+        terminal = False
+        for row in rows[:-1]:
+            if not isinstance(row.get("seconds"), (int, float)) or row["seconds"] < 0:
+                return False
+            payload = json.loads(row["data"])
+            if payload.get("object") != "chat.completion.chunk" or not payload.get("id"):
+                return False
+            choices = payload.get("choices")
+            if not isinstance(choices, list):
+                return False
+            terminal |= any(choice.get("finish_reason") is not None for choice in choices)
+        return terminal
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def validate_scoped_prepackage(
     root: Path, path: Path, *, provenance: dict, expected_version: str,
 ) -> dict:
@@ -588,7 +614,9 @@ def validate_scoped_prepackage(
                 if not any(verified_files[d].read_bytes().startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
                            for d in proof["visual"]):
                     raise ValueError(f"{owner}: visual proof requires actual image bytes")
-                if not any(b"data:" in verified_files[d].read_bytes() for d in proof["api"]):
+                if not any(b"data:" in (raw := verified_files[d].read_bytes())
+                           or (expanded and _is_captured_chat_event_stream(raw))
+                           for d in proof["api"]):
                     raise ValueError(f"{owner}: API proof requires raw streaming capture")
             for failure in entry.get("resolved_failures", []):
                 old = bound_file(failure["original"])

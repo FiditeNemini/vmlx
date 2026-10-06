@@ -6644,6 +6644,8 @@ class MLXMultimodalLM:
                         finish_reason=getattr(chunk, "finish_reason", None),
                         prompt_tokens=int(getattr(chunk, "prompt_tokens", 0) or 0),
                         completion_tokens=token_count,
+                        cached_tokens=int(getattr(chunk, "cached_tokens", 0) or 0),
+                        cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
                     )
 
                 if not stats_logged:

@@ -501,6 +501,7 @@ def _stream_generate_resumable(
         )
         if resume is not None:
             resume["model_key"] = model_key
+            resume["source"] = "dflash2-ssd"
             logger.info(
                 "DFlash2 SSD hit: %s entry, %d of %d prompt tokens restored in %.2fs",
                 resume["kind"], resume["cache_len"], len(prompt_list), resume["load_s"],
@@ -524,6 +525,17 @@ def _stream_generate_resumable(
         cache_len = 0
         delta = prompt_arr
         stored_draft_cache = None
+
+    # Usage reporting: how many prompt tokens came from the session store
+    # (RAM or SSD), carried on every response as cached_tokens/cache_detail.
+    _cached = int(cache_len)
+    _detail = (resume.get("source", "dflash2-ram") if resume is not None else "")
+
+    def _respond(*args):
+        r = runtime._make_response(*args)
+        r.cached_tokens = _cached
+        r.cache_detail = _detail
+        return r
 
     draft.bind(adapter)
     _target_can_trim = runtime.can_trim_prompt_cache(target_cache)
@@ -721,13 +733,13 @@ def _stream_generate_resumable(
             detokenizer.add_token(token)
             detokenizer.finalize()
             _checkpoint()
-            yield runtime._make_response(
+            yield _respond(
                 detokenizer.last_segment, [token], None, prompt_arr.size, prompt_tps, n, tic, "stop"
             )
             return
 
         detokenizer.add_token(token)
-        yield runtime._make_response(
+        yield _respond(
             detokenizer.last_segment,
             [token],
             None,
@@ -817,7 +829,7 @@ def _stream_generate_resumable(
                 cycle_committed = bs
                 cycle_kept = len(new_tokens)
                 _checkpoint()
-                resp = runtime._make_response(
+                resp = _respond(
                     detokenizer.last_segment,
                     new_tokens,
                     len(new_tokens),
@@ -840,7 +852,7 @@ def _stream_generate_resumable(
             if n // 256 > previous_n // 256:
                 mx.clear_cache()
 
-            resp = runtime._make_response(
+            resp = _respond(
                 detokenizer.last_segment,
                 new_tokens,
                 len(new_tokens),
@@ -870,7 +882,7 @@ def _stream_generate_resumable(
 
         detokenizer.finalize()
         _checkpoint()
-        yield runtime._make_response(
+        yield _respond(
             detokenizer.last_segment,
             [],
             None,

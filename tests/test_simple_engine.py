@@ -249,6 +249,29 @@ class TestSimpleEngineConcurrency:
                 ):
                     pass
 
+    @pytest.mark.asyncio
+    async def test_mllm_stream_chat_reports_cached_tokens(self):
+        """Prompt reuse reported by the MLLM path (DFlash2 session store, VLM prompt cache)
+        reaches GenerationOutput.cached_tokens; it was dropped, so usage never showed reuse."""
+        from vmlx_engine.engine.simple import SimpleEngine
+        from vmlx_engine.models.mllm import MLLMOutput
+
+        model = MagicMock()
+        model.stream_chat.return_value = iter([
+            MLLMOutput(text="a", prompt_tokens=100, completion_tokens=1, cached_tokens=97,
+                       cache_detail="dflash2-ssd"),
+            MLLMOutput(text="b", finish_reason="stop", prompt_tokens=100, completion_tokens=2,
+                       cached_tokens=97, cache_detail="dflash2-ssd"),
+        ])
+        with patch("vmlx_engine.engine.simple.is_mllm_model", return_value=True):
+            engine = SimpleEngine("test-vlm")
+            engine._model = model
+            engine._loaded = True
+            outs = [o async for o in engine.stream_chat(
+                messages=[{"role": "user", "content": "hi"}], max_tokens=4)]
+        assert outs[-1].cached_tokens == 97 and outs[-1].cache_detail == "dflash2-ssd"
+        assert outs[-1].prompt_tokens == 100
+
     def test_simple_engine_model_work_uses_dedicated_executor_not_to_thread(self):
         """SimpleEngine must not use arbitrary default-executor threads for MLX.
 

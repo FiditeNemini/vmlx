@@ -113,7 +113,7 @@ export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
 
         {/* Measured duration of a completed call */}
         {isDone && durationMs != null && (
-          <span className="text-muted-foreground/70 text-[10px] flex-shrink-0" title="measured from the executor's own timestamps">
+          <span className="text-muted-foreground/70 text-[10px] flex-shrink-0" title={t('chat.inlineTool.durationMeasuredTitle')}>
             {formatDurationMs(durationMs)}
           </span>
         )}

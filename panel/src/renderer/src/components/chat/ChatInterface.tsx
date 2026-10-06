@@ -731,12 +731,12 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
           onClick={async () => {
             try {
               const result = await window.api.chat.export(chatId, 'markdown')
-              if (result.success) showToast('success', 'Session exported', result.path)
+              if (result.success) showToast('success', t('chat.sessionExport.success'), result.path)
             } catch (error) {
-              showToast('error', 'Export failed', (error as Error).message)
+              showToast('error', t('chat.sessionExport.failed'), (error as Error).message)
             }
           }}
-        >Export session</button>
+        >{t('chat.sessionExport.button')}</button>
       </div>
       <MessageList
         messages={messages}

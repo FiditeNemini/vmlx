@@ -467,14 +467,22 @@ describe('SessionView chat list overlay', () => {
   })
 })
 
-describe('TitleBar narrow-width controls', () => {
+// ff7864510 moved primary navigation out of the TitleBar into the Console
+// sidebar. The narrow-width contract now lives there: the sidebar narrows
+// below 900px and collapses to an icon rail, and every mode button keeps its
+// accessible name (aria-label/title) even when its visible label is hidden.
+describe('Console sidebar narrow-width mode controls', () => {
   const titleBarSource = readFileSync('src/renderer/src/components/layout/TitleBar.tsx', 'utf8')
+  const sidebarSource = readFileSync('src/renderer/src/components/layout/ConsoleSidebar.tsx', 'utf8')
 
-  it('keeps every mode accessible while compacting labels below 720px', () => {
-    expect(titleBarSource).toContain('aria-label={label}')
-    expect(titleBarSource).toContain('title={label}')
-    expect(titleBarSource).toContain('max-[720px]:sr-only')
-    expect(titleBarSource).toContain('max-[720px]:px-2')
+  it('keeps every mode accessible while compacting labels in the narrow/collapsed sidebar', () => {
+    for (const mode of ['chat', 'server', 'models']) expect(sidebarSource).toContain(`['${mode}', `)
+    expect(sidebarSource).toContain('data-vmlx-control={`mode-${mode}`}')
+    expect(sidebarSource).toContain('title={label} aria-label={label}')
+    expect(sidebarSource).toContain('{!collapsed && <span>{label}</span>}')
+    expect(sidebarSource).toContain("max-[900px]:w-[200px]")
+    // Mode navigation must not be duplicated back into the TitleBar.
+    expect(titleBarSource).not.toContain('data-vmlx-control={`mode-')
   })
 })
 

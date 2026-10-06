@@ -29,10 +29,15 @@ describe('ready event refreshes promoted session config', () => {
       const cleanup = harness.effects[0]() as () => void
       await Promise.resolve()
       expect(list).toHaveBeenCalledTimes(1)
+      // e8b174d31 added a `ready` state (declared first) that refreshSessions
+      // sets in its finally; the sessions list setter is the second useState.
+      const [setReady, setSessions] = harness.setters
+      expect(setSessions).toHaveBeenLastCalledWith([old])
+      expect(setReady).toHaveBeenLastCalledWith(true)
       handlers.onReady({ sessionId: 'spark', pid: 42, port: 8019 })
       await Promise.resolve()
       expect(list).toHaveBeenCalledTimes(2)
-      expect(harness.setters[0]).toHaveBeenLastCalledWith([promoted])
+      expect(setSessions).toHaveBeenLastCalledWith([promoted])
       cleanup()
     } finally { vi.unstubAllGlobals() }
   })

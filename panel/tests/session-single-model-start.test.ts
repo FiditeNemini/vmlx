@@ -22,7 +22,11 @@ describe('manual session single-model enforcement', () => {
     const stopStart = source.indexOf('async stopAll(): Promise<void>')
     const stopEnd = source.indexOf('// ─── Queries', stopStart)
     const stopBlock = source.slice(stopStart, stopEnd)
-    expect(stopBlock).toContain('const processes = await this.detect()')
+    // 445c32ae9 restricted app shutdown to engines this manager owns: discovery
+    // is not ownership, so stopAll signals only its own process map and must
+    // not re-run global detection to find (and kill) other apps' engines.
+    expect(stopBlock).toContain('const owned = [...this.processes.entries()]')
+    expect(stopBlock).not.toContain('this.detect()')
     expect(stopBlock).toContain("managed.process.kill('SIGTERM')")
     expect(stopBlock).toContain("managed.process.kill('SIGKILL')")
   })

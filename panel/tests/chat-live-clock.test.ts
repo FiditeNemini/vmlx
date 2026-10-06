@@ -4,7 +4,11 @@ import { describe, expect, it } from 'vitest'
 const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 function deltaElapsed(now: number, startTime: number, fetchStartTime: number, firstTokenTime: number, generationMs: number) {
   const begin = source.indexOf('          const elapsed =')
-  const end = source.indexOf('          // TTFT measured', begin)
+  // The live delta's elapsed is a single statement; the comment that used to
+  // follow it was reworded in 0e56e7829 (exchange-scoped TTFT), so end at the
+  // statement's own line rather than at a neighbouring comment.
+  const end = source.indexOf('\n', begin)
+  expect(begin).toBeGreaterThan(0)
   return new Function('now', 'startTime', 'fetchStartTime', 'firstTokenTime', 'generationMs', source.slice(begin, end) + '\nreturn elapsed')(now, startTime, fetchStartTime, firstTokenTime, generationMs)
 }
 

@@ -2,16 +2,25 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { accumulateChatToolCallDelta, type StreamedChatToolCall } from '../src/shared/chatToolCallDeltas'
 
-function production(chunks: any[]): StreamedChatToolCall[] {
+// 0e56e7829 made the real accumulator also stamp the exchange first-token
+// clock for tool deltas that carry model-generated name/argument text (an
+// id-only chunk is transport framing, not a generated token). The harness
+// injects a recording clock so that contract is pinned alongside accumulation.
+function productionWithClock(chunks: any[]): { calls: StreamedChatToolCall[]; tokenStamps: number[] } {
   const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
   const start = source.indexOf('              if (choice?.tool_calls && Array.isArray(choice.tool_calls)) {')
   const end = source.indexOf('\n            }\n          } catch', start)
   expect(start).toBeGreaterThan(0)
   expect(end).toBeGreaterThan(start)
-  const run = new Function('choice', 'receivedToolCalls', 'uuidv4', 'console', 'accumulateChatToolCallDelta', source.slice(start,end))
+  const run = new Function('choice', 'receivedToolCalls', 'uuidv4', 'console', 'accumulateChatToolCallDelta', 'exchangeFirstTokenClock', source.slice(start,end))
   const calls: StreamedChatToolCall[] = []
-  for (const delta of chunks) run({tool_calls:[delta]},calls,()=> 'fallback-id',{log(){}},accumulateChatToolCallDelta)
-  return calls
+  const tokenStamps: number[] = []
+  const clock = { recordToken(now: number) { tokenStamps.push(now) } }
+  for (const delta of chunks) run({tool_calls:[delta]},calls,()=> 'fallback-id',{log(){}},accumulateChatToolCallDelta,clock)
+  return { calls, tokenStamps }
+}
+function production(chunks: any[]): StreamedChatToolCall[] {
+  return productionWithClock(chunks).calls
 }
 
 describe('real Chat SSE tool accumulator', () => {
@@ -38,6 +47,14 @@ describe('real Chat SSE tool accumulator', () => {
     expect(calls.map(c=>c.id)).toEqual(['a','b'])
     expect(calls[0].function.arguments).toBe('{"content":"a\\nb"}')
     expect(JSON.parse(calls[0].function.arguments).content).toBe('a\nb')
+  })
+  it('stamps the exchange first-token clock only for generated name/argument text', () => {
+    expect(productionWithClock([{index:0,id:'call_provider',type:'function'}]).tokenStamps).toHaveLength(0)
+    expect(productionWithClock([
+      {index:0,id:'call_provider',type:'function'},
+      {index:0,function:{name:'read_file'}},
+      {index:0,function:{arguments:'{}'}},
+    ]).tokenStamps).toHaveLength(2)
   })
   it('retains support for complete unindexed legacy calls', () => {
     expect(production([{id:'whole',function:{name:'read_file',arguments:'{}'}}]))

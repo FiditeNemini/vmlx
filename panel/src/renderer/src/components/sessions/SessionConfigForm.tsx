@@ -1839,7 +1839,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             disabled={dsv4Active || dflash2Speculative || (config.continuousBatching || multimodalActive)}
           />
         )}
-        {dflash2Speculative && <InfoNote text={t('sessions.config.dflash2FixedBlockNote')} />}
+        {dflash2Speculative && <InfoNote text={t('sessions.config.dflash2AdaptiveBlockNote')} />}
       </Section>
 
       {/* Speculative Decoding */}

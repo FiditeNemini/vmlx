@@ -609,7 +609,8 @@
       "resultLabel": "結果",
       "errorLabel": "エラー",
       "diffRemoved": "削除",
-      "diffAdded": "追加"
+      "diffAdded": "追加",
+      "durationMeasuredTitle": "実行側のタイムスタンプで計測"
     },
     "voice": {
       "stopRecordingTitle": "クリックして録音を停止",
@@ -651,6 +652,11 @@
     },
     "message": {
       "tokenCount": "{n} トークン"
+    },
+    "sessionExport": {
+      "button": "セッションをエクスポート",
+      "success": "セッションをエクスポートしました",
+      "failed": "エクスポートに失敗しました"
     }
   },
   "sessions": {
@@ -1102,7 +1108,7 @@
       "useBundledDflash2": "同梱の DFlash2 ドラフター（{{name}}）を使用",
       "useBundledDflash2Tooltip": "モデルバンドルに DFlash2 ドラフターが含まれる場合は既定でオン。下で指定したドラフトモデルが優先されます。オフにするとバンドルのネイティブ MTP（Adaptive/AR）が使われます。",
       "nativeMtpOffForDrafter": "DFlash2 ドラフター選択中はネイティブ MTP がオフです（同じデコードステップを共有できません）。Adaptive MTP に戻すには、ドラフトモデルを空にするか同梱ドラフターをオフにしてください。",
-      "dflash2FixedBlockNote": "DFlash2 は 1 ステップあたり固定 5 トークンのブロックをドラフトします（エンジンの検証済み幅）。ステップあたりのドラフトトークン数は適用されません。"
+      "dflash2AdaptiveBlockNote": "DFlash2 はステップごとに検証ブロック幅を選びます（5 トークン、またはドラフターの学習幅 8）。このテキストで毎秒トークン数が多い方を使います。ステップあたりのドラフトトークン数は適用されません。"
     },
     "create": {
       "title": "セッションを作成",

@@ -171,7 +171,10 @@ describe('tool status responsiveness contract', () => {
     expect(responsesParser).toContain('item.arguments || argsBuffer?.value || "{}"')
   })
 
-  it('negotiates incremental Responses usage only with the local vMLX engine', () => {
+  // d3eca9d12 (#309, "expose negotiated prefill timing on Chat Completions")
+  // widened the private usage negotiation from Responses-only to every wire
+  // API, still gated on the local engine. Remote providers never see it.
+  it('negotiates incremental usage telemetry only with the local vMLX engine', () => {
     const source = readPanelSource('src/main/ipc/chat.ts')
     const responsesBody = source.slice(
       source.indexOf('if (useResponsesApi)'),
@@ -179,11 +182,13 @@ describe('tool status responsiveness contract', () => {
     )
 
     expect(responsesBody).not.toContain('stream_options: { include_usage: true }')
-    expect(source).toContain(
-      'const vmlxResponsesUsageHeaders: Record<string, string> =',
-    )
-    expect(source).toContain('useResponsesApi && !isRemote')
-    expect(source).toContain('{ "X-vMLX-Stream-Usage": "incremental" }')
+    const declStart = source.indexOf('const vmlxUsageHeaders: Record<string, string> =')
+    expect(declStart).toBeGreaterThan(0)
+    const decl = source.slice(declStart, source.indexOf(';', declStart))
+    expect(decl.replace(/\s+/g, ' ')).toContain('= !isRemote ? { "X-vMLX-Stream-Usage": "incremental" } : {}')
+    const initialFetch = source.slice(declStart, source.indexOf('const sendFollowUp = async'))
+    // Both the Node streaming (loopback) and net.fetch branches carry it.
+    expect(initialFetch.match(/\.\.\.vmlxUsageHeaders,/g)?.length).toBe(2)
     const followUp = source.slice(
       source.indexOf('const sendFollowUp = async'),
       source.indexOf(
@@ -191,6 +196,6 @@ describe('tool status responsiveness contract', () => {
         source.indexOf('const sendFollowUp = async'),
       ),
     )
-    expect(followUp).toContain('...vmlxResponsesUsageHeaders')
+    expect(followUp).toContain('...vmlxUsageHeaders')
   })
 })

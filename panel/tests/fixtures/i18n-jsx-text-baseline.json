@@ -14,6 +14,8 @@
   "components/image/ImageModelPicker.tsx: steps",
   "components/image/ImageModelPicker.tsx: · Downloaded",
   "components/image/ImageTopBar.tsx: download",
+  "components/layout/ConsoleSidebar.tsx: mlx_",
+  "components/layout/TitleBar.tsx: vmlx / Console",
   "components/sessions/CreateSession.tsx: DEBUG",
   "components/sessions/CreateSession.tsx: ERROR",
   "components/sessions/CreateSession.tsx: INFO",

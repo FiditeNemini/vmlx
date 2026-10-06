@@ -609,7 +609,8 @@
       "resultLabel": "结果",
       "errorLabel": "错误",
       "diffRemoved": "已删除",
-      "diffAdded": "已添加"
+      "diffAdded": "已添加",
+      "durationMeasuredTitle": "根据执行器自身的时间戳测量"
     },
     "voice": {
       "stopRecordingTitle": "点击停止录音",
@@ -651,6 +652,11 @@
     },
     "message": {
       "tokenCount": "{n} 个 token"
+    },
+    "sessionExport": {
+      "button": "导出会话",
+      "success": "会话已导出",
+      "failed": "导出失败"
     }
   },
   "sessions": {
@@ -1102,7 +1108,7 @@
       "useBundledDflash2": "使用内置的 DFlash2 草稿模型（{{name}}）",
       "useBundledDflash2Tooltip": "模型包包含 DFlash2 草稿模型时默认开启。下方填写的草稿模型优先。关闭后使用模型包自带的原生 MTP（自适应/AR）。",
       "nativeMtpOffForDrafter": "选择 DFlash2 草稿模型时原生 MTP 关闭（两者不能共享同一解码步骤）。清空草稿模型或关闭内置草稿模型即可恢复自适应 MTP。",
-      "dflash2FixedBlockNote": "DFlash2 每步固定草拟 5 个 token 的块（引擎验证过的宽度）；“每步草稿 token 数”不适用。"
+      "dflash2AdaptiveBlockNote": "DFlash2 每步自动选择验证块宽度（5 个 token 或草稿模型训练的 8 个），取当前文本上每秒 token 数更高的一种。“每步草稿 token 数”不适用。"
     },
     "create": {
       "title": "创建会话",

@@ -14886,7 +14886,7 @@ class TestTurboQuantKVTelemetry:
             "disabled={dsv4Active || dflash2Speculative || "
             "(config.continuousBatching || multimodalActive)}"
         ) in form_source
-        assert "dflash2Speculative && <InfoNote text={t('sessions.config.dflash2FixedBlockNote')}" in form_source
+        assert "dflash2Speculative && <InfoNote text={t('sessions.config.dflash2AdaptiveBlockNote')}" in form_source
 
     def test_responses_long_context_tool_cache_gate_script_pins_artifacts(self):
         gate_source = Path(

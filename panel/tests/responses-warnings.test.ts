@@ -350,7 +350,10 @@ describe('Responses warnings panel wiring', () => {
     const chatInterface = readFileSync(new URL('../src/renderer/src/components/chat/ChatInterface.tsx', import.meta.url), 'utf8')
     const messageBubble = readFileSync(new URL('../src/renderer/src/components/chat/MessageBubble.tsx', import.meta.url), 'utf8')
     expect(chatInterface).toContain('const responseWarnings = extractResponsesWarnings({ warnings: data.warnings })')
-    expect(chatInterface).toContain('warnings: responseWarnings ?? m.warnings')
+    // 9b67785bd (settle streaming state after navigation) lets chat:complete
+    // create the assistant message when a remounted chat never saw its stream,
+    // so the fallback is the existing message's warnings, not a map callback's.
+    expect(chatInterface).toContain('warnings: responseWarnings ?? existing?.warnings')
     expect(chatInterface).not.toContain("finalContent += '\\n\\n---\\n*'")
     expect(messageBubble).toContain('{warnings && warnings.length > 0 && (')
     expect(messageBubble).toContain('warnings.map((warning, index) => (')

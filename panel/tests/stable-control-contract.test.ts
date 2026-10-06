@@ -13,8 +13,11 @@ const R = (p: string) => readFileSync(join(__dirname, '..', 'src', 'renderer', '
 const CONTRACT: Record<string, string[]> = {
   'chat/InputBox.tsx': ['chat-composer', 'chat-attach', 'chat-stop', 'chat-send'],
   'image/ImagePromptBar.tsx': ['image-generate', 'image-cancel'],
-  'image/ImageTopBar.tsx': ['image-switch-model', 'image-browse-custom', 'image-logs', 'image-settings', 'image-stop', 'image-retry', 'image-toggle-sidebar'],
-  'image/ImageModelPicker.tsx': ['image-keep-current-model'],
+  // 55ffbb73b made image model selection folder-first: the TopBar's catalog
+  // dropdown (and its "browse custom" entry) moved into ImageModelPicker,
+  // where the folder browse/launch controls now carry the contract.
+  'image/ImageTopBar.tsx': ['image-switch-model', 'image-logs', 'image-settings', 'image-wake', 'image-stop', 'image-retry', 'image-toggle-sidebar', 'image-runtime-status'],
+  'image/ImageModelPicker.tsx': ['image-keep-current-model', 'image-source-catalog', 'image-folder-path', 'image-browse-folder', 'image-folder-detection', 'image-load-folder'],
   'sessions/SessionCard.tsx': ['session-card-open', 'session-card-start', 'session-card-stop', 'session-card-configure', 'session-card-sleep', 'session-card-wake', 'session-card-delete', 'session-card-repoint'],
   'layout/ChatModeToolbar.tsx': ['chat-settings', 'server-settings'],
   'sessions/SessionView.tsx': ['session-start', 'session-stop'],
@@ -119,7 +122,13 @@ describe('every config control bound to a config key carries that key as its set
       const tag = src.slice(m.index, j + 1); const k = tag.match(/onChange\('([a-zA-Z]+)'/)
       if (!k) continue
       checked++
-      if (!tag.includes(`settingKey="${k[1]}"`)) missing.push(k[1])
+      // The bound key is the one the control displays (value={config.<key>}).
+      // An onChange may also clear a sibling key first (7ed96e0c0: an explicit
+      // SSD percent edit clears the saved blockDiskCacheMaxGb override), so the
+      // first onChange key is not necessarily the control's own key.
+      const bound = tag.match(/\bvalue=\{config\.([a-zA-Z]+)\}/)?.[1] ?? k[1]
+      if (!tag.includes(`onChange('${bound}'`)) missing.push(`${bound} (value bound but never written)`)
+      if (!tag.includes(`settingKey="${bound}"`)) missing.push(bound)
     }
     expect(checked).toBeGreaterThan(20)
     expect(missing).toEqual([])

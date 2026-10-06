@@ -609,7 +609,8 @@
       "resultLabel": "result",
       "errorLabel": "error",
       "diffRemoved": "removed",
-      "diffAdded": "added"
+      "diffAdded": "added",
+      "durationMeasuredTitle": "measured from the executor's own timestamps"
     },
     "voice": {
       "stopRecordingTitle": "Click to stop recording",
@@ -651,6 +652,11 @@
     },
     "message": {
       "tokenCount": "{n} tokens"
+    },
+    "sessionExport": {
+      "button": "Export session",
+      "success": "Session exported",
+      "failed": "Export failed"
     }
   },
   "sessions": {
@@ -1102,7 +1108,7 @@
       "useBundledDflash2": "Use the bundled DFlash2 drafter ({{name}})",
       "useBundledDflash2Tooltip": "On by default when the model bundle includes a DFlash2 drafter. A Draft model entered below takes precedence. Off = the bundle's native MTP (Adaptive/AR) is used instead.",
       "nativeMtpOffForDrafter": "Native MTP is off while a DFlash2 drafter is selected (the two cannot share a decode step). Clear the Draft model or turn the bundled drafter off to use Adaptive MTP again.",
-      "dflash2FixedBlockNote": "DFlash2 drafts a fixed 5-token block per step (the engine's validated width); Draft Tokens per Step does not apply."
+      "dflash2AdaptiveBlockNote": "DFlash2 picks its verify block each step: 5 tokens or the drafter's trained 8, whichever is producing more tokens per second on this text. Draft Tokens per Step does not apply."
     },
     "create": {
       "title": "Create Session",

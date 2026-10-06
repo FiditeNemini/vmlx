@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import { usesGlmNativeSsdPool } from '../src/shared/detectedFamilyNames'
+import { resolveNativeMtpStartupMode } from '../src/shared/nativeMtpLaunchArgs'
 
 // Execute the production handler, not a rewritten approximation of its state
 // machine. Delayed IPC promises expose the interval before detection completes.
@@ -25,6 +27,10 @@ function fixture(initialPending = false) {
   const state = { pending: initialPending, config: undefined as unknown, writes: [] as boolean[] }
   const epoch = { current: 0 }
   const mounted = { current: true }
+  // fe432faf5 made Reset hand native-MTP mode ownership back to detected
+  // defaults; 30a111810 routes GLM native SSD defaults through the detector.
+  // Both are real shared helpers, injected here rather than approximated.
+  const nativeMtpEdited = { current: true }
   const environment: Record<string, unknown> = {
     modelDefaultsRequestRef: epoch, mountedRef: mounted,
     RESET_CONFIG: { timeout: 300, blockDiskCacheMaxGb: undefined },
@@ -37,11 +43,13 @@ function fixture(initialPending = false) {
     setConfig: (value: unknown) => { state.config = value },
     applyBundleGenerationDefaultsToSessionConfig: (value: unknown) => value,
     usesExactTypedPromptDiskCache: () => false,
+    usesGlmNativeSsdPool, resolveNativeMtpStartupMode,
+    nativeMtpModeEditedRef: nativeMtpEdited,
     DSV4_PAGED_CACHE_BLOCK_SIZE: 64, DSV4_MAX_CACHE_BLOCKS: 4097,
   }
   for (const name of expression!.matchAll(/\b(setDetected\w+)\(/g)) environment[name[1]] = () => {}
   const reset = new Function(...Object.keys(environment), `${js}\nreturn handler`)(...Object.values(environment)) as () => Promise<void>
-  return { state, epoch, mounted, reset, resolve, reject }
+  return { state, epoch, mounted, nativeMtpEdited, reset, resolve, reject }
 }
 
 describe('creation Reset owns the model-defaults pending interval', () => {
@@ -52,7 +60,8 @@ describe('creation Reset owns the model-defaults pending interval', () => {
     f.resolve({ family: 'llama3' })
     await operation
     expect(f.state.pending).toBe(false)
-    expect(f.state.config).toMatchObject({ port: 8110, timeout: 300 })
+    expect(f.state.config).toMatchObject({ port: 8110, timeout: 300, nativeMtpMode: 'adaptive' })
+    expect(f.nativeMtpEdited.current).toBe(false)
   })
 
   it('releases a pending selection superseded by Reset rather than stranding Launch', async () => {
@@ -72,6 +81,7 @@ describe('creation Reset owns the model-defaults pending interval', () => {
     expect(f.state.pending).toBe(true)
     expect(f.state.config).toBeUndefined()
     expect(f.state.writes).not.toContain(false)
+    expect(f.nativeMtpEdited.current).toBe(true)
   })
 
   it('releases its pending state when detector failure falls back to default config', async () => {

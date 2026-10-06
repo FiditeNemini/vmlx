@@ -235,6 +235,54 @@ def _prefill_last_logits(runtime: Any, adapter: Any, *args):
         adapter.last_row_logits = previous
 
 
+def _snapshot_draft_state(runtime, draft, resume, parts, cut, start, hidden_limit):
+    """Retain the drafter's prefix without another target or draft forward.
+
+    A target-only boundary hit otherwise feeds only the new suffix to the
+    drafter. Keep either its existing KV plus the unprocessed gap, or the
+    bounded target-hidden window needed to rebuild that KV.
+    """
+    import mlx.core as mx
+
+    state = {"draft_cache": None, "draft_hidden_gap": None, "draft_context": None}
+    prior = resume or {}
+    cached = prior.get("draft_cache")
+    gap = prior.get("draft_hidden_gap")
+    gap_len = int(gap.shape[1]) if gap is not None else 0
+    if (
+        cached is not None
+        and int(cached[0].offset) + gap_len == start
+        and sum(int(p.shape[1]) for p in parts) == cut - start
+    ):
+        cloned = _clone_cache_shells(cached, lambda: runtime.make_prompt_cache(draft))
+        if cloned is not None:
+            state["draft_cache"] = cloned
+            state["draft_hidden_gap"] = mx.concatenate(
+                ([gap] if gap is not None else []) + parts, axis=1
+            )
+            return state
+    if hidden_limit is not None:
+        previous = prior.get("draft_context")
+        windows = ([previous] if previous is not None else []) + parts
+        context = mx.concatenate(windows, axis=1)
+        # Never label a partial suffix as a complete sliding context.
+        required = min(cut, hidden_limit)
+        if context.shape[1] >= required:
+            state["draft_context"] = context[:, -required:]
+    return state
+
+
+def _rebuild_draft_hidden(hidden, resume, cache_len, delta_size, hidden_offset, hidden_limit):
+    import mlx.core as mx
+
+    context = (resume or {}).get("draft_context")
+    if context is not None and hidden_offset == 0:
+        hidden = mx.concatenate([context, hidden], axis=1)
+        if hidden_limit is not None:
+            hidden = hidden[:, -hidden_limit:]
+    return hidden, cache_len + delta_size - int(hidden.shape[1])
+
+
 def _adapter_for(model: Any) -> _TargetAdapter:
     language_model = model.language_model
     adapter = getattr(language_model, "_vmlx_dflash2_adapter", None)
@@ -631,6 +679,8 @@ def _stream_generate_resumable(
                     parts.append(h)
                     snapshots.append((kind, cut, _clone_cache_shells(
                         target_cache, lambda: runtime.make_prompt_cache(adapter)
+                    ), _snapshot_draft_state(
+                        runtime, draft, resume, parts, cut, cache_len, hidden_limit
                     )))
                     start = cut
                 logits, h, _ = _prefill_last_logits(
@@ -667,8 +717,11 @@ def _stream_generate_resumable(
                 # resume-math patch before creating it.
                 _patch_rotating_cache_resume_math()
                 draft_cache = runtime.make_prompt_cache(draft)
+                hidden, draft_offset = _rebuild_draft_hidden(
+                    hidden, resume, cache_len, int(delta.size), hidden_offset, hidden_limit
+                )
                 for cache in draft_cache:
-                    cache.offset = cache_len + int(hidden_offset)
+                    cache.offset = draft_offset
         mx.eval(logits, hidden)
         prefill_elapsed = time.perf_counter() - tic
         prompt_tps = prompt_arr.size / max(prefill_elapsed, 1e-9)
@@ -683,7 +736,7 @@ def _stream_generate_resumable(
                 prefill_elapsed,
             )
 
-        for kind, cut, shells in snapshots:
+        for kind, cut, shells, draft_state in snapshots:
             if shells is None:
                 logger.info("DFlash2 %s snapshot skipped: cache clone failed", kind)
                 continue
@@ -699,8 +752,7 @@ def _stream_generate_resumable(
                     "tokens": prompt_list[:cut],
                     "cache_len": int(cut),
                     "target_cache": shells,
-                    "draft_cache": None,
-                    "draft_hidden_gap": None,
+                    **draft_state,
                 }
             )
             logger.info(
@@ -761,6 +813,10 @@ def _stream_generate_resumable(
                     store_draft = None
             elif gap_needed < 0:
                 store_draft = None
+            if n == 1:
+                # No draft forward ran. Preserve its bounded input window,
+                # rather than an empty cache that cannot be serialized.
+                store_draft = None
             _terminal_write = _store_session(
                 {
                     "model_key": model_key,
@@ -770,6 +826,7 @@ def _stream_generate_resumable(
                     "target_cache": target_cache,
                     "draft_cache": store_draft,
                     "draft_hidden_gap": gap_arr if store_draft is not None else None,
+                    "draft_context": hidden if n == 1 else None,
                 }
             )
             logger.info(

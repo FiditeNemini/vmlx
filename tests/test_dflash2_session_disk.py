@@ -104,3 +104,51 @@ def test_empty_draft_cache_is_stored_without_draft_state(ssd):
     assert ssd.flush()
     got = _take(ssd, tokens + [IM_START])
     assert got is not None and got["draft_cache"] is None and got["cache_len"] == 2
+
+
+def test_boundary_draft_context_survives_ssd_without_draft_kv(ssd):
+    prefix = [IM_START, 1, 2, IM_END, 5]
+    context = mx.arange(12).reshape(1, 4, 3).astype(mx.bfloat16)
+    ssd.put({"kind": "boundary", "tokens": prefix, "cache_len": 5,
+             "target_cache": _target(5), "draft_cache": None,
+             "draft_hidden_gap": None, "draft_context": context})
+    assert ssd.flush()
+    got = _take(ssd, prefix + [IM_START, 6, 7])
+    assert got["draft_cache"] is None
+    assert got["draft_context"].dtype == context.dtype
+    assert mx.array_equal(got["draft_context"], context)
+
+
+def test_boundary_snapshot_keeps_bounded_window_and_absolute_resume_position():
+    from vmlx_engine.dflash2_runtime import _snapshot_draft_state, _rebuild_draft_hidden
+    old = mx.arange(10).reshape(1, 10, 1)
+    state = _snapshot_draft_state(None, None, None, [old], 10, 0, 4)
+    assert state['draft_context'].tolist() == [[[6], [7], [8], [9]]]
+    suffix = mx.array([[[10], [11]]])
+    hidden, offset = _rebuild_draft_hidden(suffix, state, 10, 2, 0, 4)
+    assert hidden.tolist() == [[[8], [9], [10], [11]]]
+    assert offset == 8
+    # A large delta already contains the whole sliding window: no stale
+    # historical rows may be prepended across the omitted delta positions.
+    hidden, offset = _rebuild_draft_hidden(suffix, state, 10, 5, 3, 2)
+    assert hidden.tolist() == suffix.tolist() and offset == 13
+
+
+def test_boundary_after_turn_preserves_draft_kv_and_contiguous_gap():
+    from types import SimpleNamespace
+    from vmlx_engine.dflash2_runtime import _snapshot_draft_state
+    draft = _draft(3)
+    gap = mx.array([[[3], [4]]])
+    prior = {'draft_cache': draft, 'draft_hidden_gap': gap, 'cache_len': 5}
+    runtime = SimpleNamespace(make_prompt_cache=lambda _: [RotatingKVCache(max_size=4)])
+    state = _snapshot_draft_state(runtime, None, prior, [mx.array([[[5], [6]]])], 7, 5, 4)
+    assert state['draft_cache'][0] is not draft[0]
+    assert state['draft_cache'][0].offset == 3
+    assert state['draft_hidden_gap'].tolist() == [[[3], [4], [5], [6]]]
+    assert state['draft_context'] is None
+
+
+def test_legacy_partial_suffix_is_not_certified_as_full_draft_context():
+    from vmlx_engine.dflash2_runtime import _snapshot_draft_state
+    state = _snapshot_draft_state(None, None, {}, [mx.array([[[8], [9]]])], 10, 8, 4)
+    assert state['draft_context'] is None

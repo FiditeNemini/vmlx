@@ -167,6 +167,8 @@ class DFlash2SessionSSD:
                 if entry.get("draft_hidden_gap") is not None:
                     arrays["gap"] = entry["draft_hidden_gap"]
         tokens = [int(t) for t in entry["tokens"]]
+        if entry.get("draft_context") is not None:
+            arrays["draft_context"] = entry["draft_context"]
         arrays["tokens"] = mx.array(tokens, dtype=mx.uint32)
         # Evaluate on the generation thread; the writer only copies bytes.
         mx.eval(list(arrays.values()))
@@ -264,6 +266,7 @@ class DFlash2SessionSSD:
             return {"kind": meta["kind"], "tokens": prefix, "cache_len": int(meta["cache_len"]),
                     "target_cache": target, "draft_cache": draft,
                     "draft_hidden_gap": arrays.get("gap") if draft is not None else None,
+                    "draft_context": arrays.get("draft_context"),
                     "load_s": dt}
         self.stats["misses"] += 1
         return None

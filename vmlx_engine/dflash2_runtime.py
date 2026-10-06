@@ -457,6 +457,7 @@ def _stream_generate_resumable(
     top_p: float,
     top_k: int,
     prefill_step_size: int = 2048,
+    sampling_controls=None,
 ) -> Iterator[Any]:
     """The dflash==0.1.0 ``_stream_generate`` loop with session resume.
 
@@ -682,7 +683,15 @@ def _stream_generate_resumable(
             )
 
         tic = time.perf_counter()
-        token = sampler(logits[:, -1:])[0, 0].item()
+        first_logits = logits[:, -1:]
+        if sampling_controls is not None:
+            first_logits = sampling_controls.process(first_logits, prompt_list)
+        if sampling_controls is not None and temperature > 0:
+            token = runtime._sample_probs(sampling_controls.probabilities(
+                runtime, first_logits, temperature, top_p, top_k
+            ))[0, 0].item()
+        else:
+            token = sampler(first_logits)[0, 0].item()
         tokens.append(token)
         n = 1
 
@@ -804,10 +813,17 @@ def _stream_generate_resumable(
                 )
                 logits = adapter(verify_input, target_cache)
                 hidden = mx.concatenate(adapter._hidden_states, axis=-1)
+                if sampling_controls is not None:
+                    logits = sampling_controls.process(logits, prompt_list + tokens, draft_tokens)
                 if temperature > 0:
-                    target_probs = runtime._sampling_probs(
-                        logits, temperature, top_p, top_k
-                    )
+                    if sampling_controls is not None:
+                        target_probs = sampling_controls.probabilities(
+                            runtime, logits, temperature, top_p, top_k
+                        )
+                    else:
+                        target_probs = runtime._sampling_probs(
+                            logits, temperature, top_p, top_k
+                        )
                 else:
                     target_tokens = mx.argmax(logits, axis=-1)
             mx.async_eval(target_probs if temperature > 0 else target_tokens, hidden)
@@ -1098,6 +1114,11 @@ def stream_dflash2_generate(
     temperature: float,
     top_p: float = 1.0,
     top_k: int = 0,
+    min_p: float = 0.0,
+    logit_bias=None,
+    repetition_penalty: float = 1.0,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
 ) -> Iterator[Any]:
     """Yield upstream DFlash2 chunks using vMLX's hybrid Qwen target."""
 
@@ -1105,6 +1126,13 @@ def stream_dflash2_generate(
     import dflash.model_mlx as runtime
 
     adapter = _adapter_for(model)
+    sampling_controls = None
+    if min_p or logit_bias or repetition_penalty != 1.0 or frequency_penalty or presence_penalty:
+        from .dflash2_sampling import DFlash2SamplingControls
+        sampling_controls = DFlash2SamplingControls(
+            min_p=min_p, logit_bias=logit_bias, repetition_penalty=repetition_penalty,
+            frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+        )
     with runtime.wired_limit(adapter, [runtime.generation_stream]):
         yield from _stream_generate_resumable(
             model,
@@ -1121,4 +1149,5 @@ def stream_dflash2_generate(
             temperature=float(temperature),
             top_p=float(top_p),
             top_k=int(top_k),
+            sampling_controls=sampling_controls,
         )

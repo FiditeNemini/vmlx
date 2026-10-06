@@ -6619,6 +6619,14 @@ class MLXMultimodalLM:
                     temperature=temperature,
                     top_p=top_p,
                     top_k=top_k,
+                    min_p=float(kwargs.get("min_p", 0.0) or 0.0),
+                    logit_bias=kwargs.get("logit_bias"),
+                    repetition_penalty=float(
+                        1.0 if kwargs.get("repetition_penalty") is None
+                        else kwargs["repetition_penalty"]
+                    ),
+                    frequency_penalty=float(kwargs.get("frequency_penalty", 0.0) or 0.0),
+                    presence_penalty=float(kwargs.get("presence_penalty", 0.0) or 0.0),
                 ):
                     emitted = len(getattr(chunk, "tokens", []) or [])
                     token_count += emitted

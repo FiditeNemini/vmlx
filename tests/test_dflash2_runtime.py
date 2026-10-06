@@ -118,6 +118,11 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
                 temperature=0.0,
                 top_p=1.0,
                 top_k=0,
+                min_p=.1,
+                logit_bias={"10": -20},
+                repetition_penalty=1.1,
+                frequency_penalty=.2,
+                presence_penalty=.3,
             )
         )
 
@@ -127,3 +132,8 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
     assert outputs[-1].completion_tokens == 3
     assert outputs[-1].finish_reason == "stop"
     assert outputs[-1].persistence_future is receipt
+    assert bridge.call_args.kwargs["min_p"] == .1
+    assert bridge.call_args.kwargs["logit_bias"] == {"10": -20}
+    assert bridge.call_args.kwargs["repetition_penalty"] == 1.1
+    assert bridge.call_args.kwargs["frequency_penalty"] == .2
+    assert bridge.call_args.kwargs["presence_penalty"] == .3

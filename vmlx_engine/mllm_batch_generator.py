@@ -18705,7 +18705,11 @@ class MLLMBatchGenerator:
         state._copy_pending = []
         if not copy_drafts_enabled():
             return state.depth
-        proposer = state.copy_proposer
+        # The proposer lives on the REQUEST, not only on the MTP state: AR
+        # calibration / fallback re-entry builds a fresh MLLMNativeMTPState,
+        # and rebuilding the prompt index there cost ~63 ms per re-entry at
+        # 64k context (every ~50 cycles).  sync() continues the stream.
+        proposer = state.copy_proposer or getattr(request, "_native_mtp_copy_proposer", None)
         if proposer is None:
             ids = getattr(request, "input_ids", None)
             if ids is None:
@@ -18714,7 +18718,12 @@ class MLLMBatchGenerator:
                 prompt = [int(t) for t in ids.reshape(-1).tolist()]
             except Exception:
                 return state.depth
-            proposer = state.copy_proposer = SuffixCopyProposer.from_prompt(prompt)
+            proposer = SuffixCopyProposer.from_prompt(prompt)
+            try:
+                request._native_mtp_copy_proposer = proposer
+            except Exception:
+                pass
+        state.copy_proposer = proposer
         proposer.sync(request.output_tokens, [int(q[0]) for q in state.queue])
         room = int(request.max_tokens) - int(request.num_tokens) - len(state.queue) - 1
         state._copy_pending = proposer.propose(room)

@@ -4,6 +4,10 @@
 def expected_payload(model):
     expected = {}
     for path, module in model.named_modules():
+        if getattr(module, "is_jangtq2_dense", False):          # dense one-expert projection (jangh/dense.py)
+            expected[f"{path}.tq2_packed"] = ((1, module.output_dims, module.input_dims * module.bits // 32), "uint32")
+            expected[f"{path}.tq2_scales"] = ((1, module.output_dims), "float16")
+            continue
         if not getattr(module, "is_jangtq2", False):
             continue
         for projection in ("gate_proj", "up_proj", "down_proj"):

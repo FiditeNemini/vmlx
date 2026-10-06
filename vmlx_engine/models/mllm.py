@@ -4602,8 +4602,15 @@ class MLXMultimodalLM:
         # boundary above.
         try:
             from ..speculative import is_dflash2_enabled
+            from ..utils.jang_loader import is_jang_model as _needs_jang_loader
 
-            if is_dflash2_enabled():
+            # Bundles whose weights need the JANG codec (e.g. Qwen3.8-27B
+            # JANGH2, format jangtq2: Hadamard-codebook MLP) cannot load through
+            # stock mlx-vlm (nn.quantize fails on their packed codes). They fall
+            # through to the JANG VL loader below; the qwen3_5 registry still
+            # keeps the upstream runtime DFlash2 needs while it is enabled.
+            # Plain-affine stamps (JANG_4D, no format) keep this measured path.
+            if is_dflash2_enabled() and not _needs_jang_loader(resolved_name):
                 from mlx_vlm import load
                 from mlx_vlm.utils import load_config
 

@@ -3209,9 +3209,25 @@ def _load_jang_v2(
     skeleton_config, skipped_gates = _sanitize_nemotron_quantization_config_for_load(config)
     if skipped_gates:
         logger.info("  Loading %d packed Nemotron routers as floating MoEGate weights", len(skipped_gates))
-    model, config = _load_model_skeleton(
-        path, lazy=True, strict=False, model_config=skeleton_config or config
-    )
+    # Dense JANGH (jangtq2 on plain Linear, e.g. Qwen3.8-27B JANGH2 MLP): mlx_lm's load_model builds the model and then
+    # calls nn.quantize with the bundle's per-module entries; the jangtq2 entries must already be TQLinear by then
+    # (TQLinear.to_quantized accepts its own entry and returns itself). Install them inside that nn.quantize call.
+    from vmlx_engine.jangh.dense import dense_entries as _jh_dense_entries, install_jangh_dense as _jh_install_dense
+    _jh_ents = _jh_dense_entries(skeleton_config or config)
+    import mlx.nn as _jh_nn
+    _jh_orig_quantize = _jh_nn.quantize
+    if _jh_ents:
+        def _jh_quantize(model_, *args, **kwargs):
+            n = _jh_install_dense(model_, skeleton_config or config)
+            logger.info("  JANGH dense: %d Linear -> TQLinear before quantize", n)
+            return _jh_orig_quantize(model_, *args, **kwargs)
+        _jh_nn.quantize = _jh_quantize
+    try:
+        model, config = _load_model_skeleton(
+            path, lazy=True, strict=False, model_config=skeleton_config or config
+        )
+    finally:
+        _jh_nn.quantize = _jh_orig_quantize
     _upgrade_switch_to_quantized(
         model,
         config["quantization"]["bits"],
@@ -4594,6 +4610,12 @@ def _load_jang_v2_vlm(
         from vmlx_engine.jangh.install import install_jangh
 
         install_jangh(model, config)
+        # Dense JANGH projections (non-routed jangtq2 entries, e.g. Qwen3.8-27B JANGH2 MLP) -> TQLinear before quantize.
+        from vmlx_engine.jangh.dense import install_jangh_dense
+
+        _jh_dense = install_jangh_dense(model, config)
+        if _jh_dense:
+            logger.info("  JANGH dense: %d Linear -> TQLinear before quantize", _jh_dense)
 
     nn.quantize(
         model,

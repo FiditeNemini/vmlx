@@ -98,8 +98,10 @@ def projection_contract(config):
     for path, entry in quant.items():
         if not isinstance(entry, dict) or entry.get("mode") != "jangtq2":
             continue
-        if not isinstance(path, str) or ".switch_mlp." not in path:
+        if not isinstance(path, str):
             _fail("unrecognized routed projection path")
+        if ".switch_mlp." not in path:
+            continue                    # dense jangtq2 projection: validated/installed by jangh.dense
         path = canonical_path(path)
         stack, projection = path.rsplit(".", 1)
         if projection not in PROJECTIONS or not stack.endswith(".switch_mlp"):
@@ -116,7 +118,7 @@ def projection_contract(config):
             _fail("conflicting routed projection aliases")
         stacks[stack][projection] = normalized
     if not stacks:
-        _fail("no routed projections declared")
+        return {}                       # dense-only JANGH bundle (jangh.dense installs those entries)
     for stack, projections in stacks.items():
         if set(projections) != set(PROJECTIONS):
             _fail("incomplete routed stack " + stack)

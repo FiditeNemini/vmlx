@@ -1123,9 +1123,15 @@ class TestHybridSSMStateCache:
         # check see tests/test_ssm_companion_cache.py.
         from vmlx_engine.mllm_batch_generator import HybridSSMStateCache
 
+        import mlx.core as mx
+        from types import SimpleNamespace
+
         cache = HybridSSMStateCache(max_entries=10)
         tokens = [1, 2, 3, 4, 5]
-        ssm_states = [MagicMock(), MagicMock()]
+        # The companion detaches/materializes real arrays before storing; a
+        # MagicMock layer cannot be cloned and is (correctly) not stored.
+        ssm_states = [SimpleNamespace(cache=[mx.array([1.0] * 4)]),
+                      SimpleNamespace(cache=[mx.array([2.0] * 4)])]
 
         cache.store(tokens, 5, ssm_states)
         result = cache.fetch(tokens, 5)

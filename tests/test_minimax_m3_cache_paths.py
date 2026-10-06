@@ -415,6 +415,7 @@ def test_scheduler_m3_cache_hit_store_rederives_clean_prompt_cache(monkeypatch):
     scheduler._uses_m3_msa_cache = True
     scheduler._uses_dsv4_cache = False
     scheduler._uses_zaya_cache = False
+    scheduler._model_type_for_runtime = "minimax_m3"  # set by Scheduler.__init__ in production
     scheduler.total_completion_tokens = 0
     scheduler.num_requests_processed = 0
 
@@ -497,6 +498,7 @@ def test_scheduler_paged_m3_cache_hit_store_rederives_clean_prompt_cache(monkeyp
     scheduler._uses_m3_msa_cache = True
     scheduler._uses_dsv4_cache = False
     scheduler._uses_zaya_cache = False
+    scheduler._model_type_for_runtime = "minimax_m3"  # set by Scheduler.__init__ in production
     scheduler.total_completion_tokens = 0
     scheduler.num_requests_processed = 0
     scheduler._dsv4_trace_timing = lambda *_args, **_kwargs: None
@@ -557,7 +559,8 @@ def test_m3_paged_store_avoids_full_numpy_mirror_and_deferred_disk_payloads():
 
     assert "np.array(" not in m3_mirror_branch
     assert "np_block = block_kv_data" in source
-    assert "if has_minimax_m3_cache_data or has_dsv4_delta_cache_data:" in source
+    # the deferred-payload condition grew native-quantized / cache-list kinds
+    assert "has_minimax_m3_cache_data\n                            or has_dsv4_delta_cache_data" in source
     assert "minimax_m3=has_minimax_m3_cache_data" in source
 
 

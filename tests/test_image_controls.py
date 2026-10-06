@@ -125,7 +125,8 @@ def test_strict_error_is_never_swallowed_by_the_media_fallbacks():
     from vmlx_engine.engine import batched
 
     fb = inspect.getsource(batched.BatchedEngine._video_frame_fallback_messages)
-    assert fb.index("except MediaControlsUnmeetableError:\n                    raise") < fb.index("video frame fallback failed; using native video path")
+    # the outer catch re-raises the strict error (and untrustworthy frame metadata) before the catch-all fallback
+    assert fb.index("except (MediaControlsUnmeetableError, _VideoFrameMetadataError):\n                    raise") < fb.index("video frame fallback failed; using native video path")
     src = open(g.__file__).read()
     # the loader sites re-raise typed rejections FIRST inside the input-failure scope (never a bare except Exception)
     assert "    except (MediaControlsUnmeetableError, MediaInputError):\n        raise\n    except _MEDIA_INPUT_FAILURES as e:" in src

@@ -442,4 +442,6 @@ def test_capabilities_emits_every_key_the_remote_panel_reads():
 def test_thinking_budget_flag_is_sourced_from_the_engine_family_set():
     """Not a hand-written list: it must follow _THINKING_BUDGET_CAP_FAMILIES."""
     server = (ROOT / "vmlx_engine" / "server.py").read_text()
-    assert '"supports_thinking_budget": family in _THINKING_BUDGET_CAP_FAMILIES' in server
+    # still sourced from the family set, via a named local reused per route
+    assert "text_supports_budget = family in _THINKING_BUDGET_CAP_FAMILIES" in server
+    assert '"supports_thinking_budget": text_supports_budget' in server

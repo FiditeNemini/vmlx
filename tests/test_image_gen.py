@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 # SPDX-License-Identifier: Apache-2.0
 """
 Tests for ImageGenEngine (vmlx_engine/image_gen.py).
@@ -47,8 +48,20 @@ def _mock_mflux_modules():
         "mflux.models.qwen.variants",
         "mflux.models.qwen.variants.edit",
         "mflux.models.qwen.variants.edit.qwen_image_edit",
+        # Flux1 legacy output-bias restore (image_gen.load) reads the stored
+        # transformer through mflux's own weight loader (present in bundled 0.19.0)
+        "mflux.models.common.weights",
+        "mflux.models.common.weights.loading",
+        "mflux.models.common.weights.loading.weight_loader",
+        "mflux.models.flux.weights",
+        "mflux.models.flux.weights.flux_weight_definition",
     ]:
         mocks[mod] = MagicMock()
+    from types import SimpleNamespace
+    mocks["mflux.models.flux.weights.flux_weight_definition"].FluxWeightDefinition.get_components.return_value = [
+        SimpleNamespace(name="transformer")]
+    mocks["mflux.models.common.weights.loading.weight_loader"].WeightLoader.load_single_local.return_value = (
+        SimpleNamespace(components={"transformer": {}}))
     return mocks
 
 
@@ -1100,6 +1113,8 @@ class TestLoadMethod:
                     "lora_paths": lora_paths,
                     "lora_scales": lora_scales,
                 }
+                # load() restores the legacy output bias on the transformer
+                self.transformer = SimpleNamespace()
 
         mocks["mflux.models.flux.variants.txt2img.flux"].Flux1 = MockFlux1
 
@@ -1138,7 +1153,7 @@ class TestLoadMethod:
 
         class MockFlux1:
             def __init__(self, *, model_config, quantize, model_path):
-                pass
+                self.transformer = SimpleNamespace()  # load() restores the legacy output bias here
 
         mocks["mflux.models.flux.variants.txt2img.flux"].Flux1 = MockFlux1
 

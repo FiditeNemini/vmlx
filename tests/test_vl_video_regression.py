@@ -255,18 +255,29 @@ class TestApplyChatTemplate:
         assert "<|vision_end|>" in p1
 
 
+
+def _assert_media_attachments_force_multimodal():
+    """mlxstudio#69 contract, now owned by panel/src/shared/chatMediaPolicy.ts:
+    image/video/audio attachments force multimodal routing (a stale
+    isMultimodal=false must not silently drop them); when media is disabled
+    (Force Off, smelt, text-only runtime) the turn is REJECTED with an explicit
+    attachmentError instead of dropping the media.  Text files stay text."""
+    chat = (REPO_ROOT / "panel/src/main/ipc/chat.ts").read_text()
+    policy = (REPO_ROOT / "panel/src/shared/chatMediaPolicy.ts").read_text()
+    assert "const hasMediaAttachments" in chat
+    assert 'inferKind(a) !== "text"' in chat
+    assert "hasMediaAttachments: !!hasMediaAttachments" in chat
+    assert "if (mediaPolicy.attachmentError) throw new Error(mediaPolicy.attachmentError);" in chat
+    assert "chatIsMultimodal = mediaPolicy.multimodal;" in chat
+    assert "|| input.hasMediaAttachments === true" in policy
+    assert "if (input.hasMediaAttachments) {" in policy and "attachmentError:" in policy
+
 # ---------- Multimodal auto-promotion (mlxstudio#69) ----------
 
 class TestMultimodalPromotion:
     def test_panel_chat_ts_promotes_on_attachment(self):
         """panel/src/main/ipc/chat.ts must force chatIsMultimodal=true on media attach."""
-        src = (REPO_ROOT / "panel/src/main/ipc/chat.ts").read_text()
-        # Marker comments and the promotion line must both be present
-        assert "mlxstudio#69" in src
-        assert "const hasMediaAttachments" in src
-        assert 'inferKind(a) !== "text"' in src
-        assert "hasMediaAttachments && !chatIsMultimodal" in src
-        assert "chatIsMultimodal = true" in src
+        _assert_media_attachments_force_multimodal()
 
 
 # ---------- Hybrid cache ----------
@@ -514,7 +525,7 @@ def test_mimo_video_processor_outputs_stay_on_video_kwargs():
 
     assert 'video_pixel_values = inputs.get("pixel_values_videos")' in module_src
     assert (
-        "request.video_pixel_values = _ensure_mx_array(video_pixel_values)"
+        "request.video_pixel_values = _mllm_processor_array(video_pixel_values)"
         in module_src
     )
     assert (
@@ -1777,9 +1788,7 @@ class TestGitHubIssueGuards:
         forcing chatIsMultimodal=true on explicit attachment in panel
         chat.ts. Already covered by TestMultimodalPromotion, re-pin for
         issue traceability."""
-        src = (REPO_ROOT / "panel/src/main/ipc/chat.ts").read_text()
-        assert "mlxstudio#69" in src
-        assert "chatIsMultimodal = true" in src
+        _assert_media_attachments_force_multimodal()
 
     def test_mlxstudio_72_ollama_copilot_compat(self):
         """mlxstudio#72: Ollama proxy compat for GitHub Copilot. v1.3.50
@@ -4429,30 +4438,8 @@ class TestMlxstudio69ImageAttachmentForceMultimodal:
     """
 
     def test_panel_force_multimodal_on_attachment(self):
-        """Source pin: the force-multimodal branch with mlxstudio#69 anchor."""
-        src = (REPO_ROOT / "panel/src/main/ipc/chat.ts").read_text()
-        # Anchor must be present
-        assert "mlxstudio#69" in src, (
-            "mlxstudio#69 anchor dropped — silent image-drop regression "
-            "is now possible on sessions with stale isMultimodal=false"
-        )
-        # The specific branch pattern. Keep the text-file exception pinned:
-        # image/video/audio attachments force multimodal routing, but text
-        # attachments are inlined into the prompt and must not force MLLM.
-        assert "const hasMediaAttachments" in src
-        assert 'inferKind(a) !== "text"' in src
-        assert "hasMediaAttachments && !chatIsMultimodal" in src, (
-            "force-multimodal branch missing; attachments get silently "
-            "dropped when session thinks it's text-only"
-        )
-        # The assignment must still set chatIsMultimodal = true
-        force_idx = src.find("hasMediaAttachments && !chatIsMultimodal")
-        assert force_idx > 0
-        # Within ~500 chars after the branch, chatIsMultimodal=true assignment
-        window = src[force_idx:force_idx + 500]
-        assert "chatIsMultimodal = true" in window, (
-            "force-multimodal must set chatIsMultimodal=true"
-        )
+        """Source pin: media attachments force multimodal or are rejected loudly (mlxstudio#69)."""
+        _assert_media_attachments_force_multimodal()
 
     def test_panel_infer_kind_back_compat_present(self):
         """A companion back-compat helper `inferKind` lets older renderer
@@ -7172,54 +7159,18 @@ class TestAnthropicUrlImageSource:
         assert getattr(parts[1], "type", None) == "image_url"
         assert parts[1].image_url.url == "http://x/y.png"
 
-    def test_unknown_source_type_silently_skipped(self):
-        """Defensive — unknown source.type (e.g., Anthropic adding a
-        new type in the future) must not crash. Text-only request is
-        the safer fallback. Adapter collapses single-text-part content
-        back to a plain string for efficiency, so the Message.content
-        may be either a list (multipart) or a string (text-only)."""
+    def test_unknown_source_type_is_rejected_not_silently_dropped(self):
+        """a239a66b (#286): an unknown image source.type used to drop the media
+        and continue as a successful text-only request. It is now rejected
+        loudly so the client learns its media was not understood."""
+        import pytest
         from vmlx_engine.api.anthropic_adapter import _convert_user_message
         msg = {"role":"user","content":[
             {"type":"text","text":"hi"},
             {"type":"image","source":{"type":"new_future_type","data":"xyz"}}
         ]}
-        out = _convert_user_message(msg)
-        content = out.content if not isinstance(out, list) else out[0].content
-        if isinstance(content, str):
-            # Collapsed — only text remains (image dropped as expected)
-            assert content == "hi", (
-                f"unknown source.type should drop image, keep text: {content!r}"
-            )
-        else:
-            # List form — image absent, text present
-            img = next((p for p in content if getattr(p, "type", None)=="image_url"), None)
-            assert img is None, "unknown source.type must be ignored"
-            assert any(getattr(p, "type", None)=="text" for p in content)
-
-
-class TestCacheLayerStackCombined:
-    """Cache-layer composition — TurboQuant-centric (vMLX doesn't rely
-    on q4/q8 KV quant in production; TurboQuantKVCache is the default
-    for JANG/JANGTQ models via their jang_config.capabilities block).
-
-    Required composition:
-        --use-paged-cache
-        --enable-prefix-cache
-        --enable-block-disk-cache (L2 persistence)
-        TurboQuant auto-activates from jang_config on JANG/JANGTQ
-        models (no CLI flag needed).
-
-    Live-verified iter 5: Qwen3-0.6B-8bit + paged + prefix + L2 disk
-    + kv-q8 (for coverage) hit 1984 tokens in-memory on T2 and 384
-    tokens from disk after server restart.
-
-    Live-verified iter 3: Qwen3.6-JANGTQ2 + MiniMax-JANGTQ + Gemma-4
-    -JANG all hit TurboQuantKVCache with the full P3/P15/P17/P18
-    Metal kernel stack via jang_tools.load_jangtq_*.
-
-    This class pins the knob-composition invariants so TurboQuant +
-    prefix + L2 never silently lose each other.
-    """
+        with pytest.raises(ValueError, match="source.type must be base64 or url"):
+            _convert_user_message(msg)
 
     def test_scheduler_accepts_cache_flag_composition(self):
         sched_src = (REPO_ROOT / "vmlx_engine/scheduler.py").read_text()

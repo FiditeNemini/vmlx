@@ -1016,14 +1016,14 @@ class TestImageGenLock:
         import vmlx_engine.server as srv
         source = inspect.getsource(srv.create_image)
         assert "_image_gen_lock" in source
-        assert "async with _image_gen_lock" in source
+        assert "async with image_request_scope(request, body, _image_gen_lock)" in source  # lock held via the request scope
 
     def test_lock_used_in_edit_endpoint(self):
         """Verify the lock is acquired in create_image_edit."""
         import vmlx_engine.server as srv
         source = inspect.getsource(srv.create_image_edit)
         assert "_image_gen_lock" in source
-        assert "async with _image_gen_lock" in source
+        assert "async with image_request_scope(request, body, _image_gen_lock)" in source  # lock held via the request scope
 
 
 # ---------------------------------------------------------------------------
@@ -1193,14 +1193,15 @@ class TestImageGenWorkerExecutor:
     def test_cli_explicit_image_flags_force_image_runtime_detection(self):
         import vmlx_engine.cli as cli
 
-        source = inspect.getsource(cli.serve_command)
+        # Detection lives in _is_image_serve_request, which serve_command calls
+        # before any text-only policy: explicit image flags win first, then
+        # served/model names, then on-disk diffusers metadata.
+        helper = inspect.getsource(cli._is_image_serve_request)
         flag_check = 'getattr(args, "image_mode", None) or getattr(args, "mflux_class", None)'
-        served_name_check = (
-            '_served_model_name and _served_model_name.lower() in MFLUX_NAMED_MODELS'
-        )
-        assert flag_check in source
-        assert served_name_check in source
-        assert source.index(flag_check) < source.index('if not _is_image and (model_dir / "model_index.json").exists()')
+        assert flag_check in helper
+        assert "served.lower() in names" in helper
+        assert helper.index(flag_check) < helper.index('(folder / "model_index.json").exists()')
+        assert "_is_image = _is_image_serve_request(args)" in inspect.getsource(cli.serve_command)
 
 
 # ---------------------------------------------------------------------------

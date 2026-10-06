@@ -3,5 +3,6 @@
 export function readManagedSsdPoolBudget(cache: any): any {
   return cache?.block_disk_cache?.global_budget
     ?? cache?.ssm_companion?.disk?.global_budget
+    ?? cache?.dflash2_cache?.ssd?.global_budget
     ?? null
 }

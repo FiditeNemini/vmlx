@@ -14106,6 +14106,10 @@ async def health():
             result["cache"] = cache_snapshot
 
     if _engine is not None:
+        from .speculative import is_dflash2_enabled as _df2_cache_enabled
+        if _df2_cache_enabled():
+            from .dflash2_runtime import session_cache_stats
+            result.setdefault("cache", {})["dflash2_cache"] = session_cache_stats()
         result["request_lifecycle"] = _request_lifecycle_health_snapshot(
             engine_stats,
             # Batched LLM and MLLM engines publish their scheduler IDs in the
@@ -14695,6 +14699,13 @@ async def cache_stats():
         scheduler_cache = _engine.get_cache_stats()
         if scheduler_cache:
             result["scheduler_cache"] = scheduler_cache
+        from .speculative import is_dflash2_enabled as _df2_cache_enabled
+        if _df2_cache_enabled():
+            from .dflash2_runtime import session_cache_stats
+            result["dflash2_cache"] = session_cache_stats()
+            result["scheduler_stats"] = {
+                "last_durability": _engine.get_stats().get("last_durability")
+            }
 
     # Scheduler-level overall stats (includes cache stats + request stats)
     scheduler = _get_scheduler()

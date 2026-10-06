@@ -327,12 +327,40 @@ class _DFlash2SessionStore:
         with self._lock:
             self._entries.clear()
 
+    def stats(self) -> dict:
+        # Metadata only: never evaluate or copy model/cache arrays for polling.
+        with self._lock:
+            return {
+                "entries": len(self._entries),
+                "max_entries": self.max_entries,
+                "tokens": sum(int(e["cache_len"]) for e in self._entries),
+                "tokens_note": "sum_across_entries; prefixes_may_overlap",
+            }
+
 
 _SESSION_STORE = _DFlash2SessionStore()
 
 # SSD (L2) behind the RAM store; see dflash2_session_disk.py.  Configured by
 # the CLI when a DFlash2 drafter is loaded; None = RAM tier only.
 _SESSION_SSD = None
+
+
+def session_cache_stats() -> dict:
+    """Report this lane, which has no scheduler/paged-cache statistics."""
+    result = {"ram": _SESSION_STORE.stats(), "ssd": None}
+    if _SESSION_SSD is not None:
+        from dataclasses import asdict
+
+        ssd = _SESSION_SSD
+        # Uses the pool's nonblocking O(1) ledger refresh, not a disk scan.
+        budget = asdict(ssd.store.budget.refresh_health())
+        budget["root"] = str(ssd.store.root)
+        result["ssd"] = dict(
+            ssd.stats,
+            pending_writes=ssd._q.unfinished_tasks,
+            global_budget=budget,
+        )
+    return result
 
 
 def configure_session_ssd(*, root, max_size_bytes: int, target_path: str, draft_path: str) -> None:

@@ -4,6 +4,15 @@ import { readManagedSsdPoolBudget } from '../src/shared/ssdPoolHealth'
 
 const snapshot = { root: '/cache', used: 950, cap: 1000, capacityEvicted: 0 }
 describe('SSD pool capacity notice', () => {
+  it('uses DFlash2 shared-pool usage and rejects stale snapshots', () => {
+    const budget = { root: '/cache', bytes_after: 950, max_size_bytes: 1000, accounted: true }
+    const cache = { dflash2_cache: { ssd: { writes: 99, global_budget: budget } } }
+    expect(readSsdPoolSnapshot(cache)).toEqual(snapshot)
+    expect(readSsdPoolSnapshot({ dflash2_cache: { ssd: { writes: 99 } } })).toBeNull()
+    expect(readSsdPoolSnapshot({ dflash2_cache: { ssd: { global_budget: {
+      ...budget, telemetry_stale: true,
+    } } } })).toBeNull()
+  })
   it('uses companion-only aggregate telemetry for the native SSD backend', () => {
     const budget = { root: '/cache', bytes_after: 950, max_size_bytes: 1000, accounted: true }
     const cache = { ssm_companion: { disk: { bytes: 1, global_budget: budget } } }

@@ -258,7 +258,8 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     )
   }
 
-  const schedulerCache = stats?.scheduler_cache
+  const dflash2Cache = stats?.dflash2_cache
+  const schedulerCache = dflash2Cache ? null : stats?.scheduler_cache
   const schedulerStats = stats?.scheduler_stats
   const visionMemoryCache =
     schedulerStats?.vision_cache ??
@@ -271,7 +272,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     schedulerStats?.batch_generator?.last_cache_execution
   // the last completed generation's terminal fence (request-exact; engine field last_durability)
   const lastDurability = (schedulerStats?.batch_generator?.last_durability ?? schedulerStats?.last_durability) as
-    | { request_id?: string; wait_ms?: number; waited?: boolean; cache_outcome?: string; retained_tokens?: number | null; detail?: string; at?: number }
+    | { request_id?: string; wait_ms?: number; waited?: boolean; cache_outcome?: string; outcome?: string; retained_tokens?: number | null; detail?: string; at?: number }
     | null
     | undefined
   const lastCacheSelection =
@@ -285,7 +286,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     ? describeDsv4ActivationQat(nativeCache.activation_qat)
     : null
   const turboQuantKv = stats?.turboquant_kv_cache
-  const cacheTotals = stats?.cache_totals
+  const cacheTotals = dflash2Cache ? null : stats?.cache_totals
   const blockDiskCache = stats?.block_disk_cache
   const globalBlockDiskBudget = blockDiskCache?.global_budget
   const actionBusy = loading || warming || clearing
@@ -412,6 +413,22 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       )}
 
       {/* Cache Stats Overview */}
+      {dflash2Cache && (
+        <div>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">DFlash2</h4>
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <StatCard label={`RAM · ${t('sessions.cache.entries')}`} value={`${dflash2Cache.ram.entries} / ${dflash2Cache.ram.max_entries}`} />
+            {dflash2Cache.ssd && <>
+              <StatCard label={`SSD · ${t('sessions.cache.thisEngineReads')}`} value={`${dflash2Cache.ssd.hits} / ${dflash2Cache.ssd.misses}`} />
+              <StatCard label={`SSD · ${t('sessions.cache.thisEngineWrites')}`} value={String(dflash2Cache.ssd.writes)} />
+              <StatCard label={t('sessions.cache.pendingWrites')} value={String(dflash2Cache.ssd.pending_writes)} />
+              <StatCard label={t('sessions.cache.managedRootSize')} value={dflash2Cache.ssd.global_budget.accounted && !dflash2Cache.ssd.global_budget.telemetry_stale ? formatCacheStorageBytes(dflash2Cache.ssd.global_budget.bytes_after) : t('sessions.cache.reconciliationPending')} />
+              <StatCard label={t('sessions.cache.managedRootLimit')} value={dflash2Cache.ssd.global_budget.max_size_bytes > 0 ? formatCacheStorageBytes(dflash2Cache.ssd.global_budget.max_size_bytes) : t('sessions.cache.unlimited')} />
+              <StatCard label={t('sessions.cache.managedRootStatus')} value={!dflash2Cache.ssd.global_budget.accounted || dflash2Cache.ssd.global_budget.telemetry_stale ? t('sessions.cache.reconciliationPending') : dflash2Cache.ssd.global_budget.compliant ? t('sessions.cache.withinLimit') : t('sessions.cache.overLimit')} />
+            </>}
+          </div>
+        </div>
+      )}
       {schedulerCache && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.prefixCache')}</h4>
@@ -741,8 +758,8 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <div className="grid grid-cols-2 gap-2 text-sm">
             <StatCard label={t('sessions.cache.requestId')} value={String(lastDurability.request_id || '—').slice(-12)} />
             <StatCard label={t('sessions.cache.durabilityWait')} value={typeof lastDurability.wait_ms === 'number' ? `${lastDurability.wait_ms.toFixed(1)} ms${lastDurability.waited ? '' : ` (${t('sessions.cache.durabilityAlreadyDurable')})`}` : '—'} />
-            {lastDurability.cache_outcome && (
-              <StatCard label={t('sessions.cache.durabilityOutcome')} value={String(lastDurability.cache_outcome)} />
+            {(lastDurability.cache_outcome ?? lastDurability.outcome) && (
+              <StatCard label={t('sessions.cache.durabilityOutcome')} value={String(lastDurability.cache_outcome ?? lastDurability.outcome)} />
             )}
             {lastDurability.retained_tokens != null && (
               <StatCard label={t('sessions.cache.durabilityRetained')} value={Number(lastDurability.retained_tokens).toLocaleString()} />

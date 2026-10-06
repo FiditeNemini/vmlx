@@ -13,7 +13,13 @@ import mlx.nn as nn
 from . import kernels as K
 from .format import codebook
 
-SORT_THRESHOLD = 64
+# Rows at which a dense JANGH projection switches from the per-row gather QMV
+# (weights re-read for EVERY row: Qwen3.8-27B JANGH2 forward +15 ms per extra
+# row) to the one-pass sorted QMM (~38 ms fixed, then nearly flat).  Measured
+# on M5 Max, 27B JANGH2 full forward: rows 1/2/4/5/8/16 = 37/53/83/97/150/264 ms
+# per-row vs 36/75/77/78/88/101 ms sorted -> crossover between 3 and 4 rows.
+# Verify windows (DFlash2 blocks of 5-8 rows, MTP depth+1) sit above it.
+SORT_THRESHOLD = 4
 ROTATIONS = ("none", "hadamard32")
 
 

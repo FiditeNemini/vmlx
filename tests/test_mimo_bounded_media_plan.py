@@ -148,6 +148,9 @@ class BoundedMiMoMediaPlanTests(unittest.TestCase):
                     _tight_memory_prefill_drain=True, prefill_step_size=2048,
                     _media_prefill_chunk_tokens=lambda n: 4096,
                     _media_placeholder_token_ids=lambda: {99},
+                    # a762afeba stores native GLM sequence blocks per chunk; with no native GLM cache the real
+                    # method returns at once, which this no-op mirrors.
+                    _store_glm_native_chunk=lambda *a: None,
                     _media_prefix_cache_allowed=lambda *a: True)
                 owner._native_media_clean_boundary = lambda req,n,c: ns['_native_media_clean_boundary'](owner,req,n,c)
                 def capture(req, actual_cache):
@@ -231,6 +234,9 @@ class BoundedMiMoMediaPlanTests(unittest.TestCase):
                     _tight_memory_prefill_drain=True, prefill_step_size=2048,
                     _media_prefill_chunk_tokens=lambda n: 4096,
                     _media_placeholder_token_ids=lambda: {99},
+                    # a762afeba stores native GLM sequence blocks per chunk; with no native GLM cache the real
+                    # method returns at once, which this no-op mirrors.
+                    _store_glm_native_chunk=lambda *a: None,
                     _media_prefix_cache_allowed=lambda *a: True)
                 owner._native_media_clean_boundary = lambda req,n,c: ns['_native_media_clean_boundary'](owner,req,n,c)
                 def capture(req, actual_cache):

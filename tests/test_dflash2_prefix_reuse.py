@@ -324,3 +324,19 @@ class TestRotatingCacheResumeMath:
 
         _patch_rotating_cache_resume_math()
         _patch_rotating_cache_resume_math()
+
+
+def test_system_end_cut_marks_the_first_tag_after_a_system_message():
+    from vmlx_engine.dflash2_runtime import _system_end_cut
+
+    class Tok:
+        def convert_tokens_to_ids(self, t):
+            return {"<|im_start|>": 900}[t]
+
+        def encode(self, text, add_special_tokens=False):
+            return {"system": [11]}[text]
+
+    sys_prompt = [900, 11, 5, 6, 7, 901, 900, 12, 8, 901, 900, 13]
+    assert _system_end_cut(Tok(), sys_prompt, 0) == 6
+    assert _system_end_cut(Tok(), sys_prompt, 6) is None          # already cached
+    assert _system_end_cut(Tok(), [900, 12, 8, 901, 900, 13], 0) is None   # no system message

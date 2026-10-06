@@ -127,6 +127,10 @@ class _TargetAdapter:
         self._target = language_model
         self.model = language_model.model
         self.gdn_states: list[Any] = []
+        # Set only around prompt prefill (_prefill_last_logits): the prefill
+        # helper keeps just logits[:, -1:], so projecting every prompt row
+        # through the 248k-vocab head is wasted work on the final chunk.
+        self.last_row_logits = False
 
     @property
     def layers(self):
@@ -136,10 +140,16 @@ class _TargetAdapter:
         hidden = self.model(
             inputs,
             cache=cache,
-            gdn_sink=self.gdn_states,
+            # The GDN sink records per-row q/k/v/a/b + state for verify
+            # rollback.  Prompt prefill never rolls back, and the list is only
+            # cleared at the first decode cycle, so during prefill it just
+            # pinned every chunk's qkv projection and recurrent state.
+            gdn_sink=None if self.last_row_logits else self.gdn_states,
             return_unnormed=True,
         )
         hidden = self.model.norm(hidden)
+        if self.last_row_logits and hidden.shape[1] > 1:
+            hidden = hidden[:, -1:]
         return self._target.lm_head(hidden)
 
     def __getattr__(self, name: str):
@@ -202,6 +212,26 @@ class _VLMGDNStateCapture:
                 conv_input[:, count : count + int(kernel_size) - 1]
             )
             gdn_index += 1
+
+
+def _prefill_last_logits(runtime: Any, adapter: Any, *args):
+    """runtime._prefill_target in prompt mode: last-row head, no GDN sink.
+
+    (1) Upstream ``_prefill_target`` returns ``logits[:, -1:]`` of the final
+    chunk; MLX does not push that slice through the matmul, so the whole chunk
+    (up to step-1 rows x 248,320 vocab, ~5 TFLOP and a ~1 GB temporary on
+    Qwen3.8-27B) was projected to keep one row.
+    (2) The target's GatedDeltaNet rollback sink is off (see
+    ``_TargetAdapter.__call__``): prefill never rolls back, and the sink held
+    every chunk's per-layer qkv rows and recurrent state alive until decode.
+    Hidden states (what the drafter consumes) and caches are unchanged.
+    """
+    previous = getattr(adapter, "last_row_logits", False)
+    try:
+        adapter.last_row_logits = True
+        return runtime._prefill_target(adapter, *args)
+    finally:
+        adapter.last_row_logits = previous
 
 
 def _adapter_for(model: Any) -> _TargetAdapter:
@@ -299,6 +329,43 @@ class _DFlash2SessionStore:
 
 _SESSION_STORE = _DFlash2SessionStore()
 
+# SSD (L2) behind the RAM store; see dflash2_session_disk.py.  Configured by
+# the CLI when a DFlash2 drafter is loaded; None = RAM tier only.
+_SESSION_SSD = None
+
+
+def configure_session_ssd(*, root, max_size_bytes: int, target_path: str, draft_path: str) -> None:
+    global _SESSION_SSD
+    from .dflash2_session_disk import DFlash2SessionSSD, model_identity
+
+    _SESSION_SSD = DFlash2SessionSSD(
+        root=root,
+        max_size_bytes=max_size_bytes,
+        model_key=model_identity(target_path, draft_path),
+    )
+    logger.info(
+        "DFlash2 session SSD tier: %s (budget %s)",
+        _SESSION_SSD.store.directory,
+        "unlimited" if not max_size_bytes else "%.1f GB" % (max_size_bytes / 1024**3),
+    )
+
+
+def _store_session(entry: dict) -> None:
+    """RAM store + SSD write-behind (when configured)."""
+    _SESSION_STORE.put(entry)
+    if _SESSION_SSD is not None:
+        try:
+            _SESSION_SSD.put(entry)
+        except Exception:
+            logger.warning("DFlash2 SSD snapshot failed; RAM entry kept", exc_info=True)
+
+
+def clear_sessions(include_ssd: bool) -> int:
+    _SESSION_STORE.clear()
+    if include_ssd and _SESSION_SSD is not None:
+        return _SESSION_SSD.clear()
+    return 0
+
 
 def _clone_cache_shells(cache: list, factory) -> Optional[list]:
     """Duplicate a prompt cache as fresh cache objects sharing the same
@@ -333,6 +400,22 @@ def _assistant_tag_cut(tokenizer: Any, prompt_list: list[int], cache_len: int):
         return None
     tag = int(tag)
     for i in range(len(prompt_list) - 1, -1, -1):
+        if prompt_list[i] == tag:
+            return i if cache_len < i < len(prompt_list) else None
+    return None
+
+
+def _system_end_cut(tokenizer: Any, prompt_list: list[int], cache_len: int):
+    """Index of the first <|im_start|> after a leading system message, or None
+    (no system message, or the cache already covers it)."""
+    try:
+        tag = int(tokenizer.convert_tokens_to_ids("<|im_start|>"))
+        role = tokenizer.encode("system", add_special_tokens=False)
+    except Exception:
+        return None
+    if tag < 0 or not prompt_list or prompt_list[0] != tag or prompt_list[1:1 + len(role)] != list(role):
+        return None
+    for i in range(1, len(prompt_list)):
         if prompt_list[i] == tag:
             return i if cache_len < i < len(prompt_list) else None
     return None
@@ -403,6 +486,25 @@ def _stream_generate_resumable(
         if _prefix_reuse_enabled()
         else None
     )
+    if resume is None and _prefix_reuse_enabled() and _SESSION_SSD is not None:
+        try:
+            _im_start = tokenizer.convert_tokens_to_ids("<|im_start|>")
+        except Exception:
+            _im_start = None
+        resume = _SESSION_SSD.take_matching(
+            prompt_list,
+            im_start_id=int(_im_start) if isinstance(_im_start, int) and _im_start >= 0 else None,
+            eos_ids=tokenizer.eos_token_ids,
+            make_target=lambda: runtime.make_prompt_cache(adapter),
+            # restored drafter caches carry offsets past the sliding window
+            make_draft=lambda: (_patch_rotating_cache_resume_math(), runtime.make_prompt_cache(draft))[1],
+        )
+        if resume is not None:
+            resume["model_key"] = model_key
+            logger.info(
+                "DFlash2 SSD hit: %s entry, %d of %d prompt tokens restored in %.2fs",
+                resume["kind"], resume["cache_len"], len(prompt_list), resume["load_s"],
+            )
     if resume is None and _prefix_reuse_enabled():
         misses = _SESSION_STORE.describe_misses(model_key, prompt_list)
         if misses:
@@ -436,7 +538,20 @@ def _stream_generate_resumable(
         if _prefix_reuse_enabled()
         else None
     )
-    boundary_shells = None
+    # A second snapshot at the end of the system message (the first
+    # <|im_start|> after "<|im_start|>system") when this request did not
+    # resume past it: a NEW conversation that shares the system prompt and
+    # tool schemas (the app's ~2k-token tools block) reuses it instead of
+    # re-prefilling it.  The boundary/turn entries cannot serve that case:
+    # they end after the first user message, which differs per conversation.
+    system_cut = (
+        _system_end_cut(tokenizer, prompt_list, cache_len)
+        if _prefix_reuse_enabled()
+        else None
+    )
+    if system_cut is not None and boundary_cut is not None and system_cut >= boundary_cut:
+        system_cut = None
+    snapshots: list = []
 
     try:
         tic = time.perf_counter()
@@ -446,31 +561,39 @@ def _stream_generate_resumable(
                 if all(t == "sliding_attention" for t in draft.config.layer_types)
                 else None
             )
-            if boundary_cut is not None:
-                _, hidden_a, _ = runtime._prefill_target(
-                    adapter,
-                    prompt_arr[cache_len:boundary_cut],
+            # Prefill in segments ending at each snapshot cut (system end,
+            # assistant tag); a cut costs one extra chunk boundary.
+            cuts = [(c, k) for c, k in ((system_cut, "system"), (boundary_cut, "boundary")) if c is not None]
+            if cuts:
+                parts, start = [], cache_len
+                for cut, kind in cuts:
+                    _, h, _ = _prefill_last_logits(
+                        runtime, adapter,
+                        prompt_arr[start:cut],
+                        target_cache,
+                        hidden_limit,
+                        prefill_step_size,
+                    )
+                    parts.append(h)
+                    snapshots.append((kind, cut, _clone_cache_shells(
+                        target_cache, lambda: runtime.make_prompt_cache(adapter)
+                    )))
+                    start = cut
+                logits, h, _ = _prefill_last_logits(
+                    runtime, adapter,
+                    prompt_arr[start:],
                     target_cache,
                     hidden_limit,
                     prefill_step_size,
                 )
-                boundary_shells = _clone_cache_shells(
-                    target_cache, lambda: runtime.make_prompt_cache(adapter)
-                )
-                logits, hidden_b, _ = runtime._prefill_target(
-                    adapter,
-                    prompt_arr[boundary_cut:],
-                    target_cache,
-                    hidden_limit,
-                    prefill_step_size,
-                )
-                hidden = mx.concatenate([hidden_a, hidden_b], axis=1)
+                parts.append(h)
+                hidden = mx.concatenate(parts, axis=1)
                 if hidden_limit is not None and hidden.shape[1] > hidden_limit:
                     hidden = hidden[:, -hidden_limit:]
                 hidden_offset = int(delta.size) - int(hidden.shape[1])
             else:
-                logits, hidden, hidden_offset = runtime._prefill_target(
-                    adapter, delta, target_cache, hidden_limit, prefill_step_size
+                logits, hidden, hidden_offset = _prefill_last_logits(
+                    runtime, adapter, delta, target_cache, hidden_limit, prefill_step_size
                 )
             draft_spliced = False
             if stored_draft_cache is not None and hidden.shape[1] == delta.size:
@@ -506,30 +629,32 @@ def _stream_generate_resumable(
                 prefill_elapsed,
             )
 
-        if boundary_shells is not None:
-            # Prompt-boundary snapshot: the conversation up to (not
-            # including) the assistant generation tag. The NEXT turn's
-            # prompt always contains this exact prefix, even when the
-            # template strips this turn's <think> block from history
+        for kind, cut, shells in snapshots:
+            if shells is None:
+                logger.info("DFlash2 %s snapshot skipped: cache clone failed", kind)
+                continue
+            # boundary: the conversation up to (not including) the assistant
+            # generation tag.  The NEXT turn's prompt always contains it, even
+            # when the template strips this turn's <think> block from history
             # (which makes the end-of-turn entry unmatchable).
-            _SESSION_STORE.put(
+            # system: the system message, shared by new conversations.
+            _store_session(
                 {
                     "model_key": model_key,
-                    "kind": "boundary",
-                    "tokens": prompt_list[:boundary_cut],
-                    "cache_len": int(boundary_cut),
-                    "target_cache": boundary_shells,
+                    "kind": kind,
+                    "tokens": prompt_list[:cut],
+                    "cache_len": int(cut),
+                    "target_cache": shells,
                     "draft_cache": None,
                     "draft_hidden_gap": None,
                 }
             )
             logger.info(
-                "DFlash2 boundary snapshot stored: %d of %d prompt tokens",
-                int(boundary_cut),
+                "DFlash2 %s snapshot stored: %d of %d prompt tokens",
+                kind,
+                int(cut),
                 len(prompt_list),
             )
-        elif boundary_cut is not None:
-            logger.info("DFlash2 boundary snapshot skipped: cache clone failed")
 
         tic = time.perf_counter()
         token = sampler(logits[:, -1:])[0, 0].item()
@@ -573,7 +698,7 @@ def _stream_generate_resumable(
                     store_draft = None
             elif gap_needed < 0:
                 store_draft = None
-            _SESSION_STORE.put(
+            _store_session(
                 {
                     "model_key": model_key,
                     "kind": "turn",
@@ -615,10 +740,15 @@ def _stream_generate_resumable(
         if not _target_can_trim:
             _capture = _VLMGDNStateCapture(adapter)
 
+        # Verify width per cycle (see _dflash2_block_plan / _BlockChooser):
+        # the width with the best predicted tokens per measured second.
+        block_min, block_max = _dflash2_block_plan(block_size)
+        chooser = _BlockChooser(block_min, block_max, _width_costs(adapter, block_min, block_max))
         while n < max_tokens:
-            bs = min(block_size, max_tokens - n + 1)
+            bs = min(chooser.width, max_tokens - n + 1)
             if bs <= 1:
                 break
+            _cycle_t0 = time.perf_counter()
 
             with mx.stream(runtime.generation_stream):
                 block = mx.array([[tokens[-1]] + [mask_id] * (bs - 1)])
@@ -687,7 +817,7 @@ def _stream_generate_resumable(
                 cycle_committed = bs
                 cycle_kept = len(new_tokens)
                 _checkpoint()
-                yield runtime._make_response(
+                resp = runtime._make_response(
                     detokenizer.last_segment,
                     new_tokens,
                     len(new_tokens),
@@ -697,6 +827,8 @@ def _stream_generate_resumable(
                     tic,
                     "stop",
                 )
+                resp.drafted = bs - 1      # width varies per cycle: stats need it
+                yield resp
                 return
 
             for t in new_tokens:
@@ -708,7 +840,7 @@ def _stream_generate_resumable(
             if n // 256 > previous_n // 256:
                 mx.clear_cache()
 
-            yield runtime._make_response(
+            resp = runtime._make_response(
                 detokenizer.last_segment,
                 new_tokens,
                 len(new_tokens),
@@ -717,7 +849,15 @@ def _stream_generate_resumable(
                 n,
                 tic,
             )
+            resp.drafted = bs - 1
+            yield resp
 
+            # The cycle is host-synchronous here (draft/target ids were read
+            # with .tolist()), so this wall time is the real cost of a width.
+            # It also includes the consumer's handling of the yield above
+            # (detokenized text -> SSE); that cost is per cycle too, so it
+            # belongs in a tokens-per-second comparison of widths.
+            chooser.observe(bs, len(new_tokens), time.perf_counter() - _cycle_t0)
             trim = bs - accepted - 1
             if trim > 0:
                 if _target_can_trim:
@@ -743,6 +883,134 @@ def _stream_generate_resumable(
     finally:
         if _capture is not None:
             _capture.close()
+
+
+class _BlockChooser:
+    """Pick the DFlash2 verify width with the best PREDICTED tokens per second.
+
+    Why not "widen after a full block": a wider verify can cost far more than
+    its extra rows suggest.  Measured on M5 Max (target forward by rows):
+    Qwen3.8-27B JANG_4D 5 rows 53 ms vs 8 rows 79 ms (MLX affine qmm switches
+    kernels at 6 rows), JANGH2 78 vs 88 ms.  Acceptance-only widening helped
+    JANGH2 (+36 % easy text) but cost JANG_4D ~5 % on prose/code.
+
+    Why not an EMA of measured tokens/second per width (the previous version):
+    it only learns about a width while running it, so the losing width is seen
+    one noisy probe at a time.  Served JANGH2 code ran 49.9 tok/s under it vs
+    59.9 at fixed width 8.
+
+    Model used here (expected tokens per ms, as in TensorFold's depth picker):
+      * Drafts are accepted as a prefix, so cycle tokens = 1 + accepted, and
+        E[tokens | w] = 1 + sum_{j=1}^{w-1} prod_{k<=j} p_k, where p_k is the
+        probability that draft position k is accepted given 1..k-1 were.
+      * p_k is estimated from every cycle, at ANY width: positions 1..accepted
+        count as hits, position accepted+1 (if verified) as a miss, deeper
+        positions were not tried.  So a run at width 5 updates p_1..p_4, which
+        width 8 shares.  Counts decay by ``decay`` per cycle (~7-cycle memory)
+        to follow easy/hard stretches.  A position with little data leans on
+        the previous position's estimate (one pseudo-trial), which is how
+        p_5..p_7 are extrapolated while running at width 5.
+      * Cost per width is an EMA of measured cycle seconds (drafter + verify).
+        Each width is run once to seed its cost, then the non-current width
+        is re-timed once every ``probe_every`` cycles (costs drift with
+        context length and GPU clock, not with text).
+    Exactness is unaffected: width only changes how many drafts are verified,
+    never the acceptance rule.
+    """
+
+    decay = 0.85
+    cost_alpha = 0.25
+    probe_every = 32
+    prior_p = 0.7
+
+    def __init__(self, low: int, high: int, cost: Optional[dict] = None):
+        self.widths = (low,) if high <= low else (low, high)
+        self.width = low
+        top = max(self.widths)
+        self.trials = [0.0] * top          # index k = draft position k (1-based)
+        self.hits = [0.0] * top
+        # Cost per width is a property of the model + kernels, not of the
+        # text, so it is shared across requests (``cost`` is the process-wide
+        # table from _width_costs).  A per-request table was seeded by each
+        # request's FIRST cycle at a width, which can include one-off work (a
+        # Metal kernel compiling for a new row count); with re-timing only
+        # every 32 cycles that inflated seed outlived a 300-token reply and
+        # kept the chooser off width 8 (served JANGH2 code 59.5 vs 63 fixed-8).
+        self.cost: dict = cost if cost is not None else {}
+        self.cycles = 0
+
+    def _accept_probs(self, w: int) -> list[float]:
+        out, prev = [], self.prior_p
+        for k in range(1, w):
+            prev = (self.hits[k] + prev) / (self.trials[k] + 1.0)
+            out.append(prev)
+        return out
+
+    def expected_tokens(self, w: int) -> float:
+        e, run = 1.0, 1.0
+        for p in self._accept_probs(w):
+            run *= p
+            e += run
+        return e
+
+    def observe(self, width: int, tokens: int, seconds: float) -> None:
+        if seconds <= 0 or width not in self.widths:
+            return                         # clipped final block: not a candidate width
+        accepted = tokens - 1
+        for k in range(1, len(self.trials)):
+            self.trials[k] *= self.decay
+            self.hits[k] *= self.decay
+        for k in range(1, min(accepted + 1, width - 1) + 1):
+            self.trials[k] += 1.0
+            if k <= accepted:
+                self.hits[k] += 1.0
+        warm = self.cost.setdefault("warm", set())
+        if width not in warm:
+            warm.add(width)                # first cycle at a width in this process: compile/warm-up
+        else:
+            c = self.cost.get(width)
+            self.cost[width] = seconds if c is None else c + self.cost_alpha * (seconds - c)
+        self.cycles += 1
+        if len(self.widths) == 1:
+            return
+        unseen = [w for w in self.widths if w not in self.cost]
+        if unseen:
+            self.width = unseen[0]
+        elif self.cycles % self.probe_every == 0:
+            self.width = self.widths[0] if width == self.widths[1] else self.widths[1]
+        else:
+            self.width = max(self.widths, key=lambda w: self.expected_tokens(w) / self.cost[w])
+
+
+_WIDTH_COSTS: dict = {}
+
+
+def _width_costs(adapter: Any, low: int, high: int) -> dict:
+    """Process-wide measured cycle cost per verify width for one target (see _BlockChooser)."""
+    return _WIDTH_COSTS.setdefault((id(adapter), low, high), {})
+
+
+def _dflash2_block_plan(trained_max: int) -> tuple[int, int]:
+    """(min, max) verify block for one request.
+
+    DFlash2 drafts a whole block (``bs-1`` masked positions) in ONE drafter
+    pass and verifies ``bs`` rows in one target forward, so a wider block costs
+    one wider verify while buying more tokens only when the drafter is right.
+    Default (``VMLX_DFLASH2_BLOCK`` unset or ``auto``): adaptive between 5 (the
+    measured default) and the drafter's trained maximum (8 for the Qwen3.8-27B
+    drafter). Setting VMLX_DFLASH2_BLOCK=<n> pins one fixed width for A/B.
+    """
+    import os
+    trained = max(2, int(trained_max))
+    raw = os.environ.get("VMLX_DFLASH2_BLOCK", "auto").strip().lower()
+    if raw not in ("", "auto"):
+        try:
+            fixed = max(2, min(int(raw), trained))
+            return fixed, fixed
+        except ValueError:
+            pass
+    low = min(5, trained)
+    return low, trained
 
 
 def stream_dflash2_generate(
@@ -773,7 +1041,7 @@ def stream_dflash2_generate(
             # The checkpoint's training maximum is larger, but using it as
             # the serving block makes four-row verification become seq8 and
             # cuts throughput roughly in half on M5 Max.
-            block_size=min(5, int(draft.config.block_size)),
+            block_size=int(draft.config.block_size),
             max_tokens=int(max_tokens),
             temperature=float(temperature),
             top_p=float(top_p),

@@ -16432,6 +16432,23 @@ async def clear_cache(
                 logger.exception("Native Omni SSD clear did not finish")
                 skipped.append("omni_session_disk:clear_failed")
 
+    from .speculative import is_dflash2_enabled as _df2_enabled
+
+    if (clear_resident_prefix or clear_prefix_l2) and _df2_enabled():
+        # DFlash2 lane (SimpleEngine): its own RAM session store and SSD tier.
+        # Reported only when a DFlash2 drafter is loaded, so other sessions'
+        # cleared/clear_failed status is unchanged.
+        from . import dflash2_runtime as _df2
+
+        try:
+            _df2.clear_sessions(include_ssd=clear_prefix_l2)
+            cleared.append("dflash2_sessions")
+            if clear_prefix_l2 and _df2._SESSION_SSD is not None:
+                cleared.append("dflash2_session_disk")
+        except Exception:
+            logger.exception("DFlash2 session clear did not finish")
+            skipped.append("dflash2_sessions:clear_failed")
+
     # Clear multimodal caches
     if cache_type in ("multimodal", "all"):
         try:

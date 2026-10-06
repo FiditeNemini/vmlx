@@ -4537,6 +4537,35 @@ class MLXMultimodalLM:
                         "ungrouped/unfused: %s",
                         exc,
                     )
+            # DFlash2 decodes ONLY through 5..8-row verify forwards.  MLX's
+            # quantized_matmul switches kernels with the row count (27B JANG_4D:
+            # 5 rows 53 ms, 8 rows 79 ms); the lane matmul (metal/lane_qmm.py,
+            # Metal 4 tensor ops) costs about the same for 1..16 rows, which makes
+            # the drafter's trained width 8 nearly free.  Target language model
+            # only; drafter, vision tower and every non-DFlash2 session keep MLX.
+            try:
+                from ..speculative import is_dflash2_enabled
+
+                if is_dflash2_enabled() and os.environ.get(
+                    "VMLX_LANE_QMM", "1"
+                ).strip().lower() not in ("0", "off", "false", "no"):
+                    import time as _time
+                    from ..metal import lane_qmm
+
+                    _t0 = _time.perf_counter()
+                    counts = lane_qmm.install(
+                        getattr(self.model, "language_model", self.model),
+                        tile=os.environ.get("VMLX_LANE_QMM_TILED", "1").strip()
+                        not in ("0", "off", "false", "no"),
+                    )
+                    logger.info(
+                        "DFlash2 target lane matmul: %d projections (%d tiled), "
+                        "kept on MLX: %s (%.1fs)",
+                        counts["lane"], counts["tiled"], counts["skipped"] or "none",
+                        _time.perf_counter() - _t0,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DFlash2 lane matmul not installed: %s", exc)
             self._loaded = True
 
         from .mimo_v26_contract import read_mimo_v26_contract
@@ -5453,6 +5482,7 @@ class MLXMultimodalLM:
         chat_messages: list[dict],
         enable_thinking: bool | None = None,
         tools: list[dict] | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         """
         Apply chat template to structured messages with enable_thinking support.
@@ -5485,6 +5515,12 @@ class MLXMultimodalLM:
             template_kwargs["enable_thinking"] = enable_thinking
         if tools:
             template_kwargs["tools"] = tools
+        if reasoning_effort:
+            # SimpleEngine forwards the request's effort here.  Without it the
+            # template rendered its default (Qwen3.8: xhigh) for every request
+            # on this path, so the effort control did nothing on DFlash2
+            # sessions (they always run SimpleEngine).
+            template_kwargs["reasoning_effort"] = reasoning_effort
         if model_type.startswith("glm5") and model_type not in {
             "glm5_next", "glm5_next_text"
         }:
@@ -6165,10 +6201,12 @@ class MLXMultimodalLM:
                 f"  Chat msg {i}: role={cm['role']}, content={content_preview}..."
             )
         enable_thinking = kwargs.pop("enable_thinking", None)
+        reasoning_effort = kwargs.pop("reasoning_effort", None)
         formatted_prompt = self._apply_chat_template(
             chat_messages,
             enable_thinking,
             tools=template_tools,
+            reasoning_effort=reasoning_effort,
         )
 
         # Post-template image count guard: VLM chat templates may not expand
@@ -6501,10 +6539,12 @@ class MLXMultimodalLM:
         # Apply chat template
         template_tools = kwargs.pop("tools", None)
         enable_thinking = kwargs.pop("enable_thinking", None)
+        reasoning_effort = kwargs.pop("reasoning_effort", None)
         formatted_prompt = self._apply_chat_template(
             chat_messages,
             enable_thinking,
             tools=template_tools,
+            reasoning_effort=reasoning_effort,
         )
 
         # Post-template image count guard: VLM chat templates may not expand
@@ -6550,6 +6590,8 @@ class MLXMultimodalLM:
                 top_k = int(kwargs.pop("top_k", 0))
                 token_count = 0
                 emitted_per_cycle: list[int] = []
+                drafted_total = 0
+                width_cycles: dict[int, int] = {}
                 last_chunk = None
                 stats_logged = False
                 logger.info("DFlash2 text chat active for %s", self.model_name)
@@ -6567,6 +6609,10 @@ class MLXMultimodalLM:
                     token_count += emitted
                     if getattr(chunk, "accepted", None) is not None:
                         emitted_per_cycle.append(int(chunk.accepted))
+                        # verify width is adaptive (dflash2_runtime._BlockChooser)
+                        _w = int(getattr(chunk, "drafted", 4)) + 1
+                        drafted_total += _w - 1
+                        width_cycles[_w] = width_cycles.get(_w, 0) + 1
                     last_chunk = chunk
                     if getattr(chunk, "finish_reason", None) is not None:
                         cycles = len(emitted_per_cycle)
@@ -6574,11 +6620,12 @@ class MLXMultimodalLM:
                         accepted_draft = sum(
                             max(0, n - 1) for n in emitted_per_cycle
                         )
-                        proposed_draft = cycles * 4
+                        proposed_draft = drafted_total
                         logger.info(
                             "DFlash2 generation stats: prompt_tokens=%d "
                             "output_tokens=%d cycles=%d emitted_per_cycle=%.3f "
                             "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
+                            "prompt_tps=%.1f peak_memory=%.2fGB block_widths=%s "
                             "finish_reason=%s",
                             int(getattr(chunk, "prompt_tokens", 0) or 0),
                             token_count,
@@ -6586,6 +6633,9 @@ class MLXMultimodalLM:
                             mean_emitted,
                             100.0 * accepted_draft / max(1, proposed_draft),
                             float(getattr(chunk, "generation_tps", 0.0) or 0.0),
+                            float(getattr(chunk, "prompt_tps", 0.0) or 0.0),
+                            float(getattr(chunk, "peak_memory", 0.0) or 0.0),
+                            dict(sorted(width_cycles.items())),
                             chunk.finish_reason,
                         )
                         stats_logged = True
@@ -6609,7 +6659,7 @@ class MLXMultimodalLM:
                         token_count,
                         cycles,
                         mean_emitted,
-                        100.0 * accepted_draft / max(1, cycles * 4),
+                        100.0 * accepted_draft / max(1, drafted_total),
                         float(getattr(last_chunk, "generation_tps", 0.0) or 0.0),
                         getattr(last_chunk, "finish_reason", None),
                     )

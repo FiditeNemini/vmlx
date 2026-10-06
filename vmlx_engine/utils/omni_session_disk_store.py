@@ -21,9 +21,12 @@ SCHEMA = "omni_native_snapshot_v2"
 
 
 class OmniSessionDiskStore:
-    def __init__(self, *, root, model_key, max_size_bytes, ttl_minutes=0):
+    def __init__(self, *, root, model_key, max_size_bytes, ttl_minutes=0, schema=SCHEMA):
+        # ``schema`` keeps another runtime's snapshots (DFlash2 sessions) in
+        # their own namespace and sidecar contract inside the same managed pool.
+        self.schema = str(schema)
         self.root = Path(root).expanduser().resolve()
-        namespace = hashlib.sha256(f"{model_key}:{SCHEMA}".encode()).hexdigest()[:16]
+        namespace = hashlib.sha256(f"{model_key}:{self.schema}".encode()).hexdigest()[:16]
         directory = ensure_managed_block_cache_namespace(self.root / namespace)
         self.directory = directory / "native_sessions"
         self.directory.mkdir(exist_ok=True)
@@ -83,7 +86,7 @@ class OmniSessionDiskStore:
                 with temp.open("rb") as handle:
                     os.fsync(handle.fileno())
                 with temp_side.open("x") as handle:
-                    json.dump({"schema": SCHEMA, "signature": signature}, handle)
+                    json.dump({"schema": self.schema, "signature": signature}, handle)
                     handle.flush()
                     os.fsync(handle.fileno())
                 size = temp.stat().st_size + temp_side.stat().st_size
@@ -117,7 +120,7 @@ class OmniSessionDiskStore:
             if data.is_symlink() or side.is_symlink() or self._expired(side):
                 return None
             metadata = json.loads(side.read_text())
-            if metadata.get("schema") != SCHEMA or metadata.get("signature") != signature:
+            if metadata.get("schema") != self.schema or metadata.get("signature") != signature:
                 return None
             value = reader(data)
             os.utime(data, None)

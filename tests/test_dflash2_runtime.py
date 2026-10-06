@@ -78,7 +78,7 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
     model._normalize_text_only_messages_for_processor = (
         lambda messages, has_media: messages
     )
-    model._apply_chat_template = lambda messages, enable_thinking, tools=None: "PROMPT"
+    model._apply_chat_template = lambda messages, enable_thinking, tools=None, reasoning_effort=None: "PROMPT"
 
     chunks = [
         SimpleNamespace(

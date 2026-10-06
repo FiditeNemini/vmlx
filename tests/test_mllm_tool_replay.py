@@ -299,3 +299,29 @@ async def test_simple_engine_forwards_effective_tools_to_mllm_chat():
 
     assert fake.kwargs is not None
     assert fake.kwargs["tools"][0]["function"]["name"] == "smoke__echo"
+
+
+def test_mllm_chat_template_receives_reasoning_effort(monkeypatch):
+    """SimpleEngine forwards reasoning_effort to the MLLM stream_chat path (DFlash2 sessions always
+    run there); the template must receive it, or every request renders the template default."""
+    captured = {}
+
+    def fake_get_chat_template(processor, messages, add_generation_prompt, **kwargs):
+        captured["kwargs"] = kwargs
+        return "prompt"
+
+    import mlx_vlm.prompt_utils as prompt_utils
+
+    monkeypatch.setattr(prompt_utils, "get_chat_template", fake_get_chat_template)
+    model = object.__new__(MLXMultimodalLM)
+    model.processor = object()
+    model.config = {}
+    model.model_name = "qwen-mllm-effort-test"
+    model._apply_chat_template(
+        [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        enable_thinking=True,
+        reasoning_effort="low",
+    )
+    assert captured["kwargs"]["reasoning_effort"] == "low"
+    model._apply_chat_template([{"role": "user", "content": "hi"}], enable_thinking=True)
+    assert "reasoning_effort" not in captured["kwargs"]

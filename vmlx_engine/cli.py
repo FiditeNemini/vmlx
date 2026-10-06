@@ -1175,6 +1175,40 @@ def _is_image_serve_request(args) -> bool:
             and ((folder / "text_encoder").is_dir() or (folder / "vae").is_dir()))
 
 
+def _configure_dflash2_session_ssd(args, draft_path: str, explicit) -> None:
+    """SSD tier for DFlash2 multiturn sessions (vmlx_engine/dflash2_session_disk.py).
+
+    On unless --disable-block-disk-cache was given or VMLX_DFLASH2_SSD=0.  It
+    lives in the same managed pool and aggregate budget as the block cache
+    (--block-disk-cache-dir / -max-gb / -max-percent).  A failure leaves the
+    RAM tier working and is logged; it never blocks the server.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    if explicit is False:
+        logger.info("DFlash2 session SSD tier off (--disable-block-disk-cache)")
+        return
+    if os.environ.get("VMLX_DFLASH2_SSD", "1").strip().lower() in ("0", "off", "false", "no"):
+        logger.info("DFlash2 session SSD tier off (VMLX_DFLASH2_SSD=0)")
+        return
+    try:
+        from .dflash2_runtime import configure_session_ssd
+
+        root = getattr(args, "block_disk_cache_dir", None) or os.path.expanduser(
+            "~/.cache/vmlx-engine/block-cache"
+        )
+        max_gb = resolve_block_disk_cache_max_gb(args)
+        configure_session_ssd(
+            root=root,
+            max_size_bytes=int(float(max_gb) * 1024**3),
+            target_path=args.model,
+            draft_path=draft_path,
+        )
+    except Exception:
+        logger.warning("DFlash2 session SSD tier unavailable; RAM tier only", exc_info=True)
+
+
 def serve_command(args):
     """Start the OpenAI-compatible server."""
     import logging
@@ -1643,6 +1677,12 @@ def serve_command(args):
             )
             sys.exit(1)
         server._default_repetition_penalty = args.default_repetition_penalty
+
+    # The DFlash2 session SSD tier (configured where the drafter loads, below)
+    # follows an EXPLICIT --enable/--disable-block-disk-cache.  Read it before
+    # _apply_paged_block_disk_default() overwrites the attribute: DFlash2 runs
+    # without continuous batching, which that helper turns into "off".
+    _block_disk_explicit = getattr(args, "enable_block_disk_cache", None)
 
     # A DFlash2 drafter shipped inside the bundle (`<bundle>/dflash2`) is used
     # by default; an explicit --speculative-model wins and --no-bundled-dflash2
@@ -2810,6 +2850,10 @@ def serve_command(args):
         )
         load_draft_model(spec_config)
         print(f"Draft model loaded: {spec_model}")
+        from .speculative import _is_dflash2_model as _is_df2
+
+        if _is_df2(spec_model):
+            _configure_dflash2_session_ssd(args, spec_model, _block_disk_explicit)
 
         # Warn about incompatible combinations
         if getattr(args, 'continuous_batching', False):

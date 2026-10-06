@@ -185,6 +185,10 @@ class DFlash2SessionSSD:
                 self.stats["write_errors"] += 1
                 logger.warning("DFlash2 SSD write failed", exc_info=True)
             finally:
+                # A daemon waiting in get() otherwise retains the last full
+                # snapshot indefinitely through these loop-local references.
+                # Release completed payloads before signalling the write done.
+                del arrays, meta
                 self._q.task_done()
 
     def flush(self, timeout: float = 60.0) -> bool:

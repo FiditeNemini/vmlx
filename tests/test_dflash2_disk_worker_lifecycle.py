@@ -12,6 +12,21 @@ import pytest
 from vmlx_engine.dflash2_session_disk import DFlash2SessionSSD
 
 
+@pytest.mark.parametrize("settled", [False, True])
+def test_clear_does_not_delete_while_writer_is_unsettled(settled):
+    ssd = DFlash2SessionSSD.__new__(DFlash2SessionSSD)
+    deleted = []
+    ssd.store = types.SimpleNamespace(clear=lambda: deleted.append(True) or 3)
+    ssd.flush = lambda timeout: settled
+    if settled:
+        assert ssd.clear() == 3
+        assert deleted == [True]
+    else:
+        with pytest.raises(TimeoutError, match="pending SSD writes"):
+            ssd.clear()
+        assert not deleted
+
+
 @pytest.mark.parametrize("save_fails", [False, True])
 def test_idle_writer_releases_finished_snapshot(monkeypatch, tmp_path, save_fails):
     class Payload:

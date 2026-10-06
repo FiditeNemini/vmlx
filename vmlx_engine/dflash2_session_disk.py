@@ -269,7 +269,10 @@ class DFlash2SessionSSD:
         return None
 
     def clear(self) -> int:
-        self.flush(10.0)
+        # A timed-out writer can still publish its atomic rename. Deleting
+        # now would report success and then let that write resurrect an entry.
+        if not self.flush(10.0):
+            raise TimeoutError("DFlash2 cache clear waiting for pending SSD writes; retry when idle")
         return self.store.clear()
 
 

@@ -1102,7 +1102,12 @@ _VERIFY_MAX_ROWS = 4  # depth 3 + 1 bonus row
 # byte-identical outputs at every context; source-matched Electron run with
 # rows=4 (three connected turns to a 20k-token prompt, coherent) and the raw
 # API tool probe on the same app engine (3/3 calls with arguments).
-_DEFAULT_GROUP_ROWS = _VERIFY_MAX_ROWS
+# 8, not the MTP verify width 4: copy-draft verify windows reach 8 rows, and
+# above 4 rows the separate GDN projections round differently from the
+# grouped decode QMM (measured: first divergence at 6 rows, layer 17 GDN,
+# greedy token flipped).  Rows <= 4 are unaffected; the HC compile path adds
+# one trace per admitted width.
+_DEFAULT_GROUP_ROWS = 8
 # Widest GDN piece of a verify window whose conv/recurrence arithmetic is
 # proven bit-identical to single-token decode; wider windows are chained in
 # pieces of this size (GatedDeltaNet._process_rows_exact).

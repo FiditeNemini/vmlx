@@ -327,6 +327,13 @@ def qwen4_affine_switchglu(
         # ~1.7k differing elements per row on 2-bit experts). Routed experts
         # are row-specific, so running each row through the exact decode
         # dispatch costs launches, not extra weight bytes.
+        # Multi-row exact kernels (qwen4_rows_exact_moe): the same pair and
+        # exact-down arithmetic per row, two launches per layer instead of R
+        # whole single-row dispatches.  None -> keep the per-row loop below.
+        from vmlx_engine.metal.qwen4_rows_exact_moe import rows_exact_switchglu
+        fused_rows = rows_exact_switchglu(switch, x, indices, scores)
+        if fused_rows is not None:
+            return fused_rows, True
         pieces = [
             qwen4_affine_switchglu(
                 switch, x[:, r:r + 1], indices[:, r:r + 1], scores[:, r:r + 1]

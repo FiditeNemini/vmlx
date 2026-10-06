@@ -68,12 +68,13 @@ def test_env_rows_parsing(monkeypatch):
     monkeypatch.setenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", "3")
     assert L._hc_compile_max_rows() == 3
     monkeypatch.setenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", "garbage")
-    assert L._hc_compile_max_rows() == 4
+    assert L._hc_compile_max_rows() == 8
     monkeypatch.setenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", "0")
     assert L._hc_compile_max_rows() == 1
     monkeypatch.delenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS")
     monkeypatch.delenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", raising=False)
-    assert L._hc_compile_max_rows() == 4 and L._gdn_group_max_rows() == 4
+    # default 8: verify windows (MTP and copy drafts) reach 8 rows
+    assert L._hc_compile_max_rows() == 8 and L._gdn_group_max_rows() == 8
 
 
 @pytest.mark.parametrize("rows", [1, 2, 3, 4])

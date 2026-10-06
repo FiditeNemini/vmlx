@@ -2073,9 +2073,9 @@ def test_small_row_sigmoid_gated_rmsnorm_refuses_prefill_width():
 
 
 def test_qwen4_exp_gdn_projection_fusion_stops_at_the_verify_width(monkeypatch):
-    """Decode (1 row) and, when admitted, MTP verification (up to 4 rows)
-    take the grouped projection; prefill-width chunks keep the stock
-    per-projection QMMs."""
+    """Decode (1 row) and verification windows (up to 8 rows: MTP depth+1 and
+    copy-draft windows) take the grouped projection; prefill-width chunks keep
+    the stock per-projection QMMs."""
     from vmlx_engine.models.qwen4_exp.language import (
         _decode_quantized_linears_fused,
     )
@@ -2086,8 +2086,8 @@ def test_qwen4_exp_gdn_projection_fusion_stops_at_the_verify_width(monkeypatch):
         nn.Linear(64, 64, bias=False).to_quantized(group_size=64, bits=4)
         for _ in range(4)
     )
-    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 4, 64))) is not None
-    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 5, 64))) is None
+    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 8, 64))) is not None
+    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 9, 64))) is None
     assert _decode_quantized_linears_fused(linears, mx.zeros((1, 64, 64))) is None
 
 
@@ -2964,7 +2964,8 @@ def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
         raise AssertionError("prefill must not use the short-chunk compiled path")
 
     module._compiled_forward = forbidden_decode
-    prefill = module(mx.zeros((1, 5, 256), dtype=mx.float32))
+    # verify windows reach 8 rows (copy drafts); 9+ rows is prefill
+    prefill = module(mx.zeros((1, 9, 256), dtype=mx.float32))
     mx.eval(*prefill)
 
 

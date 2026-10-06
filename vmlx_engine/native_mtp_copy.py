@@ -16,8 +16,9 @@ copy displaces the head's own drafts). The continuation after the longest such m
 Exactness: copies change only WHICH tokens fill the verify window. The verify forward, the acceptance rule (an
 exact match against the target's own sample for every row, which is distribution-preserving for sampled requests
 because every emitted token is the target's sample), the bonus/correction and the rollback are the existing
-native-MTP ones. Default width 3 keeps the window at 4 rows, the row-exact verify shape on 2-5-bit weights
-(``metal/row_exact_qmv._max_rows``), so greedy output stays byte-identical to AR.
+native-MTP ones. Width starts at 3 (4 verify rows) and grows to 7 (8 rows) after a fully accepted window. Verify windows up to 8 rows are
+row-exact: dense QMV in <=4/<=6-row blocks (row_exact_qmv._row_blocks), grouped GDN projections up to 8 rows,
+multi-row exact MoE (metal/qwen4_rows_exact_moe), so greedy output stays byte-identical to AR.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 NGRAM = 4
+_START_WIDTH = 3
 _POSITIONS_KEPT = 4
 _MAX_EXTEND = 256
 
@@ -48,7 +50,7 @@ def copy_min_match() -> int:
 
 
 def copy_max_width() -> int:
-    return _env_int("VMLX_NATIVE_MTP_COPY_MAX", 3, 1)
+    return _env_int("VMLX_NATIVE_MTP_COPY_MAX", 7, 1)
 
 
 @dataclass
@@ -73,6 +75,7 @@ class SuffixCopyProposer:
     stats: CopyStats = field(default_factory=CopyStats)
     _index: Dict[tuple, List[int]] = field(default_factory=dict)
     _confirmed: int = 0
+    width: int = 3
     _miss_streak: int = 0
     _silent_for: int = 0
     last_match: int = 0
@@ -116,9 +119,15 @@ class SuffixCopyProposer:
         self._confirmed = total
 
     def propose(self, room: int) -> List[int]:
-        """Up to min(max_width, room) copied tokens, or [] when no earlier span matches the suffix well enough."""
+        """Up to min(width, room) copied tokens, or [] when no earlier span matches the suffix well enough.
+
+        ``width`` adapts like TensorFold's per-stream copy width: it starts at
+        ``_START_WIDTH`` (the 4-row verify shape), grows to ``max_width`` after a
+        fully accepted window and falls back after a window that lands under
+        half, so a run of reliable copying pays for wide windows and a shaky
+        match costs at most a 4-row verify."""
         self.last_match = 0
-        width = min(self.max_width, int(room))
+        width = min(self.width, self.max_width, int(room))
         toks = self.tokens
         n = len(toks)
         if width <= 0 or n < max(NGRAM, self.min_match) + 1:
@@ -153,6 +162,10 @@ class SuffixCopyProposer:
         self.stats.cycles += 1
         self.stats.drafted += int(drafted)
         self.stats.accepted += int(accepted)
+        if drafted and accepted == drafted:
+            self.width = self.max_width
+        elif drafted and 2 * accepted < drafted:
+            self.width = _START_WIDTH
         if accepted == 0:
             self.stats.first_misses += 1
             self._miss_streak += 1

@@ -1108,7 +1108,7 @@
       "useBundledDflash2": "Usar el drafter DFlash2 incluido ({{name}})",
       "useBundledDflash2Tooltip": "Activado por defecto cuando el paquete del modelo incluye un drafter DFlash2. Un modelo borrador indicado abajo tiene prioridad. Desactivado = se usa el MTP nativo del paquete (Adaptativo/AR).",
       "nativeMtpOffForDrafter": "El MTP nativo está desactivado mientras haya un drafter DFlash2 seleccionado (no pueden compartir el paso de decodificación). Borra el modelo borrador o desactiva el drafter incluido para volver a usar MTP adaptativo.",
-      "dflash2AdaptiveBlockNote": "DFlash2 elige su bloque de verificación en cada paso: 5 tokens o los 8 con los que se entrenó el drafter, el que produzca más tokens por segundo con este texto. Tokens borrador por paso no se aplica."
+      "dflash2AdaptiveBlockNote": "DFlash2 elige su bloque de verificación en cada paso, hasta el doble del bloque con el que se entrenó el drafter (8 o 16 tokens; 5 cuando las verificaciones anchas son costosas), el que produzca más tokens por segundo con este texto. Tokens borrador por paso no se aplica."
     },
     "create": {
       "title": "Crear sesión",

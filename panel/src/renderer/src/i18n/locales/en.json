@@ -1108,7 +1108,7 @@
       "useBundledDflash2": "Use the bundled DFlash2 drafter ({{name}})",
       "useBundledDflash2Tooltip": "On by default when the model bundle includes a DFlash2 drafter. A Draft model entered below takes precedence. Off = the bundle's native MTP (Adaptive/AR) is used instead.",
       "nativeMtpOffForDrafter": "Native MTP is off while a DFlash2 drafter is selected (the two cannot share a decode step). Clear the Draft model or turn the bundled drafter off to use Adaptive MTP again.",
-      "dflash2AdaptiveBlockNote": "DFlash2 picks its verify block each step: 5 tokens or the drafter's trained 8, whichever is producing more tokens per second on this text. Draft Tokens per Step does not apply."
+      "dflash2AdaptiveBlockNote": "DFlash2 picks its verify block each step, up to twice the drafter's trained block (8 or 16 tokens; 5 when wide verifies are costly), whichever produces more tokens per second on this text. Draft Tokens per Step does not apply."
     },
     "create": {
       "title": "Create Session",

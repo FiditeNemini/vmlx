@@ -1108,7 +1108,7 @@
       "useBundledDflash2": "번들에 포함된 DFlash2 드래프터 사용({{name}})",
       "useBundledDflash2Tooltip": "모델 번들에 DFlash2 드래프터가 있으면 기본으로 켜집니다. 아래에 입력한 드래프트 모델이 우선합니다. 끄면 번들의 네이티브 MTP(Adaptive/AR)를 사용합니다.",
       "nativeMtpOffForDrafter": "DFlash2 드래프터가 선택된 동안 네이티브 MTP는 꺼집니다(같은 디코딩 단계를 공유할 수 없음). Adaptive MTP로 돌아가려면 드래프트 모델을 비우거나 번들 드래프터를 끄세요.",
-      "dflash2AdaptiveBlockNote": "DFlash2는 단계마다 검증 블록 폭을 고릅니다(5토큰 또는 드래프터 학습 폭 8). 현재 텍스트에서 초당 토큰이 더 많은 쪽을 사용합니다. 단계당 드래프트 토큰 수는 적용되지 않습니다."
+      "dflash2AdaptiveBlockNote": "DFlash2는 단계마다 검증 블록 폭을 고릅니다. 드래프터 학습 폭의 최대 2배(8 또는 16토큰, 넓은 검증이 비쌀 때는 5) 중 현재 텍스트에서 초당 토큰이 더 많은 쪽을 사용합니다. 단계당 드래프트 토큰 수는 적용되지 않습니다."
     },
     "create": {
       "title": "세션 생성",

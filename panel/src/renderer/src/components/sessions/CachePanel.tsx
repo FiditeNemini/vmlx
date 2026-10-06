@@ -271,7 +271,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     schedulerStats?.last_cache_execution ??
     schedulerStats?.batch_generator?.last_cache_execution
   // the last completed generation's terminal fence (request-exact; engine field last_durability)
-  const lastDurability = (schedulerStats?.batch_generator?.last_durability ?? schedulerStats?.last_durability) as
+  const lastDurability = (schedulerStats?.batch_generator?.last_durability ?? schedulerStats?.last_durability ?? stats?.engine_stats?.last_durability) as
     | { request_id?: string; wait_ms?: number; waited?: boolean; cache_outcome?: string; outcome?: string; retained_tokens?: number | null; detail?: string; at?: number }
     | null
     | undefined
@@ -1153,7 +1153,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         </div>
       )}
 
-      {!schedulerCache && !schedulerStats && !stats?.error && (
+      {!schedulerCache && !schedulerStats && !dflash2Cache && !stats?.error && (
         <div className="text-sm text-muted-foreground">{t('sessions.cachePanel.loading')}</div>
       )}
 

@@ -14703,7 +14703,7 @@ async def cache_stats():
         if _df2_cache_enabled():
             from .dflash2_runtime import session_cache_stats
             result["dflash2_cache"] = session_cache_stats()
-            result["scheduler_stats"] = {
+            result["engine_stats"] = {
                 "last_durability": _engine.get_stats().get("last_durability")
             }
 

@@ -30246,6 +30246,7 @@ async def stream_responses_api(
     ]
 
     # H4: Validate text format at end of stream.
+    _format_error = None
     _text_fmt = getattr(request, "text", None)
     # Convert Pydantic model to dict for uniform access
     if _text_fmt and hasattr(_text_fmt, "model_dump"):
@@ -30290,13 +30291,14 @@ async def stream_responses_api(
                     logger.warning(
                         f"Stream {response_id}: JSON schema validation failed (strict): {_err}"
                     )
+                    _format_error = {
+                        "type": "invalid_request_error",
+                        "message": f"response_format strict mode: {_err}",
+                        "code": "json_validation_failed",
+                    }
                     yield _sse(
                         "error",
-                        {
-                            "type": "error",
-                            "message": f"response_format strict mode: {_err}",
-                            "code": "json_validation_failed",
-                        },
+                        {**_format_error, "type": "error", "error": _format_error},
                     )
                 else:
                     logger.warning(
@@ -30354,7 +30356,7 @@ async def stream_responses_api(
     _response_terminal = _responses_terminal_state(
         _resp_finish,
         cancelled=_response_was_cancelled,
-        failed=_required_tool_contract_failed,
+        failed=_required_tool_contract_failed or _format_error is not None,
         reasoning_only_no_content=_stream_reasoning_only,
         tool_calls_rejected=bool(
             _TOOL_CALL_REJECTED.get() and not tool_calls and not display_text.strip()
@@ -30403,7 +30405,7 @@ async def stream_responses_api(
         "output": all_output_items,
         **_resp_extra,
         **({"effort_substitution": _effort_record} if _effort_record else {}),
-        **({"error": _required_tool_error} if _required_tool_error else {}),
+        **({"error": _required_tool_error or _format_error} if _required_tool_error or _format_error else {}),
         **({"warnings": _stream_warnings} if _stream_warnings else {}),
         "usage": {
             "input_tokens": prompt_tokens,
@@ -30422,7 +30424,7 @@ async def stream_responses_api(
             ),
         },
     }
-    if not _response_was_cancelled and not _required_tool_contract_failed:
+    if not _response_was_cancelled and not _required_tool_contract_failed and _format_error is None:
         _responses_store_history(
             response_id,
             (history_messages if history_messages is not None else messages)

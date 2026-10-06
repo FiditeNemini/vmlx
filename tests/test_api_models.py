@@ -918,3 +918,29 @@ class TestParameterValidation:
     def test_n_one_accepted(self):
         req = ChatCompletionRequest(model="test", messages=[Message(role="user", content="hi")], n=1)
         assert req.n == 1
+
+class TestResponsesTextEnvelope:
+    def test_standard_schema_is_normalized_without_mutating_input(self):
+        schema = {"type": "object", "properties": {"total": {"type": "integer"}}, "required": ["total"]}
+        fmt = {"type": "json_schema", "name": "total", "schema": schema, "strict": True}
+        req = ResponsesRequest(model="unit", input="calculate", text={"format": fmt})
+        actual = req.text if isinstance(req.text, dict) else req.text.model_dump(exclude_none=True)
+        assert actual == {"type": "json_schema", "json_schema": {"name": "total", "schema": schema, "strict": True}}
+        assert fmt["schema"] == schema and "json_schema" not in fmt
+
+    @pytest.mark.parametrize("kind", ["text", "json_object"])
+    def test_standard_simple_formats(self, kind):
+        req = ResponsesRequest(model="unit", input="hi", text={"format": {"type": kind}})
+        actual = req.text if isinstance(req.text, dict) else req.text.model_dump(exclude_none=True)
+        assert actual == {"type": kind}
+
+    def test_legacy_schema_unchanged(self):
+        fmt = {"type": "json_schema", "json_schema": {"name": "legacy", "schema": {"type": "object"}, "strict": True}}
+        req = ResponsesRequest(model="unit", input="hi", text=fmt)
+        actual = req.text if isinstance(req.text, dict) else req.text.model_dump(exclude_none=True)
+        assert actual == fmt
+
+    @pytest.mark.parametrize("fmt", [None, "json", {}, {"type": "invalid"}, {"type": "json_schema"}, {"type": "json_schema", "schema": []}])
+    def test_invalid_envelope_is_not_silently_ignored(self, fmt):
+        with pytest.raises(ValueError, match="text.format"):
+            ResponsesRequest(model="unit", input="hi", text={"format": fmt})

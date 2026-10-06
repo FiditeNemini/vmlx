@@ -1104,6 +1104,31 @@ class ResponsesRequest(BaseModel):
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
     text: ResponsesTextFormat | dict | None = None
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def normalize_text_format(cls, value):
+        """Translate the Responses text.format envelope to the internal format.
+
+        Retain the legacy flat format accepted by vMLX. Normalize before the
+        model/dict union so every downstream consumer sees the same shape.
+        """
+        if not isinstance(value, dict) or "format" not in value:
+            return value
+        fmt = value["format"]
+        if not isinstance(fmt, dict):
+            raise ValueError("text.format must be an object")
+        kind = fmt.get("type")
+        if kind not in ("text", "json_object", "json_schema"):
+            raise ValueError("text.format.type must be text, json_object, or json_schema")
+        if kind == "json_schema":
+            if not isinstance(fmt.get("schema"), dict):
+                raise ValueError("text.format.schema must be an object")
+            return {
+                "type": kind,
+                "json_schema": {key: fmt[key] for key in ("name", "description", "schema", "strict") if key in fmt},
+            }
+        return {"type": kind}
     # For multi-turn chaining
     previous_response_id: str | None = None
     store: bool = False

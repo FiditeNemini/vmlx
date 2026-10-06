@@ -430,6 +430,9 @@ def prepackage_clearance_from_release_clearance(release_clearance: dict) -> dict
 # This is a prepackage evidence reader, never a substitute for installed proof.
 SCOPED_PREPACKAGE_SCHEMA = "vmlx-scoped-prepackage-v1"
 SCOPED_MODELS = {"flash-next-affine4m", "flash-next-jangh4"}
+SCOPED_DFLASH_SCHEMA = "vmlx-scoped-prepackage-v2"
+SCOPED_DFLASH_MODELS = SCOPED_MODELS | {"qwen27b-dflash2-affine4d", "qwen27b-dflash2-jangh2"}
+SCOPED_DFLASH_RECEIPTS = {"DFLASH_DEFAULTS", "DFLASH_CACHE", "DFLASH_API", "DFLASH_NONREGRESSION"}
 SCOPED_REQUIRED_RECEIPTS = {
     "PROVENANCE", "SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION",
     "NATIVE_MTP", "API_CACHE", "API_SURFACE", "MCP", "JANG_COMPAT",
@@ -463,12 +466,15 @@ def validate_scoped_prepackage(
         data = json.loads(raw)
         result["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
         evidence_root = path.resolve().parent
-        if not isinstance(data, dict) or data.get("schema") != SCOPED_PREPACKAGE_SCHEMA:
+        if not isinstance(data, dict) or data.get("schema") not in {SCOPED_PREPACKAGE_SCHEMA, SCOPED_DFLASH_SCHEMA}:
             raise ValueError("unsupported scoped prepackage schema")
+        expanded = data["schema"] == SCOPED_DFLASH_SCHEMA
+        required_models = SCOPED_DFLASH_MODELS if expanded else SCOPED_MODELS
+        required_receipts = SCOPED_REQUIRED_RECEIPTS | (SCOPED_DFLASH_RECEIPTS if expanded else set())
         if data.get("phase") != "prepackage" or data.get("version") != expected_version:
             raise ValueError("scoped phase/version mismatch")
-        if set(data.get("models", [])) != SCOPED_MODELS:
-            raise ValueError("scoped active models must be exactly affine4m and jangh4")
+        if set(data.get("models", [])) != required_models:
+            raise ValueError("scoped active models must match the schema model set")
         if data.get("pending_stages") != SCOPED_PENDING_STAGES:
             raise ValueError("packaging/install/publication stages must remain pending")
         if data.get("active_gaps") != []:
@@ -497,7 +503,7 @@ def validate_scoped_prepackage(
 
         scope_file = bound_file(data.get("scope_document"))
         scope = json.loads(scope_file.read_bytes())
-        if set(scope.get("models", [])) != SCOPED_MODELS or set(scope.get("required_receipts", [])) != SCOPED_REQUIRED_RECEIPTS:
+        if set(scope.get("models", [])) != required_models or set(scope.get("required_receipts", [])) != required_receipts:
             raise ValueError("scope document omits required models/acceptance owners")
         if not scope.get("authority") or not scope.get("limits"):
             raise ValueError("scope requires explicit user authority and measured limits")
@@ -505,6 +511,8 @@ def validate_scoped_prepackage(
         if not isinstance(exclusions, list):
             raise ValueError("historical exclusions must be explicit")
         for item in exclusions:
+            if (expanded and item.get("id") == "dflash2-27b-implementation"):
+                raise ValueError("active DFlash2 acceptance cannot be excluded")
             if (item.get("id") not in SCOPED_HISTORICAL_EXCLUSIONS
                     or item.get("status") != "unproven_outside_scope"
                     or not item.get("reason")):
@@ -521,7 +529,7 @@ def validate_scoped_prepackage(
                     or hashlib.sha256(source.read_bytes()).hexdigest() != digest):
                 raise ValueError(f"owning source mismatch: {rel}")
         receipts = data.get("receipts")
-        if not isinstance(receipts, dict) or set(receipts) != SCOPED_REQUIRED_RECEIPTS:
+        if not isinstance(receipts, dict) or set(receipts) != required_receipts:
             raise ValueError("missing or unknown required acceptance receipt")
         seen_receipts: set[str] = set()
         for owner, entry in receipts.items():
@@ -570,7 +578,7 @@ def validate_scoped_prepackage(
             if not isinstance(entry.get("resolved_failures"), list) or not isinstance(entry.get("skips"), list):
                 raise ValueError(f"{owner}: failures and skips must be explicitly accounted")
             proof = entry.get("proof")
-            needed = {"visual", "api", "runtime_identity"} if owner in {"SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION", "PROVENANCE"} else {"offline"}
+            needed = {"visual", "api", "runtime_identity"} if owner in {"SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION", "PROVENANCE"} | SCOPED_DFLASH_RECEIPTS else {"offline"}
             if not isinstance(proof, dict) or not needed <= set(proof):
                 raise ValueError(f"{owner}: missing owning proof surfaces")
             for refs in proof.values():
@@ -610,7 +618,7 @@ def validate_scoped_prepackage(
         for rel, ids in coverage.items():
             if rel not in files or not ids or any(i not in receipts or rel not in receipts[i]["source_paths"] for i in ids):
                 raise ValueError(f"unowned changed source path: {rel}")
-        result.update(status="pass", models=sorted(SCOPED_MODELS), exclusions=exclusions,
+        result.update(status="pass", models=sorted(required_models), exclusions=exclusions,
                       required_receipts=sorted(receipts), pending_stages=SCOPED_PENDING_STAGES)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
         failures.append(str(exc))

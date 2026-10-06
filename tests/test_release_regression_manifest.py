@@ -16519,3 +16519,40 @@ def test_scoped_prepackage_default_path_never_reads_private_receipt(tmp_path, mo
     result = runner.build_manifest_artifact(tmp_path)
     assert result["status"] == "pass"
     assert "scoped_prepackage_acceptance" not in result
+
+
+def test_scoped_dflash_release_requires_all_models_and_live_owners(tmp_path, monkeypatch):
+    runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
+    data['schema'] = runner.SCOPED_DFLASH_SCHEMA
+    data['models'] = sorted(runner.SCOPED_DFLASH_MODELS)
+    required = runner.SCOPED_REQUIRED_RECEIPTS | runner.SCOPED_DFLASH_RECEIPTS
+    scope_path = path.parent / 'scope.json'
+    scope = json.loads(scope_path.read_text())
+    scope.update(models=data['models'], required_receipts=sorted(required))
+    scope_path.write_text(json.dumps(scope))
+    data['scope_document']['sha256'] = hashlib.sha256(scope_path.read_bytes()).hexdigest()
+    for owner in runner.SCOPED_DFLASH_RECEIPTS:
+        entry = json.loads(json.dumps(data['receipts']['CACHE_API']))
+        original = json.loads((path.parent / entry['receipt']['path']).read_text())
+        original['owner'] = owner
+        owner_path = path.parent / (owner + '.json')
+        owner_path.write_text(json.dumps(original))
+        entry['receipt'] = {'path': owner_path.name, 'sha256': hashlib.sha256(owner_path.read_bytes()).hexdigest()}
+        data['receipts'][owner] = entry
+
+    def validate():
+        path.write_text(json.dumps(data))
+        return runner.validate_scoped_prepackage(root, path, provenance=provenance, expected_version='1.6.74')
+
+    assert validate()['status'] == 'pass'
+    saved = data['receipts'].pop('DFLASH_CACHE')
+    assert validate()['status'] == 'fail'
+    data['receipts']['DFLASH_CACHE'] = saved
+    visual = saved['proof'].pop('visual')
+    assert validate()['status'] == 'fail'
+    saved['proof']['visual'] = visual
+    data['exclusions'] = [{'id': 'dflash2-27b-implementation', 'status': 'unproven_outside_scope', 'reason': 'old scope'}]
+    assert validate()['status'] == 'fail'
+    data['exclusions'] = []
+    data['models'].remove('qwen27b-dflash2-jangh2')
+    assert validate()['status'] == 'fail'

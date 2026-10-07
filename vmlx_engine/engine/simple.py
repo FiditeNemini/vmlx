@@ -1078,8 +1078,6 @@ class SimpleEngine(BaseEngine):
             token_count = 0
             last_prompt_tokens = 0
             finished = False
-            self._abort_requested = False
-            self._current_request_id = request_id
             last_cached_tokens = 0
             last_cache_detail = ""
             last_prefill_usage = None
@@ -1097,128 +1095,141 @@ class SimpleEngine(BaseEngine):
                 mllm_kwargs["tools"] = template_tools
 
             async with self._generation_lock:
+                self._abort_requested = False
+                self._current_request_id = request_id
+                stream_iter = None
                 try:
-                    # Create and consume the synchronous iterator on the
-                    # same MLX worker thread that loaded the model.
-                    stream_iter = await self._run_model_call(
-                        lambda: iter(self._model.stream_chat(
-                            messages=messages,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            top_p=top_p,
-                            **mllm_kwargs,
-                        ))
-                    )
-                except Exception as e:
-                    logger.error(f"MLLM stream_chat failed to start: {type(e).__name__}: {e}")
-                    clear_mlx_memory_cache(log=logger)
-                    raise
-
-                # Per-token iteration: offload each next() to thread pool
-                _sentinel = object()
-                def _next():
                     try:
-                        return next(stream_iter)
-                    except StopIteration:
-                        return _sentinel
-
-                while True:
-                    try:
-                        chunk = await self._run_model_call(_next)
+                        # Create and consume the synchronous iterator on the
+                        # same MLX worker thread that loaded the model.
+                        stream_iter = await self._run_model_call(
+                            lambda: iter(self._model.stream_chat(
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                top_p=top_p,
+                                **mllm_kwargs,
+                            ))
+                        )
                     except Exception as e:
-                        logger.error(f"MLLM generation error: {type(e).__name__}: {e}")
+                        logger.error(f"MLLM stream_chat failed to start: {type(e).__name__}: {e}")
                         clear_mlx_memory_cache(log=logger)
                         raise
 
-                    if chunk is _sentinel:
-                        break
+                    # Per-token iteration: offload each next() to thread pool
+                    _sentinel = object()
+                    def _next():
+                        try:
+                            return next(stream_iter)
+                        except StopIteration:
+                            return _sentinel
 
-                    # Check abort flag between tokens
-                    if self._abort_requested:
-                        self._abort_requested = False
-                        logger.info("SimpleEngine: MLLM generation aborted by request")
+                    while True:
+                        try:
+                            chunk = await self._run_model_call(_next)
+                        except Exception as e:
+                            logger.error(f"MLLM generation error: {type(e).__name__}: {e}")
+                            clear_mlx_memory_cache(log=logger)
+                            raise
+
+                        if chunk is _sentinel:
+                            break
+
+                        # Check abort flag between tokens
+                        if self._abort_requested:
+                            self._abort_requested = False
+                            logger.info("SimpleEngine: MLLM generation aborted by request")
+                            yield GenerationOutput(
+                                text=accumulated_text,
+                                new_text="",
+                                prompt_tokens=0,
+                                completion_tokens=token_count,
+                                finished=True,
+                                finish_reason="abort",
+                            )
+                            return
+
+                        token_count = _advance_mllm_completion_tokens(token_count, chunk)
+                        new_text = chunk.text if hasattr(chunk, "text") else str(chunk)
+                        accumulated_text += new_text
+
+                        chunk_prompt_tokens = getattr(chunk, "prompt_tokens", 0)
+                        if chunk_prompt_tokens:
+                            last_prompt_tokens = chunk_prompt_tokens
+                        # Prompt-cache reuse reported by the model path (VLM prompt
+                        # cache, DFlash2 session store). Previously dropped here, so
+                        # usage never showed cached tokens on SimpleEngine MLLM.
+                        chunk_prefill = getattr(chunk, "prefill_usage", None)
+                        if chunk_prefill:
+                            last_prefill_usage = chunk_prefill
+                        chunk_cached = int(getattr(chunk, "cached_tokens", 0) or 0)
+                        if chunk_cached:
+                            last_cached_tokens = chunk_cached
+                            last_cache_detail = str(getattr(chunk, "cache_detail", "") or "")
+
+                        finished = chunk.finish_reason is not None
+                        if finished and last_prompt_tokens == 0:
+                            last_prompt_tokens = self._estimate_mllm_chat_prompt_tokens(
+                                messages,
+                                thinking_enabled,
+                            )
+
+                        output = GenerationOutput(
+                            text=accumulated_text,
+                            new_text=new_text,
+                            prompt_tokens=last_prompt_tokens,
+                            completion_tokens=token_count,
+                            finished=finished,
+                            finish_reason=chunk.finish_reason if finished else None,
+                            cached_tokens=last_cached_tokens,
+                            cache_detail=last_cache_detail,
+                            prefill_usage=last_prefill_usage,
+                        )
+
+                        receipt = getattr(chunk, "persistence_future", None)
+                        if finished and receipt is not None:
+                            from ..utils.terminal_persistence import terminal_persistence_outputs
+
+                            self._pending_terminal_request_id = request_id
+                            try:
+                                async for terminal_output in terminal_persistence_outputs(
+                                    output, receipt, request_id,
+                                    lambda record: setattr(self, "_last_durability", record),
+                                ):
+                                    yield terminal_output
+                            finally:
+                                self._pending_terminal_request_id = None
+                        else:
+                            yield output
+
+                        if finished:
+                            break
+
+                    # If stream ended without explicit finish, emit final chunk
+                    if not finished:
+                        if last_prompt_tokens == 0:
+                            last_prompt_tokens = self._estimate_mllm_chat_prompt_tokens(
+                                messages,
+                                thinking_enabled,
+                            )
                         yield GenerationOutput(
                             text=accumulated_text,
                             new_text="",
-                            prompt_tokens=0,
+                            prompt_tokens=last_prompt_tokens,
                             completion_tokens=token_count,
                             finished=True,
-                            finish_reason="abort",
+                            finish_reason="stop",
                         )
-                        return
-
-                    token_count = _advance_mllm_completion_tokens(token_count, chunk)
-                    new_text = chunk.text if hasattr(chunk, "text") else str(chunk)
-                    accumulated_text += new_text
-
-                    chunk_prompt_tokens = getattr(chunk, "prompt_tokens", 0)
-                    if chunk_prompt_tokens:
-                        last_prompt_tokens = chunk_prompt_tokens
-                    # Prompt-cache reuse reported by the model path (VLM prompt
-                    # cache, DFlash2 session store). Previously dropped here, so
-                    # usage never showed cached tokens on SimpleEngine MLLM.
-                    chunk_prefill = getattr(chunk, "prefill_usage", None)
-                    if chunk_prefill:
-                        last_prefill_usage = chunk_prefill
-                    chunk_cached = int(getattr(chunk, "cached_tokens", 0) or 0)
-                    if chunk_cached:
-                        last_cached_tokens = chunk_cached
-                        last_cache_detail = str(getattr(chunk, "cache_detail", "") or "")
-
-                    finished = chunk.finish_reason is not None
-                    if finished and last_prompt_tokens == 0:
-                        last_prompt_tokens = self._estimate_mllm_chat_prompt_tokens(
-                            messages,
-                            thinking_enabled,
-                        )
-
-                    output = GenerationOutput(
-                        text=accumulated_text,
-                        new_text=new_text,
-                        prompt_tokens=last_prompt_tokens,
-                        completion_tokens=token_count,
-                        finished=finished,
-                        finish_reason=chunk.finish_reason if finished else None,
-                        cached_tokens=last_cached_tokens,
-                        cache_detail=last_cache_detail,
-                        prefill_usage=last_prefill_usage,
-                    )
-
-                    receipt = getattr(chunk, "persistence_future", None)
-                    if finished and receipt is not None:
-                        from ..utils.terminal_persistence import terminal_persistence_outputs
-
-                        self._pending_terminal_request_id = request_id
-                        try:
-                            async for terminal_output in terminal_persistence_outputs(
-                                output, receipt, request_id,
-                                lambda record: setattr(self, "_last_durability", record),
-                            ):
-                                yield terminal_output
-                        finally:
-                            self._pending_terminal_request_id = None
-                    else:
-                        yield output
-
-                    if finished:
-                        break
-
-                # If stream ended without explicit finish, emit final chunk
-                if not finished:
-                    if last_prompt_tokens == 0:
-                        last_prompt_tokens = self._estimate_mllm_chat_prompt_tokens(
-                            messages,
-                            thinking_enabled,
-                        )
-                    yield GenerationOutput(
-                        text=accumulated_text,
-                        new_text="",
-                        prompt_tokens=last_prompt_tokens,
-                        completion_tokens=token_count,
-                        finished=True,
-                        finish_reason="stop",
-                    )
-            self._current_request_id = None
+                finally:
+                    try:
+                        close = getattr(stream_iter, "close", None)
+                        if close is not None:
+                            # Queue cleanup on the same worker, before releasing
+                            # the lock. In-flight next() completes before close(),
+                            # and old adapter state cannot spill into a new turn.
+                            await self._run_model_call(close)
+                    finally:
+                        self._current_request_id = None
             return
 
         # For LLM, apply chat template and stream

@@ -1380,6 +1380,16 @@ class SimpleEngine(BaseEngine):
             ],
         }
 
+    async def clear_native_media_cache(self) -> bool:
+        """Clear direct VLM prefix state without racing a model request."""
+        async with self._generation_lock:
+            if not self._is_mllm or self._model is None:
+                return False
+            if getattr(self._model, "_cache_manager", None) is None:
+                return False
+            await self._run_model_call(self._model.clear_cache)
+            return True
+
     def get_cache_stats(self) -> dict[str, Any] | None:
         """Get cache statistics (for MLLM models)."""
         if self._is_mllm and self._model is not None:

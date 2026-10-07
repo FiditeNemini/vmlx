@@ -5,6 +5,40 @@ import pytest
 from vmlx_engine.engine.simple import SimpleEngine
 
 
+def test_native_media_clear_waits_for_generation_and_uses_worker():
+    async def run():
+        with patch('vmlx_engine.engine.simple.is_mllm_model', return_value=True):
+            engine = SimpleEngine('fake')
+        cleared = []
+        engine._model = SimpleNamespace(_cache_manager=object(), clear_cache=lambda: cleared.append('clear'))
+        async def call(fn):
+            assert engine._generation_lock.locked()
+            cleared.append('worker')
+            return fn()
+        engine._run_model_call = call
+        await engine._generation_lock.acquire()
+        pending = asyncio.create_task(engine.clear_native_media_cache())
+        await asyncio.sleep(0)
+        assert not cleared and not pending.done()
+        engine._generation_lock.release()
+        assert await pending
+        assert cleared == ['worker', 'clear']
+    asyncio.run(run())
+
+
+def test_clear_endpoint_routes_direct_media_cache(monkeypatch):
+    from vmlx_engine import server
+    calls = []
+    async def clear():
+        calls.append(True)
+        return True
+    monkeypatch.setattr(server, '_engine', SimpleNamespace(clear_native_media_cache=clear))
+    monkeypatch.setattr(server, '_get_scheduler', lambda: None)
+    result = asyncio.run(server.clear_cache('ram'))
+    assert calls == [True]
+    assert 'native_media_prefix' in result['caches']
+
+
 @pytest.mark.parametrize('exit_kind', ['error', 'close', 'complete'])
 def test_mllm_iterator_and_request_cleanup(exit_kind):
     async def run():

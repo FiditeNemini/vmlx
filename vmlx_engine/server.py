@@ -16351,6 +16351,16 @@ async def clear_cache(
     clear_resident_prefix = cache_type in ("ram", "prefix", "all")
     clear_prefix_l2 = cache_type in ("prefix", "all")
 
+    if clear_resident_prefix or cache_type == "multimodal":
+        clear_native_media = getattr(_engine, "clear_native_media_cache", None)
+        if callable(clear_native_media):
+            try:
+                if await clear_native_media():
+                    cleared.append("native_media_prefix")
+            except Exception:
+                logger.exception("Direct VLM prefix clear did not finish")
+                skipped.append("native_media_prefix:clear_failed")
+
     # Clear resident prefix cache. The underlying PagedCacheManager.clear()
     # resets its RAM block pool but deliberately leaves _disk_store intact.
     if clear_resident_prefix:

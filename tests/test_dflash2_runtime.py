@@ -293,19 +293,20 @@ def test_dflash2_media_key_tokens_are_per_item_and_position_aware():
     from vmlx_engine.models.mllm import _dflash2_media_key_tokens
 
     IMG = 9
+    run = [IMG] * 6
     red, blue = mx.ones((4, 3)), mx.full((4, 3), 2.0)
     grid1 = mx.array([[1, 2, 2]])
-    k_red = _dflash2_media_key_tokens([1, 2, IMG, IMG, 3], {IMG}, grid1, red)
-    k_blue = _dflash2_media_key_tokens([1, 2, IMG, IMG, 3], {IMG}, grid1, blue)
-    assert k_red[:2] == [1, 2] and k_red[4] == 3
-    assert k_red[2] == k_red[3] >= 0x80000000
-    assert k_red[2] != k_blue[2]                      # different image -> different key
-    # red then a NEW blue image: the red prefix keys are identical to the red-only conversation
-    two = _dflash2_media_key_tokens([1, 2, IMG, IMG, 3, IMG, IMG], {IMG}, mx.array([[1, 2, 2], [1, 2, 2]]),
+    k_red = _dflash2_media_key_tokens([1, 2, *run, 3], {IMG}, grid1, red)
+    k_blue = _dflash2_media_key_tokens([1, 2, *run, 3], {IMG}, grid1, blue)
+    assert k_red[:2] == [1, 2] and k_red[-1] == 3
+    assert all(t >= 0x80000000 for t in k_red[2:8])
+    assert len(set(k_red[2:8])) > 1                    # per-position ids (30 bits each), not one 30-bit id
+    assert k_red[2:8] != k_blue[2:8]                   # different image -> different key
+    two = _dflash2_media_key_tokens([1, 2, *run, 3, *run], {IMG}, mx.array([[1, 2, 2], [1, 2, 2]]),
                                     mx.concatenate([red, blue]))
-    assert two[:5] == k_red and two[5] == k_blue[2]
-    # unpairable runs vs grid rows -> fail closed
-    assert _dflash2_media_key_tokens([1, IMG, 2, IMG], {IMG}, grid1, red) is None
+    assert two[:9] == k_red and two[9:] == k_blue[2:8]  # red prefix keys unchanged; new blue item diverges
+    assert _dflash2_media_key_tokens([1, IMG, 2, IMG], {IMG}, grid1, red) is None       # unpairable -> fail closed
+    assert _dflash2_media_key_tokens([1, IMG, IMG, 3], {IMG}, grid1, red) is None       # run < 5 tokens -> fail closed
 
 
 def test_video_frames_take_their_prompt_position_among_images():

@@ -4465,6 +4465,9 @@ def _mimo_v2_token_text(processor, token_id, fallback: str) -> str:
 
 
 
+_DFLASH2_MIN_MEDIA_KEY_RUN = 5  # 5 x 30 bits >= 150 bits per media item
+
+
 def _dflash2_media_key_tokens(tokens: list, media_ids: set, grid, pixel_values):
     """Per-item, position-aware media identity for the DFlash2 session key.
 
@@ -4494,13 +4497,23 @@ def _dflash2_media_key_tokens(tokens: list, media_ids: set, grid, pixel_values):
     spans = [t_ * h_ * w_ for t_, h_, w_ in rows]
     if not runs or len(runs) != len(rows) or sum(spans) != pixels.shape[0]:
         return None
+    # Collision resistance: one 30-bit id PER PLACEHOLDER POSITION from a
+    # SHAKE-256 stream of the item, so a run of n tokens carries 30*n bits.
+    # Runs shorter than _DFLASH2_MIN_MEDIA_KEY_RUN (< 150 bits) fall back to the whole-
+    # request salt + RAM-only entries (a single 30-bit id could collide and
+    # let one image resume another image's KV).
+    if any(run_end - run_start < _DFLASH2_MIN_MEDIA_KEY_RUN for run_start, run_end in runs):
+        return None
     key_tokens = list(tokens)
     offset = 0
     for (run_start, run_end), span, row in zip(runs, spans, rows):
-        item = hashlib.sha256(pixels[offset:offset + span].tobytes() + np.asarray(row).tobytes()).hexdigest()
+        n = run_end - run_start
+        stream = hashlib.shake_256(pixels[offset:offset + span].tobytes() + np.asarray(row).tobytes()).digest(4 * n)
         offset += span
-        pseudo = 0x80000000 | (int(item[:8], 16) & 0x3FFFFFFF)  # above any vocabulary id
-        key_tokens[run_start:run_end] = [pseudo] * (run_end - run_start)
+        key_tokens[run_start:run_end] = [
+            0x80000000 | (int.from_bytes(stream[4 * j:4 * j + 4], "big") & 0x3FFFFFFF)  # above any vocab id
+            for j in range(n)
+        ]
     return key_tokens
 
 class MLXMultimodalLM:

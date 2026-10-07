@@ -55,6 +55,12 @@ def _advance_mllm_completion_tokens(current: int, chunk: Any) -> int:
     return current
 
 
+def _dflash2_enabled() -> bool:
+    from ..speculative import is_dflash2_enabled
+
+    return is_dflash2_enabled()
+
+
 class SimpleEngine(BaseEngine):
     """
     Simple engine for direct model calls.
@@ -785,6 +791,38 @@ class SimpleEngine(BaseEngine):
         """
         if not self._loaded:
             await self.start()
+
+        # MLLM.chat() is a plain mlx-vlm generate: no DFlash2 decode, no
+        # DFlash2 session store, no media plan. On a DFlash2 server every
+        # non-streamed request silently ran that path (27B: AR speed, full
+        # re-prefill every turn). Drain stream_chat() instead, so streamed
+        # and non-streamed requests take the same route (MLLM.stream_chat
+        # still sends audio and unsupported media to the native VLM path).
+        if self._is_mllm and _dflash2_enabled():
+            final = None
+            async for out in self.stream_chat(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                tools=tools,
+                images=images,
+                videos=videos,
+                **kwargs,
+            ):
+                final = out
+            raw_text = final.text if final is not None else ""
+            return GenerationOutput(
+                text=clean_output_text(raw_text),
+                raw_text=raw_text,
+                prompt_tokens=final.prompt_tokens if final is not None else 0,
+                completion_tokens=final.completion_tokens if final is not None else 0,
+                finish_reason=final.finish_reason if final is not None else "stop",
+                cached_tokens=final.cached_tokens if final is not None else 0,
+                cache_detail=final.cache_detail if final is not None else "",
+                prefill_usage=final.prefill_usage if final is not None else None,
+            )
+
         # SimpleEngine has no prefix cache — eat the bypass kwarg so it
         # doesn't leak into self._model.generate which would reject it.
         kwargs.pop("_bypass_prefix_cache", None)

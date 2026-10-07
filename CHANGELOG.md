@@ -4,6 +4,15 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.76] - 2026-10-07
+
+- Preserve DFlash2 prompt snapshots across later decoding and SSD restoration, and invalidate older snapshot schemas.
+- Support Qwen image/video turns on DFlash2 sessions, isolate cached media by image content and order, and preserve mixed image/video history.
+- Cache Qwen vision features on SSD with model-weight and runtime identity; include these entries in multimodal and full cache clearing.
+- Correct native multimodal token and prefill accounting, reject misaligned media inputs, and honor explicit stop strings during DFlash2 generation.
+- Release direct-engine request ownership and iterators after completion, errors, or cancellation. Serialize direct media-cache clearing with generation.
+- Preserve rotating-cache positions and reject restoration when the required history has already been evicted, preventing empty or corrupted direct-engine continuations.
+
 ## [1.6.75] - 2026-10-06
 
 - Enable bundled DFlash2 drafting automatically for compatible Qwen3.8-27B bundles, with explicit opt-out and manual drafter selection. Keep native Adaptive MTP for compatible Flash Next bundles.

@@ -8379,7 +8379,7 @@ wheels = [
 
 [[package]]
 name = "vmlx"
-version = "1.6.75"
+version = "1.6.76"
 source = { editable = "." }
 dependencies = [
     { name = "dflash", marker = "sys_platform == 'darwin'" },

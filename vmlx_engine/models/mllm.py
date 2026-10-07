@@ -6100,6 +6100,7 @@ class MLXMultimodalLM:
                         temperature=temperature,
                         top_p=float(kwargs.get("top_p", 1.0)),
                         top_k=int(kwargs.get("top_k", 0)),
+                        stop=kwargs.get("stop"),
                     )
                     return
             except ImportError:
@@ -6866,6 +6867,7 @@ class MLXMultimodalLM:
                 presence_penalty=float(kwargs.get("presence_penalty", 0.0) or 0.0),
                 prompt_tokens=_df2_media["prompt_tokens"] if _df2_media else None,
                 media=_df2_media,
+                stop=kwargs.get("stop"),
             ):
                 emitted = len(getattr(chunk, "tokens", []) or [])
                 token_count += emitted

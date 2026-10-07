@@ -123,6 +123,7 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
                 repetition_penalty=1.1,
                 frequency_penalty=.2,
                 presence_penalty=.3,
+                stop=["END"],
             )
         )
 
@@ -137,6 +138,7 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
     assert bridge.call_args.kwargs["repetition_penalty"] == 1.1
     assert bridge.call_args.kwargs["frequency_penalty"] == .2
     assert bridge.call_args.kwargs["presence_penalty"] == .3
+    assert bridge.call_args.kwargs["stop"] == ["END"]
 
 
 def test_target_adapter_media_plan_slices_prompt_and_offsets_text_rows():

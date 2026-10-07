@@ -26,6 +26,56 @@ from typing import Any, Iterator, Optional
 logger = logging.getLogger(__name__)
 
 
+class _StopDetokenizer:
+    """Request-local stop matching, withholding incomplete stop prefixes.
+
+    Only constructed for explicit stop requests. Generation still checkpoints
+    the actual sampled tokens, including the token completing the stop string;
+    tokens after that token are never committed or emitted.
+    """
+
+    def __init__(self, detokenizer, stops):
+        self.inner = detokenizer
+        self.stops = tuple(stops)
+        self.pending = ""
+        self.output = ""
+        self.matched = False
+
+    def _consume(self, final=False):
+        if self.matched:
+            return
+        self.pending += self.inner.last_segment
+        positions = [self.pending.find(s) for s in self.stops]
+        found = [i for i in positions if i >= 0]
+        if found:
+            self.output += self.pending[:min(found)]
+            self.pending = ""
+            self.matched = True
+            return
+        keep = 0
+        if not final:
+            for stop in self.stops:
+                for size in range(1, min(len(stop), len(self.pending) + 1)):
+                    if self.pending.endswith(stop[:size]):
+                        keep = max(keep, size)
+        cut = len(self.pending) - keep
+        self.output += self.pending[:cut]
+        self.pending = self.pending[cut:]
+
+    def add_token(self, token):
+        self.inner.add_token(token)
+        self._consume()
+
+    def finalize(self):
+        self.inner.finalize()
+        self._consume(final=True)
+
+    @property
+    def last_segment(self):
+        result, self.output = self.output, ""
+        return result
+
+
 def _prefix_reuse_enabled() -> bool:
     return os.environ.get("VMLX_DFLASH2_PREFIX_REUSE", "1").strip().lower() not in (
         "0",
@@ -582,6 +632,7 @@ def _stream_generate_resumable(
     sampling_controls=None,
     prompt_tokens: Optional[list] = None,
     media: Optional[dict] = None,
+    stop=None,
 ) -> Iterator[Any]:
     """The dflash==0.1.0 ``_stream_generate`` loop with session resume.
 
@@ -626,6 +677,17 @@ def _stream_generate_resumable(
     key_list = [int(t) for t in media["key_tokens"]] if per_item_media else prompt_list
 
     detokenizer = tokenizer.detokenizer
+    stop_matcher = None
+    if stop:
+        # Decode each accepted token, including unfinished words, so a stop
+        # is acted on before forwarding another cycle. Ordinary requests keep
+        # their original detokenizer and generation path.
+        from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer
+        stops = [stop] if isinstance(stop, str) else stop
+        stop_matcher = _StopDetokenizer(
+            NaiveStreamingDetokenizer(tokenizer), [s for s in stops if s]
+        )
+        detokenizer = stop_matcher
     mask_id = int(draft.config.mask_token_id)
     tokens: list[int] = []
 
@@ -965,8 +1027,11 @@ def _stream_generate_resumable(
                 else ("kept+gap%d" % gap_needed if gap_arr is not None else "kept"),
             )
 
-        if token in tokenizer.eos_token_ids:
+        if stop_matcher is not None:
             detokenizer.add_token(token)
+        if token in tokenizer.eos_token_ids or (stop_matcher is not None and stop_matcher.matched):
+            if stop_matcher is None:
+                detokenizer.add_token(token)
             detokenizer.finalize()
             _checkpoint()
             yield _respond(
@@ -974,7 +1039,8 @@ def _stream_generate_resumable(
             )
             return
 
-        detokenizer.add_token(token)
+        if stop_matcher is None:
+            detokenizer.add_token(token)
         yield _respond(
             detokenizer.last_segment,
             [token],
@@ -1060,10 +1126,17 @@ def _stream_generate_resumable(
                 (i for i, t in enumerate(new_tokens) if t in tokenizer.eos_token_ids),
                 None,
             )
+            if stop_matcher is not None:
+                for i, t in enumerate(new_tokens):
+                    detokenizer.add_token(t)
+                    if stop_matcher.matched or t in tokenizer.eos_token_ids:
+                        eos_idx = i
+                        break
             if eos_idx is not None:
                 new_tokens = new_tokens[: eos_idx + 1]
-                for t in new_tokens:
-                    detokenizer.add_token(t)
+                if stop_matcher is None:
+                    for t in new_tokens:
+                        detokenizer.add_token(t)
                 detokenizer.finalize()
                 tokens.extend(new_tokens)
                 n += len(new_tokens)
@@ -1086,8 +1159,9 @@ def _stream_generate_resumable(
                 yield resp
                 return
 
-            for t in new_tokens:
-                detokenizer.add_token(t)
+            if stop_matcher is None:
+                for t in new_tokens:
+                    detokenizer.add_token(t)
             tokens.extend(new_tokens)
             previous_n = n
             n += len(new_tokens)
@@ -1133,7 +1207,7 @@ def _stream_generate_resumable(
             prompt_tps,
             n,
             tic,
-            "length",
+            "stop" if stop_matcher is not None and stop_matcher.matched else "length",
         )
     finally:
         if _capture is not None:
@@ -1338,6 +1412,7 @@ def stream_dflash2_generate(
     presence_penalty: float = 0.0,
     prompt_tokens: Optional[list] = None,
     media: Optional[dict] = None,
+    stop=None,
 ) -> Iterator[Any]:
     """Yield upstream DFlash2 chunks using vMLX's hybrid Qwen target.
 
@@ -1375,4 +1450,5 @@ def stream_dflash2_generate(
             sampling_controls=sampling_controls,
             prompt_tokens=prompt_tokens,
             media=media,
+            stop=stop,
         )

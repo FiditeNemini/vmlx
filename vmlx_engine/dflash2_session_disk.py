@@ -173,6 +173,7 @@ class DFlash2SessionSSD:
         # Evaluate on the generation thread; the writer only copies bytes.
         mx.eval(list(arrays.values()))
         meta = {"kind": entry.get("kind", "turn"), "cache_len": int(entry["cache_len"]),
+                "rope_delta": entry.get("rope_delta"),
                 "target": target_layers, "draft": draft_layers}
         receipt = Future()
         # Cancelling an HTTP consumer must not cancel an already-owned write.
@@ -264,6 +265,7 @@ class DFlash2SessionSSD:
             self.stats["hit_tokens"] += int(meta["cache_len"])
             self.stats["load_s"] += dt
             return {"kind": meta["kind"], "tokens": prefix, "cache_len": int(meta["cache_len"]),
+                    "rope_delta": meta.get("rope_delta"),
                     "target_cache": target, "draft_cache": draft,
                     "draft_hidden_gap": arrays.get("gap") if draft is not None else None,
                     "draft_context": arrays.get("draft_context"),

@@ -4382,6 +4382,36 @@ _VIDEO_FRAME_FALLBACK_MODEL_TYPES = {
 }
 
 
+
+def _order_images_and_video_frames(chat_messages: list[dict], images: list, frame_lists: list[list]) -> list | None:
+    """Media list in PROMPT order for VLMs that read videos as image frames.
+
+    ``_expand_video_placeholders_to_image_frames`` turns each video part into
+    N image placeholders where the video sits, so the processor assigns the
+    image list to placeholders in message order. Appending every video's
+    frames after all images handed a later image's slot to a video frame
+    (audit 2026-10-07: screenshot -> video -> blue image answered "Orange",
+    the video's last scene). Returns None when the parts and lists disagree.
+    """
+    image_iter, frame_iter = iter(images), iter(frame_lists)
+    ordered: list = []
+    try:
+        for msg in chat_messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                kind = part.get("type") if isinstance(part, dict) else None
+                if kind == "image":
+                    ordered.append(next(image_iter))
+                elif kind == "video":
+                    ordered.extend(next(frame_iter))
+    except StopIteration:
+        return None
+    if next(image_iter, None) is not None or next(frame_iter, None) is not None:
+        return None
+    return ordered
+
 def _expand_video_placeholders_to_image_frames(
     chat_messages: list[dict],
     frame_counts: list[int],
@@ -4433,6 +4463,45 @@ def _mimo_v2_token_text(processor, token_id, fallback: str) -> str:
         pass
     return fallback
 
+
+
+def _dflash2_media_key_tokens(tokens: list, media_ids: set, grid, pixel_values):
+    """Per-item, position-aware media identity for the DFlash2 session key.
+
+    Store + lookup only (the model always sees the real ids): each media
+    item's placeholder run is replaced by one pseudo id derived from THAT
+    item's processed pixels and grid row. Plain token-prefix matching then
+    reuses a conversation through identical earlier images and diverges
+    exactly at a new one. Returns None (caller falls back to the
+    whole-request salt, RAM-only) when runs and grid rows cannot be paired.
+    """
+    import hashlib
+
+    import mlx.core as mx
+    import numpy as np
+
+    if grid is None or pixel_values is None:
+        return None
+    runs, start = [], None
+    for i, t in enumerate(list(tokens) + [-1]):
+        if t in media_ids and start is None:
+            start = i
+        elif t not in media_ids and start is not None:
+            runs.append((start, i))
+            start = None
+    rows = [tuple(int(v) for v in r) for r in np.asarray(grid).reshape(-1, 3).tolist()]
+    pixels = np.asarray(pixel_values.astype(mx.float32) if pixel_values.dtype == mx.bfloat16 else pixel_values)
+    spans = [t_ * h_ * w_ for t_, h_, w_ in rows]
+    if not runs or len(runs) != len(rows) or sum(spans) != pixels.shape[0]:
+        return None
+    key_tokens = list(tokens)
+    offset = 0
+    for (run_start, run_end), span, row in zip(runs, spans, rows):
+        item = hashlib.sha256(pixels[offset:offset + span].tobytes() + np.asarray(row).tobytes()).hexdigest()
+        offset += span
+        pseudo = 0x80000000 | (int(item[:8], 16) & 0x3FFFFFFF)  # above any vocabulary id
+        key_tokens[run_start:run_end] = [pseudo] * (run_end - run_start)
+    return key_tokens
 
 class MLXMultimodalLM:
     """
@@ -6160,8 +6229,9 @@ class MLXMultimodalLM:
         # Process images
         all_images = []
         all_audio = []
-        if all_image_urls:
-            all_images.extend(self._prepare_images(all_image_urls))
+        prepared_images = self._prepare_images(all_image_urls) if all_image_urls else []
+        all_images.extend(prepared_images)
+        video_frame_lists: list[list] = []
         if audio_inputs:
             all_audio.extend(self._prepare_audio(audio_inputs))
 
@@ -6178,6 +6248,7 @@ class MLXMultimodalLM:
             )
             all_images.extend(frames)
             video_frame_counts.append(len(frames))
+            video_frame_lists.append(list(frames))
             logger.info(f"Added {len(frames)} frames from video: {video_path}")
 
         model_type = (
@@ -6186,6 +6257,11 @@ class MLXMultimodalLM:
             else str(getattr(self.config, "model_type", "") or "").lower()
         )
         if model_type in _VIDEO_FRAME_FALLBACK_MODEL_TYPES and video_frame_counts:
+            ordered_media = _order_images_and_video_frames(chat_messages, prepared_images, video_frame_lists)
+            if ordered_media is not None:
+                all_images = ordered_media
+            else:
+                logger.warning("Video frames could not be placed in prompt order; media order may not match placeholders")
             chat_messages = _expand_video_placeholders_to_image_frames(
                 chat_messages,
                 video_frame_counts,
@@ -6506,19 +6582,27 @@ class MLXMultimodalLM:
             k: v for k, v in inputs.items()
             if k not in ("input_ids", "pixel_values", "attention_mask")
         }
-        features = self.model.get_input_embeddings(
-            input_ids, pixel_values, mask=inputs.get("attention_mask"), **extra
-        )
-        embeds = getattr(features, "inputs_embeds", features)
-        positions = getattr(language_model, "_position_ids", None)
-        rope_delta = getattr(language_model, "_rope_deltas", None)
-        # The VLM's next forward must not reuse this request's rope state.
-        language_model._position_ids = None
-        language_model._rope_deltas = None
-        if positions is None or rope_delta is None or positions.shape[-1] != input_ids.shape[-1]:
-            logger.warning("DFlash2 media plan incomplete (no M-RoPE positions); native VLM path")
-            return None
-        mx.eval(embeds, positions, rope_delta)
+        attention_mask = inputs.get("attention_mask")
+
+        def materialize() -> dict:
+            """Vision tower + merged embeddings + M-RoPE plan (the expensive half).
+
+            Deferred: when the DFlash2 session store restores a prefix that
+            already contains every media item of this request, the uncached
+            tail is pure text at offset + the cached rope delta, and this never
+            runs (M-RoPE delta caching)."""
+            features = self.model.get_input_embeddings(input_ids, pixel_values, mask=attention_mask, **extra)
+            embeds = getattr(features, "inputs_embeds", features)
+            positions = getattr(language_model, "_position_ids", None)
+            rope_delta = getattr(language_model, "_rope_deltas", None)
+            # The VLM's next forward must not reuse this request's rope state.
+            language_model._position_ids = None
+            language_model._rope_deltas = None
+            if positions is None or rope_delta is None or positions.shape[-1] != input_ids.shape[-1]:
+                raise ValueError("DFlash2 media plan incomplete: no full-prompt M-RoPE positions")
+            mx.eval(embeds, positions, rope_delta)
+            return {"embeds": embeds, "positions": positions, "rope_delta": int(rope_delta.reshape(-1)[0].item())}
+
         tokens = [int(t) for t in input_ids[0].tolist()]
         media_ids = {
             int(v) for v in (getattr(config, "image_token_index", None), getattr(config, "video_token_index", None))
@@ -6532,11 +6616,30 @@ class MLXMultimodalLM:
         for key in ("image_grid_thw", "video_grid_thw"):
             if extra.get(key) is not None:
                 digest.update(np.asarray(extra[key]).tobytes())
+        # Per-item, position-aware media identity for the DFlash2 session key
+        # (store + lookup only; the model always sees the real ids): each media
+        # item's placeholder run is replaced by one pseudo id derived from THAT
+        # item's processed pixels and grid. Plain token-prefix matching then
+        # reuses a conversation through identical earlier images and diverges
+        # exactly at a new one. Fails closed to the whole-request salt when the
+        # placeholder runs and grid rows cannot be paired.
+        grid = extra.get("image_grid_thw")
+        if grid is None:
+            grid = extra.get("video_grid_thw")
+        try:
+            key_tokens = _dflash2_media_key_tokens(tokens, media_ids, grid, pixel_values)
+        except Exception:
+            logger.debug("DFlash2 per-item media key unavailable; whole-request salt", exc_info=True)
+            key_tokens = None
+        media_end = max((i + 1 for i, t in enumerate(tokens) if t in media_ids), default=0)
         return {
             "prompt_tokens": tokens,
-            "embeds": embeds,
-            "positions": positions,
-            "rope_delta": int(rope_delta.reshape(-1)[0].item()),
+            "key_tokens": key_tokens,
+            "materialize": materialize,
+            "embeds": None,
+            "positions": None,
+            "rope_delta": None,
+            "media_end": media_end,
             "first_media_index": first_media,
             "salt": digest.hexdigest()[:32],
         }
@@ -6593,8 +6696,9 @@ class MLXMultimodalLM:
         # Process images
         all_images = []
         all_audio = []
-        if all_image_urls:
-            all_images.extend(self._prepare_images(all_image_urls))
+        prepared_images = self._prepare_images(all_image_urls) if all_image_urls else []
+        all_images.extend(prepared_images)
+        video_frame_lists: list[list] = []
         if audio_inputs:
             all_audio.extend(self._prepare_audio(audio_inputs))
 
@@ -6611,6 +6715,7 @@ class MLXMultimodalLM:
             )
             all_images.extend(frames)
             video_frame_counts.append(len(frames))
+            video_frame_lists.append(list(frames))
 
         model_type = (
             str(self.config.get("model_type", "") or "").lower()
@@ -6618,6 +6723,11 @@ class MLXMultimodalLM:
             else str(getattr(self.config, "model_type", "") or "").lower()
         )
         if model_type in _VIDEO_FRAME_FALLBACK_MODEL_TYPES and video_frame_counts:
+            ordered_media = _order_images_and_video_frames(chat_messages, prepared_images, video_frame_lists)
+            if ordered_media is not None:
+                all_images = ordered_media
+            else:
+                logger.warning("Video frames could not be placed in prompt order; media order may not match placeholders")
             chat_messages = _expand_video_placeholders_to_image_frames(
                 chat_messages,
                 video_frame_counts,

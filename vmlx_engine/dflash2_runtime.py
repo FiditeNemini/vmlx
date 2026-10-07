@@ -618,6 +618,12 @@ def _stream_generate_resumable(
         else [int(t) for t in tokenizer.encode(prompt, add_special_tokens=add_special_tokens)]
     )
     prompt_arr = mx.array(prompt_list)
+    # Session-store key tokens: equal to the prompt for text; for media with a
+    # per-item plan, each media item's placeholder run carries that item's
+    # content id (see MLXMultimodalLM._dflash2_media_plan). The model never
+    # sees these ids; they only make prefix matching media-aware.
+    per_item_media = media is not None and media.get("key_tokens") is not None
+    key_list = [int(t) for t in media["key_tokens"]] if per_item_media else prompt_list
 
     detokenizer = tokenizer.detokenizer
     mask_id = int(draft.config.mask_token_id)
@@ -627,11 +633,11 @@ def _stream_generate_resumable(
     # Media requests key their entries by a hash of the media content: the
     # placeholder token ids are the same for every image. They may still
     # resume a text-only entry (its prefix precedes any media).
-    model_key = base_key + (media["salt"],) if media is not None else base_key
+    model_key = base_key + (media["salt"],) if media is not None and not per_item_media else base_key
     resume = None
     if _prefix_reuse_enabled():
-        resume = _SESSION_STORE.take_matching(model_key, prompt_list)
-        if resume is None and media is not None:
+        resume = _SESSION_STORE.take_matching(model_key, key_list)
+        if resume is None and media is not None and not per_item_media:
             resume = _SESSION_STORE.take_matching(base_key, prompt_list)
     if resume is None and _prefix_reuse_enabled() and _SESSION_SSD is not None:
         try:
@@ -639,7 +645,7 @@ def _stream_generate_resumable(
         except Exception:
             _im_start = None
         resume = _SESSION_SSD.take_matching(
-            prompt_list,
+            key_list,
             im_start_id=int(_im_start) if isinstance(_im_start, int) and _im_start >= 0 else None,
             eos_ids=tokenizer.eos_token_ids,
             make_target=lambda: runtime.make_prompt_cache(adapter),
@@ -654,7 +660,7 @@ def _stream_generate_resumable(
                 resume["kind"], resume["cache_len"], len(prompt_list), resume["load_s"],
             )
     if resume is None and _prefix_reuse_enabled():
-        misses = _SESSION_STORE.describe_misses(model_key, prompt_list)
+        misses = _SESSION_STORE.describe_misses(model_key, key_list)
         if misses:
             logger.info(
                 "DFlash2 prefix reuse miss for %d-token prompt: %s",
@@ -718,9 +724,39 @@ def _stream_generate_resumable(
     # Assign (or clear) the shared adapter's media plan at entry on EVERY
     # request: an abandoned generator's `finally` may run late, and the next
     # request must never inherit another request's embeddings or rope delta.
+    # M-RoPE delta caching: a restored prefix that contains EVERY media item of
+    # this request leaves a pure-text tail at offset + rope_delta, so the
+    # entry's cached delta replaces the vision tower + embedding pass.
+    # Otherwise materialize the plan (vision tower, merged embeddings,
+    # full-prompt M-RoPE ids). Entries store a delta only when their cut covers
+    # all of their own request's media (see _entry_rope_delta).
+    if media is not None:
+        cached_delta = resume.get("rope_delta") if resume is not None else None
+        if (
+            cached_delta is not None
+            and int(resume["cache_len"]) >= int(media.get("media_end", 0))
+            and media.get("embeds") is None
+        ):
+            media["rope_delta"] = int(cached_delta)
+            logger.info(
+                "DFlash2 media: all %d media tokens inside the restored %d-token prefix; "
+                "cached M-RoPE delta %d, vision tower skipped",
+                int(media.get("media_end", 0)) - int(media.get("first_media_index", 0)),
+                int(resume["cache_len"]), int(cached_delta),
+            )
+        elif media.get("embeds") is None and callable(media.get("materialize")):
+            media.update(media["materialize"]())
     adapter.media_embeds = media["embeds"] if media is not None else None
     adapter.media_positions = media["positions"] if media is not None else None
     adapter.rope_delta = int(media["rope_delta"]) if media is not None else 0
+
+    def _entry_rope_delta(cut: int):
+        # Valid for a future request only if this entry holds all of its own
+        # request's media; a cut before the last media item would carry a delta
+        # that includes media the entry does not contain.
+        if media is None:
+            return 0
+        return int(adapter.rope_delta) if int(cut) >= int(media.get("media_end", 0)) else None
     try:
         tic = time.perf_counter()
         with mx.stream(runtime.generation_stream):
@@ -812,12 +848,15 @@ def _stream_generate_resumable(
             # (which makes the end-of-turn entry unmatchable).
             # system: the system message, shared by new conversations.
             # A cut before the first media token is plain text: unsalted, SSD ok.
-            text_only_cut = media is None or int(cut) <= int(media["first_media_index"])
+            text_only_cut = (
+                media is None or per_item_media or int(cut) <= int(media["first_media_index"])
+            )
             _store_session(
                 {
                     "model_key": base_key if text_only_cut else model_key,
                     "kind": kind,
-                    "tokens": prompt_list[:cut],
+                    "tokens": key_list[:cut],
+                    "rope_delta": _entry_rope_delta(cut),
                     "cache_len": int(cut),
                     "target_cache": shells,
                     **draft_state,
@@ -890,14 +929,15 @@ def _stream_generate_resumable(
                 {
                     "model_key": model_key,
                     "kind": "turn",
-                    "tokens": confirmed,
+                    "tokens": key_list + [int(t) for t in tokens],
+                    "rope_delta": _entry_rope_delta(len(key_list)),
                     "cache_len": len(confirmed) - 1,
                     "target_cache": target_cache,
                     "draft_cache": store_draft,
                     "draft_hidden_gap": gap_arr if store_draft is not None else None,
                     "draft_context": hidden if n == 1 else None,
                 },
-                ram_only=media is not None,
+                ram_only=media is not None and not per_item_media,
             )
             logger.info(
                 "DFlash2 session stored: %d confirmed tokens (draft cache %s)",

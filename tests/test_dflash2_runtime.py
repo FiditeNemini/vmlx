@@ -286,3 +286,36 @@ def test_text_request_clears_a_stale_media_plan_on_the_shared_adapter():
     src = inspect.getsource(_stream_generate_resumable)
     entry = src.index("adapter.media_embeds = media[\"embeds\"] if media is not None else None")
     assert entry < src.index("    try:\n        tic = time.perf_counter()")
+
+
+def test_dflash2_media_key_tokens_are_per_item_and_position_aware():
+    import mlx.core as mx
+    from vmlx_engine.models.mllm import _dflash2_media_key_tokens
+
+    IMG = 9
+    red, blue = mx.ones((4, 3)), mx.full((4, 3), 2.0)
+    grid1 = mx.array([[1, 2, 2]])
+    k_red = _dflash2_media_key_tokens([1, 2, IMG, IMG, 3], {IMG}, grid1, red)
+    k_blue = _dflash2_media_key_tokens([1, 2, IMG, IMG, 3], {IMG}, grid1, blue)
+    assert k_red[:2] == [1, 2] and k_red[4] == 3
+    assert k_red[2] == k_red[3] >= 0x80000000
+    assert k_red[2] != k_blue[2]                      # different image -> different key
+    # red then a NEW blue image: the red prefix keys are identical to the red-only conversation
+    two = _dflash2_media_key_tokens([1, 2, IMG, IMG, 3, IMG, IMG], {IMG}, mx.array([[1, 2, 2], [1, 2, 2]]),
+                                    mx.concatenate([red, blue]))
+    assert two[:5] == k_red and two[5] == k_blue[2]
+    # unpairable runs vs grid rows -> fail closed
+    assert _dflash2_media_key_tokens([1, IMG, 2, IMG], {IMG}, grid1, red) is None
+
+
+def test_video_frames_take_their_prompt_position_among_images():
+    from vmlx_engine.models.mllm import _order_images_and_video_frames
+
+    msgs = [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "a"}]},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": [{"type": "video"}, {"type": "text", "text": "b"}]},
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "c"}]},
+    ]
+    assert _order_images_and_video_frames(msgs, ["shot", "blue"], [["f1", "f2"]]) == ["shot", "f1", "f2", "blue"]
+    assert _order_images_and_video_frames(msgs, ["shot"], [["f1"]]) is None  # mismatch fails closed

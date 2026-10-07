@@ -822,6 +822,45 @@ class TestMLXMultimodalLMCache:
         assert copied[0].offset == 4
         assert layer_cache.state[0].shape == (1, 6, 8)
 
+    def test_rotating_prompt_copy_preserves_absolute_position(self):
+        import mlx.core as mx
+        from mlx_lm.models.cache import RotatingKVCache
+        from vmlx_engine.models.mllm import _copy_prompt_cache_to_prompt_boundary
+
+        cache = RotatingKVCache(max_size=4)
+        for i in range(7):
+            x = mx.full((1, 1, 1, 2), i)
+            cache.update_and_fetch(x, x)
+        copied = _copy_prompt_cache_to_prompt_boundary([cache], 7)[0]
+        assert copied.offset == 7
+        assert copied._idx == cache._idx
+        assert mx.array_equal(copied.keys, cache.keys).item()
+
+    def test_rotating_prompt_copy_rejects_lost_history(self):
+        import mlx.core as mx
+        from mlx_lm.models.cache import RotatingKVCache
+        from vmlx_engine.models.mllm import _copy_prompt_cache_to_prompt_boundary
+
+        cache = RotatingKVCache(max_size=4)
+        for i in range(7):
+            x = mx.full((1, 1, 1, 2), i)
+            cache.update_and_fetch(x, x)
+        with pytest.raises(ValueError, match="rotating"):
+            _copy_prompt_cache_to_prompt_boundary([cache], 6)
+        assert cache.offset == 7
+
+    def test_rotating_prompt_copy_trims_before_wrap(self):
+        import mlx.core as mx
+        from mlx_lm.models.cache import RotatingKVCache
+        from vmlx_engine.models.mllm import _copy_prompt_cache_to_prompt_boundary
+
+        cache = RotatingKVCache(max_size=8)
+        x = mx.zeros((1, 1, 3, 2))
+        cache.update_and_fetch(x, x)
+        copied = _copy_prompt_cache_to_prompt_boundary([cache], 2)[0]
+        assert (copied.offset, copied._idx) == (2, 2)
+        assert (cache.offset, cache._idx) == (3, 3)
+
     def test_prompt_cache_state_rejects_legacy_dummy_token_ids(self):
         """Legacy store_cache dummy tokens must not drive mlx-vlm prefix trim."""
         from vmlx_engine.models.mllm import _prompt_cache_state_from_entry

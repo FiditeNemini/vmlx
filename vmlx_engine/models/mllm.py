@@ -3550,6 +3550,22 @@ def _copy_prompt_cache_to_prompt_boundary(
     prompt_tokens_count = max(int(prompt_tokens_count or 0), 0)
     for layer_cache in prompt_cache:
         new_cache = copy.copy(layer_cache)
+        if hasattr(layer_cache, "_idx") and hasattr(layer_cache, "max_size"):
+            # A rotating buffer's tensor length is not its absolute position.
+            # Once it has evicted history, copying its current ring cannot
+            # reconstruct an earlier prompt boundary. Keep that request cold
+            # rather than publish a corrupted prefix as a successful hit.
+            offset = int(layer_cache.offset)
+            rollback = max(0, offset - prompt_tokens_count)
+            if rollback and not layer_cache.is_trimmable():
+                raise ValueError("Cannot restore rotating cache after history eviction")
+            if layer_cache.keys is not None:
+                new_cache.keys = mx.array(layer_cache.keys)
+                new_cache.values = mx.array(layer_cache.values)
+            if rollback:
+                new_cache.trim(rollback)
+            cache_to_store.append(new_cache)
+            continue
         copied = False
         if hasattr(layer_cache, "state"):
             state = layer_cache.state

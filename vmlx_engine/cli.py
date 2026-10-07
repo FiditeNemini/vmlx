@@ -1209,6 +1209,42 @@ def _configure_dflash2_session_ssd(args, draft_path: str, explicit) -> None:
         logger.warning("DFlash2 session SSD tier unavailable; RAM tier only", exc_info=True)
 
 
+def _configure_vision_feature_ssd(args, explicit) -> None:
+    """Per-item SSD vision-feature cache (vmlx_engine/vision_feature_cache.py).
+
+    On whenever an SSD tier serves this session: the block disk cache, or a
+    DFlash2 drafter's session SSD tier (on unless --disable-block-disk-cache or
+    VMLX_DFLASH2_SSD=0). Same managed pool and aggregate budget; installed at
+    model load for Qwen3.5/Qwen4Exp VLMs only.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    if explicit is False:
+        return
+    spec = str(getattr(args, "speculative_model", "") or "")
+    dflash2_ssd = False
+    if spec:
+        try:
+            from .speculative import _is_dflash2_model
+
+            dflash2_ssd = _is_dflash2_model(spec) and os.environ.get(
+                "VMLX_DFLASH2_SSD", "1").strip().lower() not in ("0", "off", "false", "no")
+        except Exception:
+            dflash2_ssd = False
+    if not (getattr(args, "enable_block_disk_cache", False) or dflash2_ssd):
+        return
+    try:
+        from .vision_feature_cache import configure
+
+        root = getattr(args, "block_disk_cache_dir", None) or os.path.expanduser(
+            "~/.cache/vmlx-engine/block-cache"
+        )
+        configure(root=root, max_size_bytes=int(float(resolve_block_disk_cache_max_gb(args)) * 1024**3))
+    except Exception:
+        logger.warning("Vision feature SSD cache unavailable", exc_info=True)
+
+
 def serve_command(args):
     """Start the OpenAI-compatible server."""
     import logging
@@ -2722,6 +2758,7 @@ def serve_command(args):
 
     if not _is_image:
         _apply_paged_block_disk_default(args, logger)
+        _configure_vision_feature_ssd(args, _block_disk_explicit)
 
     # Diffusion does not instantiate the LLM scheduler or its KV/SSD cache.
     scheduler_config = None

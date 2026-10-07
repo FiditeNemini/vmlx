@@ -4594,6 +4594,13 @@ class MLXMultimodalLM:
             """Finish loading on this same MLX-owning worker thread."""
             from ..mlx_memory import maybe_harmonize_quant_metadata_dtypes
 
+            try:
+                from ..vision_feature_cache import install as _install_vision_feature_cache
+
+                _install_vision_feature_cache(self.model, resolved_name)
+            except Exception:
+                logger.warning("Vision feature SSD cache not installed", exc_info=True)
+
             maybe_harmonize_quant_metadata_dtypes(
                 self.model,
                 model_path=resolved_name,

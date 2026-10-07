@@ -11011,8 +11011,15 @@ class MLLMBatchGenerator:
         )
 
     def _has_qwen_hybrid_media_tail_path(self) -> bool:
+        # qwen4_exp (Qwen3.8 Flash-Next, Allosaurus) has the same seam as
+        # Qwen3.5: get_input_embeddings returns merged embeddings and sets the
+        # full-prompt M-RoPE plan; its LanguageModel takes inputs_embeds and
+        # position_ids. Without it every NEW image/video mid-conversation
+        # re-prefilled the whole conversation (audit 2026-10-07: 13k-token chat
+        # + 1 image = 12 s TTFT, cached 0). The conditioned-tail runner still
+        # validates ids/embeddings/positions and falls back to a full prefill.
         return str(getattr(self, "_model_type", "") or "").lower() in {
-            "qwen3_5", "qwen3_5_moe",
+            "qwen3_5", "qwen3_5_moe", "qwen4_exp",
         }
 
     def _decline_unsupported_hybrid_media_tail(

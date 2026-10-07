@@ -11,9 +11,13 @@ from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator, MLLMBatchReques
 @pytest.mark.parametrize(
     "family,tokens,hit,declines",
     [
-        ("qwen4_exp", [10, 20, 99, 40], 2, True),
-        ("qwen4_exp", [10, 99, 30, 40], 3, False),
-        ("qwen4_exp", [10, 20, 30, 40], 2, False),
+        # qwen4_exp joined the Qwen conditioned-media-tail path (2026-10-07):
+        # its media tails are admitted, not declined. An unsupported family
+        # still declines.
+        ("qwen4_exp", [10, 20, 99, 40], 2, False),
+        ("gemma3", [10, 20, 99, 40], 2, True),
+        ("gemma3", [10, 99, 30, 40], 3, False),
+        ("gemma3", [10, 20, 30, 40], 2, False),
         ("qwen3_5", [10, 20, 99, 40], 2, False),
         ("qwen3_5_moe", [10, 20, 99, 40], 2, False),
     ],

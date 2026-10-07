@@ -1418,6 +1418,66 @@ def _step3p7_media_item_runs(
     return grouped, run_group_sizes
 
 
+
+def _qwen_video_media_item_runs(
+    request: Any,
+    token_ids: List[int],
+    runs: List[Tuple[int, int]],
+    grouped_ids: Dict[str, set],
+    *,
+    model_type: Optional[str],
+) -> Optional[Tuple[List[Tuple[int, int]], List[int]]]:
+    """Collapse each Qwen video's per-temporal-group runs into one item span.
+
+    Qwen3.5/Qwen4Exp processors expand one video into ``grid_t`` blocks of
+    ``<t seconds><|vision_start|>video_pad...<|vision_end|>`` -- ``grid_t``
+    separate placeholder runs for ONE source item -- while an image is one run.
+    Counting runs as items therefore never matched once a video was present,
+    and the whole conversation fell back to the aggregate media key: every turn
+    after a video re-prefilled from the first media item (audit 2026-10-07,
+    Flash-Next mixed chain). Walk runs in prompt order: an image-token run is
+    one item; a video consumes exactly ``grid_t`` consecutive video-token runs
+    (from its ``video_grid_thw`` row, in order). Any disagreement -> None, so
+    the caller keeps its aggregate fail-closed behaviour.
+    """
+    if str(model_type or "").lower() not in {"qwen4_exp", "qwen3_5", "qwen3_5_moe", "qwen3_5_vl"}:
+        return None
+    image_ids = set(grouped_ids.get("image") or ())
+    video_ids = set(grouped_ids.get("video") or ())
+    if not video_ids or not runs:
+        return None
+    grid = getattr(request, "video_grid_thw", None)
+    if grid is None:
+        extra = getattr(request, "extra_kwargs", None)
+        grid = extra.get("video_grid_thw") if isinstance(extra, dict) else None
+    rows = _mllm_grid_rows(grid)
+    if not rows:
+        return None
+    temporal = [int(t) for t, _h, _w in rows]
+    grouped: List[Tuple[int, int]] = []
+    sizes: List[int] = []
+    cursor = 0
+    video_index = 0
+    while cursor < len(runs):
+        start_token = int(token_ids[runs[cursor][0]])
+        if start_token in image_ids:
+            grouped.append(runs[cursor]); sizes.append(1); cursor += 1
+            continue
+        if start_token not in video_ids or video_index >= len(temporal):
+            return None
+        need = temporal[video_index]
+        owned = runs[cursor:cursor + need]
+        if need <= 0 or len(owned) != need:
+            return None
+        if any(int(token_ids[r[0]]) not in video_ids for r in owned):
+            return None
+        grouped.append((owned[0][0], owned[-1][1])); sizes.append(need)
+        cursor += need
+        video_index += 1
+    if video_index != len(temporal):
+        return None
+    return grouped, sizes
+
 def _mllm_grid_rows(value: Any) -> Optional[List[Tuple[int, int, int]]]:
     """Normalize a processor grid tensor/list without guessing malformed rows."""
     if value is None:
@@ -10799,6 +10859,16 @@ class MLLMBatchGenerator:
                 )
                 if step_grouping is not None:
                     assignment_runs, run_group_sizes = step_grouping
+                else:
+                    qwen_grouping = _qwen_video_media_item_runs(
+                        request,
+                        token_ids,
+                        runs,
+                        grouped_ids,
+                        model_type=getattr(self, "_model_type", None),
+                    )
+                    if qwen_grouping is not None:
+                        assignment_runs, run_group_sizes = qwen_grouping
 
         modalities = {modality for modality, _value in source_items}
         if (

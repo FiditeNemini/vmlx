@@ -208,7 +208,8 @@ def test_stream_chat_routes_media_dflash2_through_vlm_prefill_plan():
             "first_media_index": 1, "salt": "abc"}
     model = _media_chat_model(plan)
     chunk = SimpleNamespace(text="cat", tokens=[5], accepted=None, prompt_tokens=3,
-                            generation_tps=0.0, finish_reason="stop")
+                            generation_tps=0.0, finish_reason="stop",
+                            prefill_usage={"tokens": 3, "seconds": 0.5, "scope": "model_prefill_and_prompt_state", "path": "dflash2"})
     with (
         patch("vmlx_engine.speculative.is_dflash2_enabled", return_value=True),
         patch("vmlx_engine.speculative.get_draft_model", return_value=object()),
@@ -221,7 +222,9 @@ def test_stream_chat_routes_media_dflash2_through_vlm_prefill_plan():
     assert bridge.call_args.kwargs["media"] is plan
     assert bridge.call_args.kwargs["prompt_tokens"] == [1, 2, 3]
     assert outputs[-1].text == "cat"
-    assert model.guard_calls == [True]  # the native path's image-prefill guard also runs on the DFlash2 media route
+    assert model.guard_calls == [True]
+    # pp/s: the engine-measured prefill reaches the output (-> usage.vmlx_prefill)
+    assert outputs[-1].prefill_usage == {"tokens": 3, "seconds": 0.5, "scope": "model_prefill_and_prompt_state", "path": "dflash2"}  # the native path's image-prefill guard also runs on the DFlash2 media route
 
 
 def test_stream_chat_media_without_vlm_prefill_plan_keeps_native_path():
@@ -328,3 +331,10 @@ def test_step3p7_language_model_accepts_mlx_vlm_inputs_keyword():
 
     params = inspect.signature(LanguageModel.__call__).parameters
     assert "inputs" in params and params["input_ids"].default is None
+
+
+def test_dflash2_prefill_receipt_uses_the_panel_pp_scope():
+    """panel shared/chatMetrics.ts calculatePrefillTps accepts only this scope; anything else hides pp/s."""
+    import inspect
+    from vmlx_engine.dflash2_runtime import _stream_generate_resumable
+    assert '"scope": "model_prefill_and_prompt_state"' in inspect.getsource(_stream_generate_resumable)

@@ -684,11 +684,18 @@ def _stream_generate_resumable(
     _cached = int(cache_len)
     _detail = (resume.get("source", "dflash2-ram") if resume is not None else "")
     _terminal_write = None
+    # Engine-measured prefill for the UI/API pp/s (usage.vmlx_prefill): the
+    # uncached tokens this request actually prefilled and the time it took,
+    # including the vision tower when a media plan was materialized. Same
+    # shape as the batched engine's req._prefill_usage.
+    _prefill_usage = None
+    _vision_seconds = 0.0
 
     def _respond(*args):
         r = runtime._make_response(*args)
         r.cached_tokens = _cached
         r.cache_detail = _detail
+        r.prefill_usage = _prefill_usage
         if getattr(r, "finish_reason", None) is not None:
             r.persistence_future = _terminal_write
         return r
@@ -745,7 +752,9 @@ def _stream_generate_resumable(
                 int(resume["cache_len"]), int(cached_delta),
             )
         elif media.get("embeds") is None and callable(media.get("materialize")):
+            _vision_t0 = time.perf_counter()
             media.update(media["materialize"]())
+            _vision_seconds = time.perf_counter() - _vision_t0
     adapter.media_embeds = media["embeds"] if media is not None else None
     adapter.media_positions = media["positions"] if media is not None else None
     adapter.rope_delta = int(media["rope_delta"]) if media is not None else 0
@@ -826,6 +835,15 @@ def _stream_generate_resumable(
                     cache.offset = draft_offset
         mx.eval(logits, hidden)
         prefill_elapsed = time.perf_counter() - tic
+        _prefill_usage = {
+            "tokens": int(prompt_arr.size) - int(cache_len),
+            "seconds": float(prefill_elapsed + _vision_seconds),
+            # The panel's pp/s accepts exactly this scope (shared/chatMetrics.ts
+            # calculatePrefillTps): model prefill + prompt state, vision encode
+            # included -- the batched engine's contract. ``path`` says which lane.
+            "scope": "model_prefill_and_prompt_state",
+            "path": "dflash2" + ("_with_vision" if _vision_seconds else ""),
+        }
         prompt_tps = prompt_arr.size / max(prefill_elapsed, 1e-9)
         if resume is not None:
             logger.info(

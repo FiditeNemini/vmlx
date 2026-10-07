@@ -3702,6 +3702,9 @@ class MLLMOutput:
     # Request-owned background SSD write; consumed by SimpleEngine only at
     # the terminal boundary, after delivering the final content delta.
     persistence_future: Any = None
+    # Engine-measured prefill {tokens, seconds, scope} -> usage.vmlx_prefill
+    # (the UI's pp/s). SimpleEngine paths previously never set it.
+    prefill_usage: Any = None
 
 
 def is_base64_image(s: str) -> bool:
@@ -6906,6 +6909,7 @@ class MLXMultimodalLM:
                     cached_tokens=int(getattr(chunk, "cached_tokens", 0) or 0),
                     cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
                     persistence_future=getattr(chunk, "persistence_future", None),
+                    prefill_usage=getattr(chunk, "prefill_usage", None),
                 )
 
             if not stats_logged:
@@ -6984,6 +6988,7 @@ class MLXMultimodalLM:
         accumulated_text = ""
         token_count = 0
         last_prompt_tokens = 0
+        native_prefill_usage = None
 
         # Ensure processor uses NaiveStreamingDetokenizer for all MLLM models.
         # mlx-vlm's default streaming detokenizer can buffer infinitely for some
@@ -7053,10 +7058,20 @@ class MLXMultimodalLM:
                     if chunk_prompt_tokens:
                         last_prompt_tokens = chunk_prompt_tokens
 
+                    # mlx-vlm reports prompt_tps = processed prompt tokens /
+                    # prompt time; expose it as the engine prefill measurement.
+                    _pp_tps = float(getattr(chunk, "prompt_tps", 0.0) or 0.0)
+                    _pp_tokens = int(chunk_prompt_tokens or 0) - (prefix_match_len if cache_hit else 0)
+                    if _pp_tps > 0 and _pp_tokens > 0:
+                        native_prefill_usage = {
+                            "tokens": _pp_tokens, "seconds": _pp_tokens / _pp_tps,
+                            "scope": "model_prefill_and_prompt_state", "path": "mlx_vlm",
+                        }
                     yield MLLMOutput(
                         text=new_text,  # Just the new token for streaming
                         finish_reason=None,
                         prompt_tokens=last_prompt_tokens,
+                        prefill_usage=native_prefill_usage,
                         completion_tokens=token_count,
                         cached_tokens=prefix_match_len if cache_hit else 0,
                         cache_detail="memory" if cache_hit and prefix_match_len > 0 else "",
@@ -7109,6 +7124,7 @@ class MLXMultimodalLM:
             completion_tokens=token_count,
             cached_tokens=prefix_match_len if cache_hit else 0,
             cache_detail="memory" if cache_hit and prefix_match_len > 0 else "",
+            prefill_usage=native_prefill_usage,
         )
 
     def describe_image(

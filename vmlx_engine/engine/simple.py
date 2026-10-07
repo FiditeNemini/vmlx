@@ -1044,6 +1044,7 @@ class SimpleEngine(BaseEngine):
             self._current_request_id = request_id
             last_cached_tokens = 0
             last_cache_detail = ""
+            last_prefill_usage = None
 
             # Pass enable_thinking to MLLM for models that support it (Qwen3-VL, etc.)
             mllm_kwargs = dict(kwargs)
@@ -1118,6 +1119,9 @@ class SimpleEngine(BaseEngine):
                     # Prompt-cache reuse reported by the model path (VLM prompt
                     # cache, DFlash2 session store). Previously dropped here, so
                     # usage never showed cached tokens on SimpleEngine MLLM.
+                    chunk_prefill = getattr(chunk, "prefill_usage", None)
+                    if chunk_prefill:
+                        last_prefill_usage = chunk_prefill
                     chunk_cached = int(getattr(chunk, "cached_tokens", 0) or 0)
                     if chunk_cached:
                         last_cached_tokens = chunk_cached
@@ -1139,6 +1143,7 @@ class SimpleEngine(BaseEngine):
                         finish_reason=chunk.finish_reason if finished else None,
                         cached_tokens=last_cached_tokens,
                         cache_detail=last_cache_detail,
+                        prefill_usage=last_prefill_usage,
                     )
 
                     receipt = getattr(chunk, "persistence_future", None)

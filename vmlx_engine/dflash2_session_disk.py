@@ -65,7 +65,12 @@ from typing import Any, Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-SCHEMA = "dflash2_session_v1"
+# v2 (2026-10-07): v1 entries of hybrid targets were written while snapshots
+# aliased the live GatedDeltaNet state (recurrent state advanced past the cut;
+# restores changed answers -- dflash2_runtime._clone_cache_shells). v1 also had
+# no rope_delta metadata. Never read v1; its namespace is cleared at startup.
+SCHEMA = "dflash2_session_v2"
+LEGACY_SCHEMAS = ("dflash2_session_v1",)
 
 
 def _token_digest(tokens: list[int]) -> str:
@@ -135,6 +140,26 @@ class DFlash2SessionSSD:
         self.store = OmniSessionDiskStore(
             root=root, model_key=model_key, max_size_bytes=int(max_size_bytes), schema=SCHEMA
         )
+        self.legacy_cleared = 0
+        for legacy in LEGACY_SCHEMAS:
+            # Through the store's own API so the pool's budget ledger stays in
+            # sync; only when that namespace exists (constructing creates it).
+            legacy_ns = Path(root).expanduser().resolve() / hashlib.sha256(
+                f"{model_key}:{legacy}".encode()).hexdigest()[:16]
+            if not (legacy_ns / "native_sessions").is_dir():
+                continue
+            try:
+                old = OmniSessionDiskStore(root=root, model_key=model_key,
+                                           max_size_bytes=int(max_size_bytes), schema=legacy)
+                try:
+                    self.legacy_cleared += int(old.clear() or 0)
+                finally:
+                    old.close()
+            except Exception:
+                logger.warning("DFlash2 SSD: could not clear legacy %s entries", legacy, exc_info=True)
+        if self.legacy_cleared:
+            logger.info("DFlash2 SSD: cleared %d bytes of legacy session entries (schema %s)",
+                        self.legacy_cleared, ",".join(LEGACY_SCHEMAS))
         self.stats = {"writes": 0, "write_bytes": 0, "write_s": 0.0, "write_errors": 0,
                       "dropped": 0, "hits": 0, "hit_tokens": 0, "load_s": 0.0, "misses": 0}
         # Two prefill snapshots plus a reserved final-turn slot. Requests

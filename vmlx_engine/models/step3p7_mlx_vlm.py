@@ -227,11 +227,18 @@ class LanguageModel(step3p5.Model):
 
     def __call__(
         self,
-        input_ids: mx.array,
+        input_ids: mx.array | None = None,
         inputs_embeds: mx.array | None = None,
         cache: Any = None,
+        inputs: mx.array | None = None,
         **_kwargs: Any,
     ):
+        # mlx-vlm's chunked prefill (SimpleEngine path) passes ``inputs=``;
+        # the batched engine passes the ids positionally. Accept both:
+        # requiring ``input_ids`` crashed every Step-3.7 media request with
+        # continuous batching off (audit 2026-10-07).
+        if input_ids is None:
+            input_ids = inputs
         if inputs_embeds is None:
             logits = super().__call__(input_ids, cache=cache)
         else:

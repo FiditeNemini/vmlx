@@ -320,3 +320,11 @@ def test_video_frames_take_their_prompt_position_among_images():
     ]
     assert _order_images_and_video_frames(msgs, ["shot", "blue"], [["f1", "f2"]]) == ["shot", "f1", "f2", "blue"]
     assert _order_images_and_video_frames(msgs, ["shot"], [["f1"]]) is None  # mismatch fails closed
+
+
+def test_step3p7_language_model_accepts_mlx_vlm_inputs_keyword():
+    import inspect
+    from vmlx_engine.models.step3p7_mlx_vlm import LanguageModel
+
+    params = inspect.signature(LanguageModel.__call__).parameters
+    assert "inputs" in params and params["input_ids"].default is None

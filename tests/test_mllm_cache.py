@@ -982,8 +982,8 @@ class TestMLXMultimodalLMCache:
 
         def _fake_stream_generate(*_args, **kwargs):
             captured.update(kwargs)
-            yield SimpleNamespace(text="o", prompt_tokens=4)
-            yield SimpleNamespace(text="k", prompt_tokens=4)
+            yield SimpleNamespace(text="o", prompt_tokens=4, prompt_tps=2.0)
+            yield SimpleNamespace(text="k", prompt_tokens=4, prompt_tps=2.0)
 
         monkeypatch.setattr(mlx_vlm, "stream_generate", _fake_stream_generate)
 
@@ -1023,6 +1023,11 @@ class TestMLXMultimodalLMCache:
         assert state.cache == ["cached-kv"]
         assert state.token_ids == [10, 11]
         assert captured.get("prompt_cache") is None
+
+        # Upstream rate counts all four prompt tokens over two seconds.
+        # Only two tokens were actually prefilled after this prefix hit.
+        assert chunks[-1].prefill_usage["tokens"] == 2
+        assert chunks[-1].prefill_usage["seconds"] == 2.0
 
     def test_stream_chat_cache_miss_stores_prompt_boundary_only(
         self, monkeypatch

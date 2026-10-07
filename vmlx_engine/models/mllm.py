@@ -6966,7 +6966,14 @@ class MLXMultimodalLM:
                             "Stream chat image prefix hit lacked PromptCacheState; "
                             "falling back to full prompt processing"
                         )
-                    cache_hit = True
+                    cache_hit = prompt_cache_state is not None
+                    # The restore shell deliberately leaves the final cached
+                    # token to be recomputed. Report its actual boundary, not
+                    # the longer entry selected by the prefix index.
+                    prefix_match_len = (
+                        min(prefix_match_len, len(prompt_cache_state.token_ids))
+                        if cache_hit else 0
+                    )
                     if prefix_match_len > 0:
                         logger.debug(
                             f"Stream chat prefix cache hit: {prefix_match_len} tokens, "
@@ -7058,13 +7065,14 @@ class MLXMultimodalLM:
                     if chunk_prompt_tokens:
                         last_prompt_tokens = chunk_prompt_tokens
 
-                    # mlx-vlm reports prompt_tps = processed prompt tokens /
-                    # prompt time; expose it as the engine prefill measurement.
+                    # mlx-vlm 0.5 reports total prompt tokens (including reused
+                    # tokens) / prompt time. Recover elapsed time from that
+                    # numerator, then report only tokens actually prefilled.
                     _pp_tps = float(getattr(chunk, "prompt_tps", 0.0) or 0.0)
                     _pp_tokens = int(chunk_prompt_tokens or 0) - (prefix_match_len if cache_hit else 0)
                     if _pp_tps > 0 and _pp_tokens > 0:
                         native_prefill_usage = {
-                            "tokens": _pp_tokens, "seconds": _pp_tokens / _pp_tps,
+                            "tokens": _pp_tokens, "seconds": int(chunk_prompt_tokens) / _pp_tps,
                             "scope": "model_prefill_and_prompt_state", "path": "mlx_vlm",
                         }
                     yield MLLMOutput(

@@ -16463,6 +16463,14 @@ async def clear_cache(
     # Clear multimodal caches
     if cache_type in ("multimodal", "all"):
         try:
+            from .vision_feature_cache import clear_active_stores
+
+            if clear_active_stores():
+                cleared.append("vision_feature_disk")
+        except Exception:
+            logger.exception("Vision feature SSD clear did not finish")
+            skipped.append("vision_feature_disk:clear_failed")
+        try:
             from mlx_vlm.utils import (
                 clear_multimodal_kv_cache,
                 clear_pixel_values_cache,

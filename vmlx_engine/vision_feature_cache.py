@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import weakref
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,7 +35,20 @@ logger = logging.getLogger(__name__)
 SCHEMA = "vision_features_v1"
 _FAMILIES = {"qwen4_exp", "qwen3_5", "qwen3_5_moe"}
 _CONFIG: dict = {}
+_STORES: weakref.WeakSet = weakref.WeakSet()
 STATS = {"hits": 0, "misses": 0, "load_s": 0.0, "encode_s": 0.0, "bypass": 0}
+
+
+def clear_active_stores() -> int:
+    """Clear feature SSD for loaded towers without keeping models alive.
+
+    The store serializes clear with reads/writes under the shared pool lock.
+    In-flight features already returned to a request remain request-owned.
+    """
+    stores = list(_STORES)
+    for store in stores:
+        store.clear()
+    return len(stores)
 
 
 def configure(*, root: str, max_size_bytes: int) -> None:
@@ -46,20 +60,23 @@ def configure(*, root: str, max_size_bytes: int) -> None:
 
 
 def _model_identity(model: Any, model_path: str) -> str:
-    """Bundle path + vision config + the files that pin its weights."""
-    parts = [str(Path(model_path).expanduser().resolve())]
-    vision = getattr(getattr(model, "config", None), "vision_config", None)
+    """Bind features to the loaded bundle and runtime, once at installation.
+
+    Config/index files alone do not identify weights replaced in place. Use
+    the same shard-aware fingerprint as the native session SSD cache; this
+    only stats bundle files and never reads weight contents or runs per turn.
+    """
+    from .model_bundle_integrity import _bundle_fingerprint
+    from .prefix_cache import runtime_cache_fingerprint
+
+    root = Path(model_path).expanduser().resolve()
+    parts = [str(root), _bundle_fingerprint(root), runtime_cache_fingerprint()]
+    config = getattr(model, "config", None)
+    vision = config.get("vision_config") if isinstance(config, dict) else getattr(config, "vision_config", None)
     try:
         parts.append(json.dumps(vision if isinstance(vision, dict) else vars(vision), sort_keys=True, default=str))
     except Exception:
         parts.append(repr(vision))
-    for name in ("config.json", "model.safetensors.index.json", "jang_config.json"):
-        p = Path(model_path) / name
-        try:
-            st = p.stat()
-            parts.append(f"{name}:{st.st_size}:{int(st.st_mtime)}")
-        except OSError:
-            pass
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:32]
 
 
@@ -98,6 +115,7 @@ def install(model: Any, model_path: str) -> bool:
     _PerItemCachedVisionTower.__qualname__ = base.__qualname__
     tower.__class__ = _PerItemCachedVisionTower
     tower._vmlx_feature_cache = store
+    _STORES.add(store)
     logger.info("Vision feature SSD cache installed for %s (%s, schema %s)", model_type, store.directory, SCHEMA)
     return True
 

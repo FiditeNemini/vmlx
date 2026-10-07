@@ -132,15 +132,46 @@ class _TargetAdapter:
         # helper keeps just logits[:, -1:], so projecting every prompt row
         # through the 248k-vocab head is wasted work on the final chunk.
         self.last_row_logits = False
+        # Media plan, set for ONE image/video request (_stream_generate_resumable
+        # media=...). The VLM's own get_input_embeddings/get_rope_index produce
+        # the whole prompt's input embeddings (vision features merged) and its
+        # M-RoPE position ids; prompt chunks read their slice of both. Every
+        # row after the prompt (decode, verify) is text, at position
+        # offset + rope_delta (Qwen M-RoPE compresses media positions, so the
+        # text that follows sits rope_delta < 0 below its cache offset).
+        self.media_embeds = None
+        self.media_positions = None
+        self.rope_delta = 0
 
     @property
     def layers(self):
         return self.model.layers
 
+    def _media_inputs(self, inputs, cache) -> dict:
+        import mlx.core as mx
+
+        start = int(cache[self.model.fa_idx].offset) if cache is not None else 0
+        rows = int(inputs.shape[1])
+        embeds = self.media_embeds
+        if embeds is not None and start + rows <= int(embeds.shape[1]):
+            return {
+                "inputs_embeds": embeds[:, start:start + rows],
+                "position_ids": self.media_positions[:, :, start:start + rows],
+            }
+        # Text rows after the media: 2-D ids take the text RoPE kernel (and the
+        # row-exact verify path) at offset start + rope_delta.
+        return {"position_ids": (mx.arange(start, start + rows) + int(self.rope_delta))[None]}
+
     def __call__(self, inputs, cache=None):
+        media = (
+            self._media_inputs(inputs, cache)
+            if self.media_embeds is not None or self.rope_delta
+            else {}
+        )
         hidden = self.model(
             inputs,
             cache=cache,
+            **media,
             # The GDN sink records per-row q/k/v/a/b + state for verify
             # rollback.  Prompt prefill never rolls back, and the list is only
             # cleared at the first decode cycle, so during prefill it just
@@ -427,10 +458,15 @@ def configure_session_ssd(*, root, max_size_bytes: int, target_path: str, draft_
     )
 
 
-def _store_session(entry: dict):
-    """RAM store + SSD write-behind (when configured)."""
+def _store_session(entry: dict, ram_only: bool = False):
+    """RAM store + SSD write-behind (when configured).
+
+    ``ram_only``: media-request entries. The SSD tier matches by token ids
+    alone, and media placeholder ids are identical for different images, so
+    those entries live only in the RAM store under a media-salted key.
+    """
     _SESSION_STORE.put(entry)
-    if _SESSION_SSD is not None:
+    if _SESSION_SSD is not None and not ram_only:
         try:
             return _SESSION_SSD.put(entry)
         except Exception:
@@ -458,7 +494,17 @@ def _clone_cache_shells(cache: list, factory) -> Optional[list]:
     try:
         fresh = factory()
         for dst, src in zip(fresh, cache):
-            dst.state = src.state
+            # COPY the container. mlx-lm ArraysCache.state returns its live
+            # ``self.cache`` LIST, and GatedDeltaNet layers update it in place
+            # (``cache[0] = conv``, ``cache[1] = state``). Assigning the list
+            # itself made every "frozen" snapshot a live alias: its recurrent
+            # state kept advancing through the rest of the prefill and decode
+            # while its attention KV (fresh slices) stayed at the cut. The SSD
+            # tier then stored that advanced state, so a restore applied the
+            # suffix tokens to the recurrence twice and changed the answer
+            # (audit 2026-10-07: 27B 4D "weekdays x10" -> 12 from SSD, 10 cold).
+            state = src.state
+            dst.state = list(state) if isinstance(state, list) else state
             src_meta = getattr(type(src), "meta_state", None)
             if isinstance(src_meta, property) and src_meta.fset is not None:
                 dst.meta_state = src.meta_state
@@ -534,8 +580,14 @@ def _stream_generate_resumable(
     top_k: int,
     prefill_step_size: int = 2048,
     sampling_controls=None,
+    prompt_tokens: Optional[list] = None,
+    media: Optional[dict] = None,
 ) -> Iterator[Any]:
     """The dflash==0.1.0 ``_stream_generate`` loop with session resume.
+
+    ``prompt_tokens`` + ``media`` (image/video requests): the processor's
+    expanded token ids and the VLM prefill plan (``embeds``, ``positions``,
+    ``rope_delta``, ``salt``) -- see ``_TargetAdapter`` media plan.
 
     Differences from upstream: (1) when the session store holds a conversation
     that prefixes this prompt, only the delta is prefilled into its caches;
@@ -560,19 +612,27 @@ def _stream_generate_resumable(
     add_special_tokens = tokenizer.bos_token is None or not prompt.startswith(
         tokenizer.bos_token
     )
-    prompt_list = [int(t) for t in tokenizer.encode(prompt, add_special_tokens=add_special_tokens)]
+    prompt_list = (
+        [int(t) for t in prompt_tokens]
+        if prompt_tokens is not None
+        else [int(t) for t in tokenizer.encode(prompt, add_special_tokens=add_special_tokens)]
+    )
     prompt_arr = mx.array(prompt_list)
 
     detokenizer = tokenizer.detokenizer
     mask_id = int(draft.config.mask_token_id)
     tokens: list[int] = []
 
-    model_key = (id(model), id(draft))
-    resume = (
-        _SESSION_STORE.take_matching(model_key, prompt_list)
-        if _prefix_reuse_enabled()
-        else None
-    )
+    base_key = (id(model), id(draft))
+    # Media requests key their entries by a hash of the media content: the
+    # placeholder token ids are the same for every image. They may still
+    # resume a text-only entry (its prefix precedes any media).
+    model_key = base_key + (media["salt"],) if media is not None else base_key
+    resume = None
+    if _prefix_reuse_enabled():
+        resume = _SESSION_STORE.take_matching(model_key, prompt_list)
+        if resume is None and media is not None:
+            resume = _SESSION_STORE.take_matching(base_key, prompt_list)
     if resume is None and _prefix_reuse_enabled() and _SESSION_SSD is not None:
         try:
             _im_start = tokenizer.convert_tokens_to_ids("<|im_start|>")
@@ -655,6 +715,10 @@ def _stream_generate_resumable(
         system_cut = None
     snapshots: list = []
 
+    if media is not None:
+        adapter.media_embeds = media["embeds"]
+        adapter.media_positions = media["positions"]
+        adapter.rope_delta = int(media["rope_delta"])
     try:
         tic = time.perf_counter()
         with mx.stream(runtime.generation_stream):
@@ -745,15 +809,18 @@ def _stream_generate_resumable(
             # when the template strips this turn's <think> block from history
             # (which makes the end-of-turn entry unmatchable).
             # system: the system message, shared by new conversations.
+            # A cut before the first media token is plain text: unsalted, SSD ok.
+            text_only_cut = media is None or int(cut) <= int(media["first_media_index"])
             _store_session(
                 {
-                    "model_key": model_key,
+                    "model_key": base_key if text_only_cut else model_key,
                     "kind": kind,
                     "tokens": prompt_list[:cut],
                     "cache_len": int(cut),
                     "target_cache": shells,
                     **draft_state,
-                }
+                },
+                ram_only=not text_only_cut,
             )
             logger.info(
                 "DFlash2 %s snapshot stored: %d of %d prompt tokens",
@@ -827,7 +894,8 @@ def _stream_generate_resumable(
                     "draft_cache": store_draft,
                     "draft_hidden_gap": gap_arr if store_draft is not None else None,
                     "draft_context": hidden if n == 1 else None,
-                }
+                },
+                ram_only=media is not None,
             )
             logger.info(
                 "DFlash2 session stored: %d confirmed tokens (draft cache %s)",
@@ -1010,6 +1078,10 @@ def _stream_generate_resumable(
     finally:
         if _capture is not None:
             _capture.close()
+        # The adapter is shared by every request on this model.
+        adapter.media_embeds = None
+        adapter.media_positions = None
+        adapter.rope_delta = 0
 
 
 class _BlockChooser:
@@ -1204,8 +1276,14 @@ def stream_dflash2_generate(
     repetition_penalty: float = 1.0,
     frequency_penalty: float = 0.0,
     presence_penalty: float = 0.0,
+    prompt_tokens: Optional[list] = None,
+    media: Optional[dict] = None,
 ) -> Iterator[Any]:
-    """Yield upstream DFlash2 chunks using vMLX's hybrid Qwen target."""
+    """Yield upstream DFlash2 chunks using vMLX's hybrid Qwen target.
+
+    ``prompt_tokens``/``media``: image or video requests prefilled through the
+    VLM (see ``MLXMultimodalLM._dflash2_media_plan``); decode stays DFlash2.
+    """
 
     import mlx.core as mx
     import dflash.model_mlx as runtime
@@ -1235,4 +1313,6 @@ def stream_dflash2_generate(
             top_p=float(top_p),
             top_k=int(top_k),
             sampling_controls=sampling_controls,
+            prompt_tokens=prompt_tokens,
+            media=media,
         )

@@ -137,3 +137,140 @@ def test_stream_chat_routes_text_only_dflash2_before_mlx_vlm_generator():
     assert bridge.call_args.kwargs["repetition_penalty"] == 1.1
     assert bridge.call_args.kwargs["frequency_penalty"] == .2
     assert bridge.call_args.kwargs["presence_penalty"] == .3
+
+
+def test_target_adapter_media_plan_slices_prompt_and_offsets_text_rows():
+    """Image/video prompts: prompt chunks take their slice of the VLM's merged
+    embeddings and M-RoPE ids; every later row (decode, verify) is text at
+    cache offset + rope_delta, through the 2-D text-RoPE path."""
+    import mlx.core as mx
+
+    from vmlx_engine.dflash2_runtime import _TargetAdapter
+
+    calls = []
+
+    class Inner:
+        fa_idx = 1
+
+        def __call__(self, inputs, cache=None, **kwargs):
+            calls.append(kwargs)
+            return mx.zeros((1, inputs.shape[1], 4))
+
+        def norm(self, h):
+            return h
+
+    lm = SimpleNamespace(model=Inner(), lm_head=lambda h: h)
+    adapter = _TargetAdapter(lm)
+    cache = [None, SimpleNamespace(offset=0)]
+    embeds = mx.arange(10 * 4).reshape(1, 10, 4)
+    positions = mx.broadcast_to(mx.arange(10)[None, None], (3, 1, 10))
+    adapter.media_embeds, adapter.media_positions, adapter.rope_delta = embeds, positions, -6
+
+    cache[1].offset = 2
+    adapter(mx.zeros((1, 3), dtype=mx.int32), cache)
+    assert mx.array_equal(calls[-1]["inputs_embeds"], embeds[:, 2:5]).item()
+    assert calls[-1]["position_ids"].shape == (3, 1, 3)
+
+    cache[1].offset = 10  # past the prompt: verify rows
+    adapter(mx.zeros((1, 4), dtype=mx.int32), cache)
+    assert "inputs_embeds" not in calls[-1]
+    assert calls[-1]["position_ids"].tolist() == [[4, 5, 6, 7]]
+
+    adapter.media_embeds = adapter.media_positions = None
+    adapter.rope_delta = 0
+    adapter(mx.zeros((1, 2), dtype=mx.int32), cache)
+    assert "position_ids" not in calls[-1] and "inputs_embeds" not in calls[-1]
+
+
+def _media_chat_model(plan):
+    from vmlx_engine.models.mllm import MLXMultimodalLM
+
+    model = object.__new__(MLXMultimodalLM)
+    model._loaded = True
+    model.model_name = "target"
+    model.model = object()
+    model.processor = SimpleNamespace(tokenizer=SimpleNamespace(encode=lambda s: [9]))
+    model.config = {}
+    model._extract_multimodal_messages = lambda _messages: (
+        [{"role": "user", "content": "describe"}], ["img://1"], [], [],
+    )
+    model._normalize_text_only_messages_for_processor = lambda messages, has_media: messages
+    model._prepare_images = lambda urls: ["IMAGE"]
+    model._apply_chat_template = lambda messages, enable_thinking, tools=None, reasoning_effort=None: "PROMPT"
+    model._dflash2_media_plan = lambda prompt, images, kwargs: plan
+    return model
+
+
+def test_stream_chat_routes_media_dflash2_through_vlm_prefill_plan():
+    plan = {"prompt_tokens": [1, 2, 3], "embeds": "E", "positions": "P", "rope_delta": -3,
+            "first_media_index": 1, "salt": "abc"}
+    model = _media_chat_model(plan)
+    chunk = SimpleNamespace(text="cat", tokens=[5], accepted=None, prompt_tokens=3,
+                            generation_tps=0.0, finish_reason="stop")
+    with (
+        patch("vmlx_engine.speculative.is_dflash2_enabled", return_value=True),
+        patch("vmlx_engine.speculative.get_draft_model", return_value=object()),
+        patch("vmlx_engine.dflash2_runtime.stream_dflash2_generate", return_value=iter([chunk])) as bridge,
+        patch("mlx_vlm.stream_generate") as ordinary,
+    ):
+        outputs = list(model.stream_chat([{"role": "user", "content": "describe"}], max_tokens=4, temperature=0.0))
+    bridge.assert_called_once()
+    ordinary.assert_not_called()
+    assert bridge.call_args.kwargs["media"] is plan
+    assert bridge.call_args.kwargs["prompt_tokens"] == [1, 2, 3]
+    assert outputs[-1].text == "cat"
+
+
+def test_stream_chat_media_without_vlm_prefill_plan_keeps_native_path():
+    model = _media_chat_model(None)
+    with (
+        patch("vmlx_engine.speculative.is_dflash2_enabled", return_value=True),
+        patch("vmlx_engine.speculative.get_draft_model", return_value=object()),
+        patch("vmlx_engine.dflash2_runtime.stream_dflash2_generate") as bridge,
+        patch("mlx_vlm.stream_generate", return_value=iter([])) as ordinary,
+    ):
+        try:
+            list(model.stream_chat([{"role": "user", "content": "describe"}], max_tokens=4, temperature=0.0))
+        except Exception:
+            pass  # the stub model cannot run the native path; only the routing matters
+    bridge.assert_not_called()
+
+
+def test_native_vlm_stream_counts_cumulative_generation_tokens_not_chunks():
+    """mlx-vlm ends with a flush result repeating the last generation_tokens: max_tokens=2 must report 2, not 3."""
+    model = _media_chat_model(None)
+    results = [
+        SimpleNamespace(text="a", generation_tokens=1, prompt_tokens=4),
+        SimpleNamespace(text="b", generation_tokens=2, prompt_tokens=4),
+        SimpleNamespace(text="", generation_tokens=2, prompt_tokens=4),  # finalize flush
+    ]
+    model._extract_multimodal_messages = lambda _messages: ([{"role": "user", "content": "hi"}], [], [], [])
+    model._guard_simple_image_prefill = lambda *a, **k: None
+    model.processor = SimpleNamespace(tokenizer=SimpleNamespace(encode=lambda s: [9]), _patched_detok=True)
+    model._cache_manager = None
+    with (
+        patch("vmlx_engine.speculative.is_dflash2_enabled", return_value=False),
+        patch("mlx_vlm.stream_generate", return_value=iter(results)),
+        patch("mlx_vlm.models.cache.make_prompt_cache", return_value=None),
+    ):
+        outputs = list(model.stream_chat([{"role": "user", "content": "hi"}], max_tokens=2, temperature=0.0, use_cache=False))
+    assert outputs[-1].completion_tokens == 2
+    assert outputs[-1].finish_reason == "length"
+
+
+def test_clone_cache_shells_does_not_alias_arrays_cache_lists():
+    """A snapshot must not see later in-place GDN state writes on the live cache."""
+    import mlx.core as mx
+    from mlx_lm.models.cache import ArraysCache, KVCache
+
+    from vmlx_engine.dflash2_runtime import _clone_cache_shells
+
+    live = [ArraysCache(2), KVCache()]
+    live[0][0] = mx.zeros((1, 3, 4)); live[0][1] = mx.zeros((1, 2, 4, 4))
+    live[1].update_and_fetch(mx.zeros((1, 2, 5, 8)), mx.zeros((1, 2, 5, 8)))
+    snap = _clone_cache_shells(live, lambda: [ArraysCache(2), KVCache()])
+    live[0][1] = mx.ones((1, 2, 4, 4))  # in-place GDN update after the snapshot
+    live[1].update_and_fetch(mx.ones((1, 2, 3, 8)), mx.ones((1, 2, 3, 8)))
+    assert snap[0].state is not live[0].state
+    assert mx.array_equal(snap[0][1], mx.zeros((1, 2, 4, 4))).item()
+    assert snap[1].offset == 5

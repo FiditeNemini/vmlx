@@ -6458,6 +6458,89 @@ class MLXMultimodalLM:
             cache_detail="memory" if cache_hit and prefix_match_len > 0 else "",
         )
 
+    def _dflash2_media_plan(self, formatted_prompt: str, images: list, kwargs: dict) -> dict | None:
+        """VLM prefill inputs for a DFlash2 image/video request, or None.
+
+        Mirrors what mlx_vlm.stream_generate does before its first forward:
+        processor inputs (placeholders expanded to one token per patch), then
+        the model's own get_input_embeddings, which runs the vision tower,
+        merges the features and computes the prompt's M-RoPE position ids and
+        rope delta (language_model._position_ids / _rope_deltas). The DFlash2
+        target adapter consumes these; nothing here forwards the language
+        model. None (native VLM path) for models without that interface.
+        """
+        import hashlib
+
+        import mlx.core as mx
+        import numpy as np
+
+        language_model = getattr(self.model, "language_model", None)
+        if (
+            language_model is None
+            or not hasattr(language_model, "get_rope_index")
+            or not hasattr(self.model, "get_input_embeddings")
+        ):
+            logger.info(
+                "DFlash2 media request on %s: no M-RoPE VLM prefill interface; native VLM path",
+                self.model_name,
+            )
+            return None
+        from mlx_vlm.utils import prepare_inputs
+
+        try:
+            from mlx_vlm.generate import normalize_resize_shape
+        except ImportError:  # older mlx-vlm
+            normalize_resize_shape = lambda shape: shape  # noqa: E731
+        config = self.model.config
+        inputs = prepare_inputs(
+            self.processor,
+            images=images,
+            prompts=formatted_prompt,
+            image_token_index=getattr(config, "image_token_index", None),
+            resize_shape=normalize_resize_shape(kwargs.get("resize_shape")),
+            add_special_tokens=True,
+        )
+        input_ids = inputs["input_ids"]
+        pixel_values = inputs.get("pixel_values")
+        extra = {
+            k: v for k, v in inputs.items()
+            if k not in ("input_ids", "pixel_values", "attention_mask")
+        }
+        features = self.model.get_input_embeddings(
+            input_ids, pixel_values, mask=inputs.get("attention_mask"), **extra
+        )
+        embeds = getattr(features, "inputs_embeds", features)
+        positions = getattr(language_model, "_position_ids", None)
+        rope_delta = getattr(language_model, "_rope_deltas", None)
+        # The VLM's next forward must not reuse this request's rope state.
+        language_model._position_ids = None
+        language_model._rope_deltas = None
+        if positions is None or rope_delta is None or positions.shape[-1] != input_ids.shape[-1]:
+            logger.warning("DFlash2 media plan incomplete (no M-RoPE positions); native VLM path")
+            return None
+        mx.eval(embeds, positions, rope_delta)
+        tokens = [int(t) for t in input_ids[0].tolist()]
+        media_ids = {
+            int(v) for v in (getattr(config, "image_token_index", None), getattr(config, "video_token_index", None))
+            if v is not None
+        }
+        first_media = next((i for i, t in enumerate(tokens) if t in media_ids), len(tokens))
+        # Session-store salt: the processed pixels (placeholder ids are the
+        # same for every image, so the token ids cannot tell images apart).
+        digest = hashlib.sha256()
+        digest.update(np.asarray(pixel_values.astype(mx.float32) if pixel_values.dtype == mx.bfloat16 else pixel_values).tobytes())
+        for key in ("image_grid_thw", "video_grid_thw"):
+            if extra.get(key) is not None:
+                digest.update(np.asarray(extra[key]).tobytes())
+        return {
+            "prompt_tokens": tokens,
+            "embeds": embeds,
+            "positions": positions,
+            "rope_delta": int(rope_delta.reshape(-1)[0].item()),
+            "first_media_index": first_media,
+            "salt": digest.hexdigest()[:32],
+        }
+
     def stream_chat(
         self,
         messages: list[dict],
@@ -6587,109 +6670,127 @@ class MLXMultimodalLM:
                     logger.debug(f"Image slot count check failed: {_e}")
 
         # The server's SimpleEngine uses stream_chat(), not stream_generate().
-        # Route text-only DFlash2 requests here before mlx-vlm constructs its
-        # ordinary prompt cache and generator. Media requests deliberately keep
-        # the native VLM path because the draft checkpoint is text-only.
-        if not all_images and not all_audio and not videos:
+        # Route DFlash2 requests here before mlx-vlm constructs its ordinary
+        # prompt cache and generator. Image/video requests (video arrives as
+        # frames in all_images) are PREFILLED through the VLM -- vision tower,
+        # merged input embeddings, M-RoPE positions -- and then decoded by
+        # DFlash2: the drafter only ever proposes text tokens and conditions on
+        # the target's hidden states, so it never needs to see pixels. Audio
+        # and VLMs without M-RoPE prefill support keep the native VLM path.
+        _df2_media = None
+        _df2_route = False
+        if not all_audio:
             from ..speculative import get_draft_model, is_dflash2_enabled
 
             if is_dflash2_enabled():
-                from ..dflash2_runtime import stream_dflash2_generate
+                if not all_images:
+                    _df2_route = not videos
+                else:
+                    _df2_media = self._dflash2_media_plan(formatted_prompt, all_images, kwargs)
+                    _df2_route = _df2_media is not None
+        if _df2_route:
+            from ..dflash2_runtime import stream_dflash2_generate
 
-                tokenizer = (
-                    self.processor.tokenizer
-                    if hasattr(self.processor, "tokenizer")
-                    else self.processor
-                )
-                top_p = float(kwargs.pop("top_p", 1.0))
-                top_k = int(kwargs.pop("top_k", 0))
-                token_count = 0
-                emitted_per_cycle: list[int] = []
-                drafted_total = 0
-                width_cycles: dict[int, int] = {}
-                last_chunk = None
-                stats_logged = False
-                logger.info("DFlash2 text chat active for %s", self.model_name)
-                for chunk in stream_dflash2_generate(
-                    self.model,
-                    tokenizer,
-                    get_draft_model(),
-                    formatted_prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    min_p=float(kwargs.get("min_p", 0.0) or 0.0),
-                    logit_bias=kwargs.get("logit_bias"),
-                    repetition_penalty=float(
-                        1.0 if kwargs.get("repetition_penalty") is None
-                        else kwargs["repetition_penalty"]
-                    ),
-                    frequency_penalty=float(kwargs.get("frequency_penalty", 0.0) or 0.0),
-                    presence_penalty=float(kwargs.get("presence_penalty", 0.0) or 0.0),
-                ):
-                    emitted = len(getattr(chunk, "tokens", []) or [])
-                    token_count += emitted
-                    if getattr(chunk, "accepted", None) is not None:
-                        emitted_per_cycle.append(int(chunk.accepted))
-                        # verify width is adaptive (dflash2_runtime._BlockChooser)
-                        _w = int(getattr(chunk, "drafted", 4)) + 1
-                        drafted_total += _w - 1
-                        width_cycles[_w] = width_cycles.get(_w, 0) + 1
-                    last_chunk = chunk
-                    if getattr(chunk, "finish_reason", None) is not None:
-                        cycles = len(emitted_per_cycle)
-                        mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
-                        accepted_draft = sum(
-                            max(0, n - 1) for n in emitted_per_cycle
-                        )
-                        proposed_draft = drafted_total
-                        logger.info(
-                            "DFlash2 generation stats: prompt_tokens=%d "
-                            "output_tokens=%d cycles=%d emitted_per_cycle=%.3f "
-                            "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
-                            "prompt_tps=%.1f peak_memory=%.2fGB block_widths=%s "
-                            "finish_reason=%s",
-                            int(getattr(chunk, "prompt_tokens", 0) or 0),
-                            token_count,
-                            cycles,
-                            mean_emitted,
-                            100.0 * accepted_draft / max(1, proposed_draft),
-                            float(getattr(chunk, "generation_tps", 0.0) or 0.0),
-                            float(getattr(chunk, "prompt_tps", 0.0) or 0.0),
-                            float(getattr(chunk, "peak_memory", 0.0) or 0.0),
-                            dict(sorted(width_cycles.items())),
-                            chunk.finish_reason,
-                        )
-                        stats_logged = True
-                    yield MLLMOutput(
-                        text=getattr(chunk, "text", ""),
-                        finish_reason=getattr(chunk, "finish_reason", None),
-                        prompt_tokens=int(getattr(chunk, "prompt_tokens", 0) or 0),
-                        completion_tokens=token_count,
-                        cached_tokens=int(getattr(chunk, "cached_tokens", 0) or 0),
-                        cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
-                        persistence_future=getattr(chunk, "persistence_future", None),
-                    )
-
-                if not stats_logged:
+            tokenizer = (
+                self.processor.tokenizer
+                if hasattr(self.processor, "tokenizer")
+                else self.processor
+            )
+            top_p = float(kwargs.pop("top_p", 1.0))
+            top_k = int(kwargs.pop("top_k", 0))
+            token_count = 0
+            emitted_per_cycle: list[int] = []
+            drafted_total = 0
+            width_cycles: dict[int, int] = {}
+            last_chunk = None
+            stats_logged = False
+            logger.info(
+                "DFlash2 %s chat active for %s",
+                "media (VLM prefill, %d image(s)/frame(s))" % len(all_images) if _df2_media else "text",
+                self.model_name,
+            )
+            for chunk in stream_dflash2_generate(
+                self.model,
+                tokenizer,
+                get_draft_model(),
+                formatted_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=float(kwargs.get("min_p", 0.0) or 0.0),
+                logit_bias=kwargs.get("logit_bias"),
+                repetition_penalty=float(
+                    1.0 if kwargs.get("repetition_penalty") is None
+                    else kwargs["repetition_penalty"]
+                ),
+                frequency_penalty=float(kwargs.get("frequency_penalty", 0.0) or 0.0),
+                presence_penalty=float(kwargs.get("presence_penalty", 0.0) or 0.0),
+                prompt_tokens=_df2_media["prompt_tokens"] if _df2_media else None,
+                media=_df2_media,
+            ):
+                emitted = len(getattr(chunk, "tokens", []) or [])
+                token_count += emitted
+                if getattr(chunk, "accepted", None) is not None:
+                    emitted_per_cycle.append(int(chunk.accepted))
+                    # verify width is adaptive (dflash2_runtime._BlockChooser)
+                    _w = int(getattr(chunk, "drafted", 4)) + 1
+                    drafted_total += _w - 1
+                    width_cycles[_w] = width_cycles.get(_w, 0) + 1
+                last_chunk = chunk
+                if getattr(chunk, "finish_reason", None) is not None:
                     cycles = len(emitted_per_cycle)
                     mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
-                    accepted_draft = sum(max(0, n - 1) for n in emitted_per_cycle)
+                    accepted_draft = sum(
+                        max(0, n - 1) for n in emitted_per_cycle
+                    )
+                    proposed_draft = drafted_total
                     logger.info(
-                        "DFlash2 generation stats: prompt_tokens=%d output_tokens=%d "
-                        "cycles=%d emitted_per_cycle=%.3f "
+                        "DFlash2 generation stats: prompt_tokens=%d "
+                        "output_tokens=%d cycles=%d emitted_per_cycle=%.3f "
                         "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
+                        "prompt_tps=%.1f peak_memory=%.2fGB block_widths=%s "
                         "finish_reason=%s",
-                        int(getattr(last_chunk, "prompt_tokens", 0) or 0),
+                        int(getattr(chunk, "prompt_tokens", 0) or 0),
                         token_count,
                         cycles,
                         mean_emitted,
-                        100.0 * accepted_draft / max(1, drafted_total),
-                        float(getattr(last_chunk, "generation_tps", 0.0) or 0.0),
-                        getattr(last_chunk, "finish_reason", None),
+                        100.0 * accepted_draft / max(1, proposed_draft),
+                        float(getattr(chunk, "generation_tps", 0.0) or 0.0),
+                        float(getattr(chunk, "prompt_tps", 0.0) or 0.0),
+                        float(getattr(chunk, "peak_memory", 0.0) or 0.0),
+                        dict(sorted(width_cycles.items())),
+                        chunk.finish_reason,
                     )
-                return
+                    stats_logged = True
+                yield MLLMOutput(
+                    text=getattr(chunk, "text", ""),
+                    finish_reason=getattr(chunk, "finish_reason", None),
+                    prompt_tokens=int(getattr(chunk, "prompt_tokens", 0) or 0),
+                    completion_tokens=token_count,
+                    cached_tokens=int(getattr(chunk, "cached_tokens", 0) or 0),
+                    cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
+                    persistence_future=getattr(chunk, "persistence_future", None),
+                )
+
+            if not stats_logged:
+                cycles = len(emitted_per_cycle)
+                mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
+                accepted_draft = sum(max(0, n - 1) for n in emitted_per_cycle)
+                logger.info(
+                    "DFlash2 generation stats: prompt_tokens=%d output_tokens=%d "
+                    "cycles=%d emitted_per_cycle=%.3f "
+                    "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
+                    "finish_reason=%s",
+                    int(getattr(last_chunk, "prompt_tokens", 0) or 0),
+                    token_count,
+                    cycles,
+                    mean_emitted,
+                    100.0 * accepted_draft / max(1, drafted_total),
+                    float(getattr(last_chunk, "generation_tps", 0.0) or 0.0),
+                    getattr(last_chunk, "finish_reason", None),
+                )
+            return
 
         # Check cache for existing KV state (uses images as cache key)
         from mlx_vlm.models import cache as vlm_cache
@@ -6802,7 +6903,13 @@ class MLXMultimodalLM:
                     prompt_cache=prompt_cache,
                     **kwargs,
                 ):
-                    token_count += 1
+                    # mlx-vlm reports a cumulative generation_tokens and ends with a
+                    # detokenizer-flush result that REPEATS the last count; counting
+                    # chunks reported max_tokens + 1 on streamed usage (non-stream
+                    # already used generation_tokens). Fall back to +1 per chunk
+                    # only for results without the field.
+                    _cumulative = getattr(chunk, "generation_tokens", None)
+                    token_count = int(_cumulative) if isinstance(_cumulative, int) else token_count + 1
                     # chunk is a GenerationResult with .text attribute containing the new token
                     new_text = chunk.text if hasattr(chunk, "text") else str(chunk)
                     accumulated_text += new_text

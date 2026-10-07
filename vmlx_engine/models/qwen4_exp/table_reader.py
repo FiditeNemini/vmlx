@@ -20,6 +20,37 @@ import numpy as np
 from vmlx_engine.utils.jang_affine_storage import expand_packed_1bit_to_2bit_mlx
 from .page_read_advice import SelectedPageReadAdvisor
 
+# Last time (monotonic) any Qwen4 forward or PLE lookup ran in this process. The page-cache warm yields while it is
+# recent. A lookup CALL is not enough: gather_mlx returns lazily and the table pages fault in later, inside GPU eval, so
+# the model forward stamps it too (models/qwen4_exp/language.py: Qwen4ExpTextModel.__call__).
+_FOREGROUND_AT = [0.0]
+# PLE reads currently in flight (host gather; any thread). The warm never runs while this is non-zero: a time window alone
+# let it resume mid-gather once a slowed gather outlived the window, which slowed the gather further (2k prompt 20.9 s).
+_FOREGROUND_ACTIVE = [0]
+_FOREGROUND_LOCK = threading.Lock()
+
+
+def mark_foreground() -> None:
+    _FOREGROUND_AT[0] = time.monotonic()
+
+
+class _ForegroundRead:
+    def __enter__(self):
+        with _FOREGROUND_LOCK:
+            _FOREGROUND_ACTIVE[0] += 1
+        mark_foreground()
+        return self
+
+    def __exit__(self, *exc):
+        mark_foreground()
+        with _FOREGROUND_LOCK:
+            _FOREGROUND_ACTIVE[0] -= 1
+        return False
+
+
+def _foreground_busy(window_s: float) -> bool:
+    return _FOREGROUND_ACTIVE[0] > 0 or time.monotonic() - _FOREGROUND_AT[0] < window_s
+
 _DTYPES = {
     "BF16": np.uint16,
     "F16": np.float16,
@@ -764,6 +795,9 @@ class FileBackedQuantizedNGramTable:
         mx.eval(values)
         return np.asarray(values).astype(np.float32, copy=False)
 
+    def _mark_foreground(self) -> None:
+        mark_foreground()
+
     def gather_mlx(
         self,
         flat_rows: np.ndarray,
@@ -772,6 +806,7 @@ class FileBackedQuantizedNGramTable:
         prepared: _PLEReadTicket | None = None,
     ) -> mx.array:
         """Gather random SSD rows and keep dequantized values on the MLX path."""
+        self._mark_foreground()
         flat_rows = np.asarray(flat_rows, dtype=np.int64).reshape(-1)
         if flat_rows.size and int(flat_rows.min()) < 0:
             raise IndexError("PLE row must be non-negative")
@@ -882,6 +917,7 @@ class FileBackedQuantizedNGramTable:
         Callers must consume or close the ticket in a finally block. A busy or
         oversized request uses the unchanged synchronous path, not a queue.
         """
+        self._mark_foreground()
         if not self._prefetch_enabled or not self._host_assembly:
             return None
         rows = np.array(flat_rows, dtype=np.int64, copy=True).reshape(-1)
@@ -953,6 +989,11 @@ class FileBackedQuantizedNGramTable:
 
     def _read_host_assembled(self, flat_rows: np.ndarray, *,
                              profile=None, use_pread: bool = False):
+        with _ForegroundRead():
+            return self._read_host_assembled_impl(flat_rows, profile=profile, use_pread=use_pread)
+
+    def _read_host_assembled_impl(self, flat_rows: np.ndarray, *,
+                                  profile=None, use_pread: bool = False):
         """Host-only preparation, shared by sync and bounded prefetch paths."""
         started = time.perf_counter() if profile is not None else None
         unique_rows, inverse = np.unique(flat_rows, return_inverse=True)
@@ -1091,10 +1132,26 @@ class FileBackedQuantizedNGramTable:
                 )
         total = sum(n for v in spans.values() for _o, n in v)
 
+        # Yield to generation. Measured on Allosaurus (57.6 GB of tables,
+        # 3 GB/s drive): a request sent while the warm ran waited behind its
+        # sequential reads -- first-request TTFT 15.9 s vs 0.74 s once the warm
+        # finished (2 rounds each). The warm pauses while any PLE read is in
+        # flight (_ForegroundRead around _read_host_assembled) and until
+        # VMLX_QWEN4_PLE_WARM_YIELD_MS (default 2000 ms) after the last Qwen4
+        # forward or read; it resumes in idle gaps and never stops early.
+        # Measured dead ends: a 250 ms window keyed on lookup CALLS (2k prompt
+        # 3.9 -> 17.8 s) and a 2 s window keyed on forwards (20.9 s) -- both let
+        # the warm resume inside a gather that contention had slowed.
+        try:
+            yield_s = max(0.0, float(os.environ.get("VMLX_QWEN4_PLE_WARM_YIELD_MS", "2000")) / 1000.0)
+        except ValueError:
+            yield_s = 2.0
+
         def run():
             import time as _time
             started = _time.perf_counter()
-            chunk = 32 << 20
+            yielded = 0.0
+            chunk = 8 << 20
             buf = bytearray(chunk)
             view = memoryview(buf)
             done = 0
@@ -1107,6 +1164,10 @@ class FileBackedQuantizedNGramTable:
                     for offset, nbytes in sorted(ranges):
                         end = offset + nbytes
                         while offset < end:
+                            if yield_s:
+                                while _foreground_busy(yield_s):
+                                    _time.sleep(0.02)
+                                    yielded += 0.02
                             want = min(chunk, end - offset)
                             got = os.preadv(fd, [view[:want]], offset) if hasattr(os, "preadv") \
                                 else len(os.pread(fd, want, offset))
@@ -1117,16 +1178,18 @@ class FileBackedQuantizedNGramTable:
                 finally:
                     os.close(fd)
             secs = _time.perf_counter() - started
-            self.page_cache_warm = {"bytes": done, "seconds": round(secs, 2)}
+            self.page_cache_warm = {"bytes": done, "seconds": round(secs, 2), "yielded_s": round(yielded, 2)}
             logger.info(
-                "Qwen4 PLE n-gram table page-cache warm done: %.2f GB in %.1f s (%.2f GB/s, %d files)",
-                done / 1e9, secs, done / 1e9 / max(secs, 1e-6), len(spans),
+                "Qwen4 PLE n-gram table page-cache warm done: %.2f GB in %.1f s (%.2f GB/s, %d files, "
+                "yielded %.1f s to requests)",
+                done / 1e9, secs, done / 1e9 / max(secs - yielded, 1e-6), len(spans), yielded,
             )
 
         import threading
         logger.info("Qwen4 PLE n-gram table page-cache warm started: %.2f GB across %d files",
                     total / 1e9, len(spans))
+        # Set before start: a fast warm's final result must not be overwritten.
+        self.page_cache_warm = {"bytes": 0, "total": total, "running": True}
         thread = threading.Thread(target=run, name="vmlx-ple-page-warm", daemon=True)
         thread.start()
-        self.page_cache_warm = {"bytes": 0, "total": total, "running": True}
         return thread

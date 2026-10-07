@@ -338,3 +338,23 @@ def test_dflash2_prefill_receipt_uses_the_panel_pp_scope():
     import inspect
     from vmlx_engine.dflash2_runtime import _stream_generate_resumable
     assert '"scope": "model_prefill_and_prompt_state"' in inspect.getsource(_stream_generate_resumable)
+
+
+def test_media_order_mismatch_stops_both_chat_routes_before_generation():
+    import pytest
+
+    messages = [{"role": "user", "content": [
+        {"type": "image"}, {"type": "video"}, {"type": "image"},
+    ]}]
+    for method in ("chat", "stream_chat"):
+        model = _media_chat_model(None)
+        model.config = {"model_type": "qwen3_5"}
+        # One failed image has been omitted by preprocessing. Do not shift
+        # the surviving image/video into another input's placeholder.
+        model._extract_multimodal_messages = lambda _: (messages, ["bad", "good"], ["clip"], [])
+        model._prepare_images = lambda _: ["good"]
+        model._prepare_video = lambda *a, **kw: ["frame"]
+        with pytest.raises(ValueError, match="media items.*prompt order"):
+            result = getattr(model, method)(messages)
+            if method == "stream_chat":
+                list(result)

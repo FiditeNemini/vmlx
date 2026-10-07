@@ -6284,7 +6284,7 @@ class MLXMultimodalLM:
             if ordered_media is not None:
                 all_images = ordered_media
             else:
-                logger.warning("Video frames could not be placed in prompt order; media order may not match placeholders")
+                raise ValueError("Cannot align media items with prompt order; check image and video inputs")
             chat_messages = _expand_video_placeholders_to_image_frames(
                 chat_messages,
                 video_frame_counts,
@@ -6750,7 +6750,7 @@ class MLXMultimodalLM:
             if ordered_media is not None:
                 all_images = ordered_media
             else:
-                logger.warning("Video frames could not be placed in prompt order; media order may not match placeholders")
+                raise ValueError("Cannot align media items with prompt order; check image and video inputs")
             chat_messages = _expand_video_placeholders_to_image_frames(
                 chat_messages,
                 video_frame_counts,

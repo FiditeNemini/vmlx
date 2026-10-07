@@ -6686,6 +6686,11 @@ class MLXMultimodalLM:
                 if not all_images:
                     _df2_route = not videos
                 else:
+                    # Same image-prefill guard as the native path (vmlx#156).
+                    self._guard_simple_image_prefill(
+                        formatted_prompt, True, images=all_images,
+                        resize_shape=kwargs.get("resize_shape"),
+                    )
                     _df2_media = self._dflash2_media_plan(formatted_prompt, all_images, kwargs)
                     _df2_route = _df2_media is not None
         if _df2_route:

@@ -198,6 +198,8 @@ def _media_chat_model(plan):
     model._prepare_images = lambda urls: ["IMAGE"]
     model._apply_chat_template = lambda messages, enable_thinking, tools=None, reasoning_effort=None: "PROMPT"
     model._dflash2_media_plan = lambda prompt, images, kwargs: plan
+    model.guard_calls = []
+    model._guard_simple_image_prefill = lambda prompt, has_images, **kw: model.guard_calls.append(has_images)
     return model
 
 
@@ -219,6 +221,7 @@ def test_stream_chat_routes_media_dflash2_through_vlm_prefill_plan():
     assert bridge.call_args.kwargs["media"] is plan
     assert bridge.call_args.kwargs["prompt_tokens"] == [1, 2, 3]
     assert outputs[-1].text == "cat"
+    assert model.guard_calls == [True]  # the native path's image-prefill guard also runs on the DFlash2 media route
 
 
 def test_stream_chat_media_without_vlm_prefill_plan_keeps_native_path():
@@ -274,3 +277,12 @@ def test_clone_cache_shells_does_not_alias_arrays_cache_lists():
     assert snap[0].state is not live[0].state
     assert mx.array_equal(snap[0][1], mx.zeros((1, 2, 4, 4))).item()
     assert snap[1].offset == 5
+
+
+def test_text_request_clears_a_stale_media_plan_on_the_shared_adapter():
+    """An abandoned media generator may not have run its finally: the next request must reset the plan at entry."""
+    import inspect
+    from vmlx_engine.dflash2_runtime import _stream_generate_resumable
+    src = inspect.getsource(_stream_generate_resumable)
+    entry = src.index("adapter.media_embeds = media[\"embeds\"] if media is not None else None")
+    assert entry < src.index("    try:\n        tic = time.perf_counter()")

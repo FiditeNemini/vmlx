@@ -715,10 +715,12 @@ def _stream_generate_resumable(
         system_cut = None
     snapshots: list = []
 
-    if media is not None:
-        adapter.media_embeds = media["embeds"]
-        adapter.media_positions = media["positions"]
-        adapter.rope_delta = int(media["rope_delta"])
+    # Assign (or clear) the shared adapter's media plan at entry on EVERY
+    # request: an abandoned generator's `finally` may run late, and the next
+    # request must never inherit another request's embeddings or rope delta.
+    adapter.media_embeds = media["embeds"] if media is not None else None
+    adapter.media_positions = media["positions"] if media is not None else None
+    adapter.rope_delta = int(media["rope_delta"]) if media is not None else 0
     try:
         tic = time.perf_counter()
         with mx.stream(runtime.generation_stream):

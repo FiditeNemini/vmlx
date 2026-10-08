@@ -1132,20 +1132,30 @@ class FileBackedQuantizedNGramTable:
                 )
         total = sum(n for v in spans.values() for _o, n in v)
 
-        # Yield to generation. Measured on Allosaurus (57.6 GB of tables,
-        # 3 GB/s drive): a request sent while the warm ran waited behind its
-        # sequential reads -- first-request TTFT 15.9 s vs 0.74 s once the warm
-        # finished (2 rounds each). The warm pauses while any PLE read is in
-        # flight (_ForegroundRead around _read_host_assembled) and until
-        # VMLX_QWEN4_PLE_WARM_YIELD_MS (default 2000 ms) after the last Qwen4
-        # forward or read; it resumes in idle gaps and never stops early.
-        # Measured dead ends: a 250 ms window keyed on lookup CALLS (2k prompt
-        # 3.9 -> 17.8 s) and a 2 s window keyed on forwards (20.9 s) -- both let
-        # the warm resume inside a gather that contention had slowed.
+        # Yield to foreground PLE READS. A first request sent while the
+        # 57.6 GB Allosaurus warm ran waited behind its sequential reads (2k
+        # TTFT 15.4 s; 5.3 s with the pause). The warm pauses while a PLE read
+        # is in flight (_ForegroundRead around _read_host_assembled) and for a
+        # short grace after the last read (VMLX_QWEN4_PLE_WARM_YIELD_MS,
+        # default 50 ms). Decode reads PLE every step (~16 ms), so the grace
+        # covers decode -- with 0 ms the warm ran between steps and the first
+        # reply decoded 52 vs 57 tok/s. A prefill chunk's GPU compute is far
+        # longer than 50 ms, so the warm still progresses inside prefill.
+        # It must NOT pause for forwards: 1.6.76 paused 2 s after EVERY Qwen4
+        # forward, the warm starved for as long as requests ran, the pages
+        # stayed cold and cold 8k prefill fell 1,576 -> 1,018 tok/s (4S); the
+        # warm took 15.6 / 65 s instead of 7 / 19 s (now ~10 / ~29 s).
+        # VMLX_QWEN4_PLE_WARM_YIELD=off disables yielding entirely.
+        # Measured dead ends: a 250 ms window keyed on lookup CALLS with no
+        # in-flight count (2k prompt 3.9 -> 17.8 s) and a 2 s window keyed on
+        # forwards (20.9 s; and the 1.6.76 prefill regression above).
+        yield_on = os.environ.get("VMLX_QWEN4_PLE_WARM_YIELD", "on").strip().lower() not in (
+            "0", "off", "false", "no",
+        )
         try:
-            yield_s = max(0.0, float(os.environ.get("VMLX_QWEN4_PLE_WARM_YIELD_MS", "2000")) / 1000.0)
+            yield_s = max(0.0, float(os.environ.get("VMLX_QWEN4_PLE_WARM_YIELD_MS", "50")) / 1000.0)
         except ValueError:
-            yield_s = 2.0
+            yield_s = 0.05
 
         def run():
             import time as _time
@@ -1164,7 +1174,7 @@ class FileBackedQuantizedNGramTable:
                     for offset, nbytes in sorted(ranges):
                         end = offset + nbytes
                         while offset < end:
-                            if yield_s:
+                            if yield_on:
                                 while _foreground_busy(yield_s):
                                     _time.sleep(0.02)
                                     yielded += 0.02

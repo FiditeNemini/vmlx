@@ -27,7 +27,6 @@ import mlx.nn as nn
 import numpy as np
 from mlx_lm.models.cache import ArraysCache
 from vmlx_engine.metal.qwen4_verify_sdpa import qwen4_verify_sdpa
-from vmlx_engine.models.qwen4_exp.table_reader import mark_foreground as _ple_mark_foreground
 from vmlx_engine.metal.qwen4_prefill_sdpa import qwen4_prefill_sdpa
 from vmlx_engine.metal.qwen4_qsa_mask import qsa_block_mask, qsa_mask_requested
 from vmlx_engine.metal.sparse_merge_topk import sparse_merge_topk
@@ -2517,7 +2516,6 @@ class Qwen4ExpTextModel(nn.Module):
         last_token_only: bool = False,
         **_kwargs,
     ):
-        _ple_mark_foreground()  # the PLE page-cache warm yields while generation runs
         h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(inputs)
         h = mx.tile(h, (1, 1, self.args.hc_count))
         if prefill_checkpoint_steps:

@@ -604,6 +604,9 @@ class Glm5MLACache(ArraysCache):
         return True
 
     def trim(self, n: int) -> int:
+        # Positions past the trim can be rewritten: drop the native block-digest memo
+        # (utils/glm5_native_block_store._digest_memo) so no stale digest outlives them.
+        self.__dict__.pop("_vmlx_native_block_digests", None)
         n = max(0, min(int(n), self.offset))
         if n == 0:
             return 0

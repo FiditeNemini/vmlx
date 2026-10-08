@@ -47,6 +47,36 @@ def _block_hash(block, parent):
     return h.digest()
 
 
+def _fragment_layout(block):
+    """Shapes and dtypes of a block's arrays (metadata only, no GPU sync)."""
+    return tuple(
+        None if fragment is None else tuple((tuple(array.shape), str(array.dtype)) for array in fragment)
+        for fragment in block.layers
+    )
+
+
+def _digest_memo(states, offset):
+    """Per-live-cache memo of full-block digests, or None when there is no live MLA cache to own it.
+
+    Stored on the first Glm5MLACache object (one per request's live cache). A smaller boundary than any
+    previously seen (trim / rollback) clears it: positions past the trim may be rewritten.
+    """
+    from ..models.glm5_next.glm5_next import Glm5MLACache
+
+    owner = next((layer for layer in states if isinstance(layer, Glm5MLACache)), None)
+    if owner is None:
+        return None
+    memo = getattr(owner, "_vmlx_native_block_digests", None)
+    if memo is None or int(offset) < memo.get("__max_offset__", 0):
+        memo = {}
+        try:
+            owner._vmlx_native_block_digests = memo
+        except AttributeError:
+            return None
+    memo["__max_offset__"] = max(int(offset), memo.get("__max_offset__", 0))
+    return memo
+
+
 class Glm5NativeBlockStore:
     """Wrap an SSM checkpoint store and a same-namespace BlockDiskStore.
 
@@ -80,8 +110,24 @@ class Glm5NativeBlockStore:
         references, hashes = [], []
         parent = None
         written = reused = 0
+        memo = _digest_memo(states, boundary.offset)
         for fragment in fragments:
-            digest = _block_hash(fragment, parent)
+            # A FULL block of a live cache is immutable (split_native_sequence),
+            # so its digest is computed once per cache object, not re-hashed
+            # (GPU->CPU copy + sha256) at every later checkpoint. Re-hashing
+            # the whole prefix made each per-chunk checkpoint O(history): a 32k
+            # GLM prefill spent 22.9 s in 100 synchronous stores (0.05 s at 1k
+            # -> 0.34 s at 32k). The parent digest and the fragment LAYOUT are
+            # part of the memo key: a dense-only prefix keeps a zero-length DSA
+            # pool that later materializes for the same block, and keying on
+            # (start, end, parent) alone restored only 2,048 of 32k tokens.
+            full = fragment.end - fragment.start == self.block_size
+            memo_key = (fragment.start, fragment.end, parent, _fragment_layout(fragment))
+            digest = memo.get(memo_key) if (full and memo is not None) else None
+            if digest is None:
+                digest = _block_hash(fragment, parent)
+                if full and memo is not None:
+                    memo[memo_key] = digest
             repair = digest in self._invalid_blocks
             if not repair and self.blocks.has_block(digest):
                 reused += 1

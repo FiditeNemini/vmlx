@@ -490,3 +490,60 @@ def test_native_plain_facade_keeps_incomplete_probe(tmp_path, monkeypatch):
         assert receipt["outcome"] == "refused"
     finally:
         cache.close()
+
+
+@pytest.mark.parametrize("absorbed", [False, True])
+def test_full_block_digests_are_memoized_per_live_cache_and_trim_clears_them(tmp_path, monkeypatch, absorbed):
+    """Per-chunk GLM checkpoints must not re-hash the whole prefix (audit 2026-10-07: a 32k prefill spent 22.9 s in
+    100 synchronous stores whose cost grew 0.05 -> 0.34 s with history). Full blocks of a live cache are immutable, so
+    their digests are computed once per cache object; trim() drops the memo because positions past it may change."""
+    import vmlx_engine.utils.glm5_native_block_store as nbs
+
+    calls = []
+    real = nbs._block_hash
+    monkeypatch.setattr(nbs, "_block_hash", lambda block, parent: calls.append((block.start, block.end)) or real(block, parent))
+    store = native_block_store(tmp_path)
+    try:
+        live = native_state(9, absorbed=absorbed)          # blocks [0,4) [4,8) full + [8,9) partial
+        assert store.store("a" * 64, live, True, list(range(9)), 9)
+        assert store.wait_for_write("a" * 64)
+        assert calls == [(0, 4), (4, 8), (8, 9)]
+        calls.clear()
+        assert store.store("b" * 64, live, True, list(range(9)), 9)  # same live object, later checkpoint
+        assert store.wait_for_write("b" * 64)
+        assert calls == [(8, 9)]                             # only the partial tail is re-hashed
+        same_state(live, store.fetch("b" * 64)[0])           # the memoized checkpoint restores exactly
+        memo = live[1]._vmlx_native_block_digests
+        parent = None
+        for fragment in split_native_sequence(native_state(9, absorbed=absorbed), 4)[1]:
+            digest = real(fragment, parent)                   # fresh cache object, recomputed from bytes
+            if fragment.end - fragment.start == 4:
+                assert memo[(fragment.start, fragment.end, parent, nbs._fragment_layout(fragment))] == digest
+            parent = digest
+        mla = live[1]
+        assert getattr(mla, "_vmlx_native_block_digests", None)
+        mla.trim(1)
+        assert getattr(mla, "_vmlx_native_block_digests", None) is None
+    finally:
+        store.shutdown()
+
+
+@pytest.mark.parametrize("absorbed", [False, True])
+def test_memoized_digest_follows_dsa_pool_materialization(tmp_path, absorbed):
+    """Live regression (audit 2026-10-07): a dense-only prefix (within index_topk) keeps a zero-length DSA pool; once
+    the indexer engages, the SAME (start, end, parent) full block gains pool rows. A memo keyed without the fragment
+    layout returned the pool-less digest, the block was counted as reused and never written, and a 32k prompt
+    restored only 2,048 tokens. The memo key must change with the fragment layout."""
+    store = native_block_store(tmp_path)
+    try:
+        live = native_state(9, absorbed=absorbed, pooled=False)
+        assert store.store("a" * 64, live, True, list(range(9)), 9)
+        assert store.wait_for_write("a" * 64)
+        live[1].update_pool_keys(mx.full((1, 9 // 4, 4), 3.125, mx.float32))  # indexer engages
+        assert store.store("b" * 64, live, True, list(range(9)), 9)
+        assert store.wait_for_write("b" * 64)
+        restored = store.fetch("b" * 64)
+        assert restored is not None
+        same_state(native_state(9, absorbed=absorbed, pooled=True), restored[0])
+    finally:
+        store.shutdown()

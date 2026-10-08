@@ -12,7 +12,7 @@ import ts from 'typescript'
  */
 const ROOT = join(__dirname, '..', 'src', 'renderer', 'src')
 const BASELINE = join(__dirname, 'fixtures', 'i18n-jsx-text-baseline.json')
-const ALLOW = /^(?:[\s\d.,:;()%×x\-–—+\/|·•→←…'"“”‘’&#!?]*|GB|MB|KB|TB|ms|s|tok\/s|fps|px|bit|-bit|\d+-bit|mlx\.studio|GitHub|JANG|MLX|API|CDP|URL|OpenAI|Anthropic|Ollama|Claude|Codex|Hermes|TTFT|TPS|PP\/s|PID|JSON|HF|vMLX|mflux|MTP|KV|SSD|RAM|CPU|GPU|Q\d|D\d|AR|N\/A|OK|curl|Python|JavaScript|npm|npx|pip|uv|Electron|macOS|Metal|Tailscale|ID|UI|CLI|HTTP|HTTPS|ws|LAN|IP|Ctrl|Cmd|Shift|Enter|Esc)$/i
+const ALLOW = /^(?:[\s\d.,:;()%×x\-–—+\/|·•→←…'"“”‘’&#!?]*|GB|MB|KB|TB|ms|s|tok\/s|fps|px|bit|-bit|\d+-bit|mlx\.studio|GitHub|JANG|MLX|API|CDP|URL|OpenAI|Anthropic|Ollama|Claude|Codex|Hermes|TTFT|TPS|PP\/s|PID|JSON|HF|vMLX|mflux|MTP|DFlash2|KV|SSD|RAM|CPU|GPU|Q\d|D\d|AR|N\/A|OK|curl|Python|JavaScript|npm|npx|pip|uv|Electron|macOS|Metal|Tailscale|ID|UI|CLI|HTTP|HTTPS|ws|LAN|IP|Ctrl|Cmd|Shift|Enter|Esc)$/i
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

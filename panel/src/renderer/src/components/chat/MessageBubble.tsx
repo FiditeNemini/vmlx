@@ -8,6 +8,7 @@ import { ReasoningBox } from './ReasoningBox'
 import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { useElapsedSeconds } from './useElapsedSeconds'
+import { isTypewriterAppend } from './typewriter'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
 import { useRelativeTime } from '../ui/use-relative-time'
@@ -144,6 +145,7 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
   const [displayed, setDisplayed] = useState(fullContent)
   const rafRef = useRef<number>(0)
   const lenRef = useRef(fullContent.length)
+  const shownRef = useRef(fullContent)
   const fullRef = useRef(fullContent)
   const wasStreamingRef = useRef(isStreaming)
   fullRef.current = fullContent
@@ -153,9 +155,12 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
     wasStreamingRef.current = isStreaming
     cancelAnimationFrame(rafRef.current)
 
-    // Content shrunk (rare correction) — snap
-    if (fullContent.length < lenRef.current) {
+    // Not an append of what is on screen (shrink, or a same/longer rewrite such
+    // as the completion trimming the stream's leading whitespace) — snap.
+    // Tracking only the LENGTH froze "\n\n4" on screen when "482" completed.
+    if (!isTypewriterAppend(shownRef.current, fullContent)) {
       lenRef.current = fullContent.length
+      shownRef.current = fullContent
       setDisplayed(fullContent)
       return
     }
@@ -167,6 +172,7 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
     // of snapping the entire answer into view when isStreaming flips false.
     if (!isStreaming && !wasStreaming) {
       setDisplayed(fullContent)
+      shownRef.current = fullContent
       lenRef.current = fullContent.length
       return
     }
@@ -181,7 +187,8 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
       const chars = Math.max(1, Math.ceil(remaining / 12))
       const newLen = Math.min(cur + chars, full.length)
       lenRef.current = newLen
-      setDisplayed(full.slice(0, newLen))
+      shownRef.current = full.slice(0, newLen)
+      setDisplayed(shownRef.current)
       if (newLen < full.length) {
         rafRef.current = requestAnimationFrame(tick)
       }

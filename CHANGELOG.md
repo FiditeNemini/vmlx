@@ -4,6 +4,16 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.77] - 2026-10-08
+
+- Fix stalled batched vision requests with explicit stop strings, including stop sequences completed during final text decoding.
+- Reduce Flash Next cold-prefill contention from background PLE warm-up while preserving Adaptive decoding.
+- Deliver images and videos included in tool results, and use consistent video-frame planning across direct and batched engines.
+- Enable qualified GLM fused expert and KDA prefill paths, and avoid repeatedly hashing full prompt checkpoints while preserving long-prefix restoration.
+- Serve longer Naive prompts with bounded attention intermediates. Projected memory estimates now adapt prefill chunks and warn rather than refusing requests; actual hardware allocation limits still apply.
+- Preserve absolute drafter-cache positions when resuming DFlash2 conversations. Existing DFlash2 SSD snapshots are invalidated once for the new cache format.
+- Prevent chat bubbles from retaining stale partial answers, and correct outdated DFlash2 image-acceleration guidance.
+
 ## [1.6.76] - 2026-10-07
 
 - Preserve DFlash2 prompt snapshots across later decoding and SSD restoration, and invalidate older snapshot schemas.

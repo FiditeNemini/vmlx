@@ -5275,11 +5275,17 @@ class MLXMultimodalLM:
             )
 
             if msg_text or msg_image_count > 0 or msg_video_count > 0 or msg_audio_count > 0 or tool_calls or has_reasoning or role == "tool":
-                if (msg_image_count > 0 or msg_video_count > 0 or msg_audio_count > 0) and role in ("user", "assistant"):
+                if (msg_image_count > 0 or msg_video_count > 0 or msg_audio_count > 0) and role in ("user", "assistant", "tool"):
                     # Build multimodal content list with image markers for
-                    # any role that carries media (user or assistant).
+                    # any role that carries media (user, assistant or tool).
                     # Some UIs (e.g. klite) send images on assistant messages
                     # when attaching an image to the conversation context.
+                    # Tool results carry screenshots from agent tools; the Qwen
+                    # templates render tool content through render_content()
+                    # inside <tool_response>. Flattening them to a string left
+                    # the collected image with no placeholder: 27B -> HTTP 400
+                    # "Image features and image tokens do not match", Flash-Next
+                    # -> the image silently dropped and a hallucinated answer.
                     content_list: list[dict] = []
                     if msg_audio_count and not msg_image_count and not msg_video_count:
                         content_list.append(
@@ -5299,6 +5305,11 @@ class MLXMultimodalLM:
                             {"type": "text", "text": msg_text, "content": msg_text}
                         )
                     out_msg: dict = {"role": role, "content": content_list}
+                    if role == "tool":
+                        if tool_call_id:
+                            out_msg["tool_call_id"] = tool_call_id
+                        if msg_name:
+                            out_msg["name"] = msg_name
                     if role == "assistant" and tool_calls:
                         out_msg["tool_calls"] = tool_calls
                     if role == "assistant" and "reasoning_content" in msg:

@@ -988,6 +988,25 @@ def _flatten_content_list(content: list) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def _collect_media_item(item: dict, images: list, videos: list) -> bool:
+    """Append one OpenAI/Responses content part's image or video source, in request order."""
+    item_type = item.get("type", "")
+    if item_type in ("image_url", "input_image"):
+        src = item.get("image_url", {}) if item_type == "image_url" else item.get("image_url", item.get("url", ""))
+        images.append(src if isinstance(src, str) else (src.get("url", "") if isinstance(src, dict) else src))
+    elif item_type == "image":
+        images.append(item.get("image", item.get("url", "")))
+    elif item_type == "video":
+        videos.append(item.get("video", item.get("url", "")))
+    elif item_type in ("video_url", "input_video"):
+        src = item.get("video_url", {}) if item_type == "video_url" else item.get(
+            "video_url", item.get("url", item.get("file_id", "")))
+        videos.append(src if isinstance(src, str) else (src.get("url", "") if isinstance(src, dict) else src))
+    else:
+        return False
+    return True
+
+
 def extract_multimodal_content(
     messages: list[Message],
     preserve_native_format: bool = False,
@@ -1044,6 +1063,18 @@ def extract_multimodal_content(
                 tool_call_id = getattr(msg, "tool_call_id", None) or ""
                 tool_name = getattr(msg, "tool_name", None) or ""
             tool_content = content if content else ""
+            # Tool results can carry media (agent screenshot tools). Collect it
+            # like user media, in request order: skipping it here left the
+            # batched engine without the image -- Flash-Next answered about a
+            # "black screen" for a blue screenshot (audit 2026-10-07).
+            if isinstance(content, list):
+                for item in content:
+                    if hasattr(item, "model_dump"):
+                        item = item.model_dump(exclude_none=True)
+                    elif hasattr(item, "dict"):
+                        item = {k: v for k, v in item.dict().items() if v is not None}
+                    if isinstance(item, dict):
+                        _collect_media_item(item, images, videos)
 
             if preserve_native_format:
                 # Preserve native tool format for models that support it
@@ -1182,40 +1213,8 @@ def extract_multimodal_content(
 
                 if item_type in ("text", "input_text"):
                     text_parts.append(item.get("text", ""))
-
-                elif item_type == "image_url":
-                    img_url = item.get("image_url", {})
-                    if isinstance(img_url, str):
-                        images.append(img_url)
-                    elif isinstance(img_url, dict):
-                        images.append(img_url.get("url", ""))
-
-                elif item_type == "input_image":
-                    img_url = item.get("image_url", item.get("url", ""))
-                    if isinstance(img_url, str):
-                        images.append(img_url)
-                    elif isinstance(img_url, dict):
-                        images.append(img_url.get("url", ""))
-
-                elif item_type == "image":
-                    images.append(item.get("image", item.get("url", "")))
-
-                elif item_type == "video":
-                    videos.append(item.get("video", item.get("url", "")))
-
-                elif item_type == "video_url":
-                    vid_url = item.get("video_url", {})
-                    if isinstance(vid_url, str):
-                        videos.append(vid_url)
-                    elif isinstance(vid_url, dict):
-                        videos.append(vid_url.get("url", ""))
-
-                elif item_type == "input_video":
-                    vid_url = item.get("video_url", item.get("url", item.get("file_id", "")))
-                    if isinstance(vid_url, str):
-                        videos.append(vid_url)
-                    elif isinstance(vid_url, dict):
-                        videos.append(vid_url.get("url", ""))
+                else:
+                    _collect_media_item(item, images, videos)
 
             # Combine text parts
             combined_text = "\n".join(text_parts) if text_parts else ""

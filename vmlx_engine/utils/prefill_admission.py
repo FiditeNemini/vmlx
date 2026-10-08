@@ -22,9 +22,30 @@ allocation forever. The scheduler already learned this the hard way with
 
 from __future__ import annotations
 
+import logging
 import os
 
 _GIB = 1024**3
+
+logger = logging.getLogger(__name__)
+
+
+def advise_admission(error: BaseException, *, request_id: object = None) -> None:
+    """Log a projected over-budget prefill and let the work RUN (never refuse).
+
+    Eric's rule (2026-10-08, ISSUES I-36): estimates may ADVISE, never REFUSE.
+    Every check below is a projection (a fitted walk, a scaled transient, a
+    score-tensor geometry), and each has measured false declines on record
+    (dots3 capped at ~17k, Naive refused > 20k, GLM refused 8k->32k with
+    2,048-token chunks). Callers keep using the checks to ADAPT — halve a
+    chunk and retry — but where a decline used to fail the request, they call
+    this and continue. If memory genuinely runs out, Metal fails loudly.
+    """
+    logger.warning(
+        "Prefill admission ADVISORY (running anyway; estimates advise, never refuse)%s: %s",
+        f" request={request_id}" if request_id is not None else "",
+        error,
+    )
 
 # MLX reports an over-maximum buffer request like:
 #   [metal::malloc] Attempting to allocate 4398046511104 bytes which is greater

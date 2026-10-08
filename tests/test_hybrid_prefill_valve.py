@@ -320,10 +320,16 @@ def test_turn_walk_wiring_in_the_generator():
     )
 
 
-def test_turn_walk_admit_state_machine(monkeypatch):
+def test_turn_walk_admit_state_machine(monkeypatch, caplog):
     """Drive the REAL _turn_peak_walk_admit through a scripted grow-to-wall
-    sequence: deferred pairing, engagement, refusal at the projected wall,
-    anchor zeroing, and the retry's reading NOT poisoning the fit."""
+    sequence: deferred pairing, engagement, and the projected wall.
+
+    Since 2026-10-08 (ISSUES I-36, Eric: estimates ADVISE, never REFUSE) the
+    wall turn is no longer declined: the projection is logged as an advisory
+    and the forward RUNS, so its anchor is recorded like any other turn (its
+    peak is measured at the next entry). The projection math pinned here is
+    unchanged — the advisory fires exactly where the refusal used to."""
+    import logging
     from collections import deque
     from types import SimpleNamespace
 
@@ -340,7 +346,6 @@ def test_turn_walk_admit_state_machine(monkeypatch):
             int(93.3 * GIB_),   # entry t3: t2's peak (span 73,398)
             int(98.6 * GIB_),   # entry t4: t3's peak (span 79,047)
             int(104.2 * GIB_),  # entry t5: t4's peak (span 84,696)
-            int(0.05 * GIB_),   # entry t5-retry: no forward ran since reset
         ]
     )
     fake_mx = SimpleNamespace(
@@ -358,42 +363,32 @@ def test_turn_walk_admit_state_machine(monkeypatch):
         _turn_peak_walk=deque(maxlen=8), _last_deep_span_tokens=73_398
     )
     admit = MLLMBatchGenerator._turn_peak_walk_admit
+    caplog.set_level(logging.WARNING)
 
     admit(self, 79_047)  # records (73398, 93.3GB); 1 point — no fit yet
-    admit(self, 84_696)  # records (79047, 98.6GB); projects ~103.9 — admit
+    admit(self, 84_696)  # records (79047, 98.6GB); projects ~103.9 — quiet
+    assert "Prefill admission ADVISORY" not in caplog.text
 
-    # t5 (ctx 90,345): records (84696, 104.2GB), and the walk now projects
-    # ~109.5GB > 107.52 — REFUSE. One ordinal before the crash ordinal
-    # (95,994), because the 90k turn's own peak (109.2GB, measured) exceeds
-    # the stated device budget: at allowance 0 an ACCURATE projection must
-    # decline it. This is the deliberate boundary trade (see
-    # test_turn_walk_boundary_refusal_is_deliberate), surfaced honestly by
-    # this state machine rather than hidden by optimistic test numbers.
-    with pytest.raises(PrefillAdmissionError):
-        admit(self, 90_345)
+    # t5 (ctx 90,345): records (84696, 104.2GB); the walk projects ~109.5GB
+    # > 107.52 — the point that USED to be refused. Now: advisory, no raise.
+    admit(self, 90_345)
+    assert "Prefill admission ADVISORY" in caplog.text
+    assert "turn-peak admission" in caplog.text
     assert [ctx for ctx, _ in self._turn_peak_walk] == [73_398, 79_047, 84_696]
-    assert self._last_deep_span_tokens == 0, (
-        "refusal must zero the anchor or the retry poisons the fit"
-    )
-    points_after_refusal = list(self._turn_peak_walk)
-
-    # The retry: gauge reads ~0 (nothing ran since the reset). It must NOT be
-    # recorded, and the refusal must repeat.
-    with pytest.raises(PrefillAdmissionError):
-        admit(self, 90_345)
-    assert list(self._turn_peak_walk) == points_after_refusal, (
-        "the no-forward-ran reading was recorded — the poisoned point will "
-        "drag the fit down and re-admit the fatal turn"
+    assert self._last_deep_span_tokens == 90_345, (
+        "an advised turn RUNS: its span must be the anchor for the next "
+        "deferred measurement"
     )
 
 
-def test_turn_walk_interleaved_conversations_keep_protection(monkeypatch):
+def test_turn_walk_interleaved_conversations_keep_protection(monkeypatch, caplog):
     """Adversarial finding 2: the walk deque is generator-global, so a second
     deep conversation at a different depth scatters ctx-vs-peak points and a
-    whole-deque fit can collapse to slope<=0 (valve silent, abort returns).
-    The fix fits only the longest strictly-increasing-ctx SUFFIX. Drive the
-    real admit through X-grow, Y-interleave, X-continue-to-wall and assert
-    the wall turn is STILL refused and the shallow turn is NOT."""
+    whole-deque fit can collapse to slope<=0. The fix fits only the longest
+    strictly-increasing-ctx SUFFIX. Drive the real admit through X-grow,
+    Y-interleave, X-continue-to-wall and assert the wall turn is still FLAGGED
+    (advisory since I-36, 2026-10-08 — it runs) and the shallow turn is not."""
+    import logging
     from collections import deque
     from types import SimpleNamespace
 
@@ -426,21 +421,20 @@ def test_turn_walk_interleaved_conversations_keep_protection(monkeypatch):
         _turn_peak_walk=deque(maxlen=8), _last_deep_span_tokens=73_398
     )
     admit = MLLMBatchGenerator._turn_peak_walk_admit
+    caplog.set_level(logging.WARNING)
 
     admit(self, 79_047)
     admit(self, 84_696)
-    # Conversation Y at 40k: the deque now holds X's deep points, whose fit
-    # projects far above anything 40k costs — Y must NOT be refused by X's
-    # walk (the over-refusal direction of finding 2).
+    # Conversation Y at 40k: X's deep points must not flag Y.
     admit(self, 40_000)
     # Back to X at 90.3k: the depth switch truncated the monotone suffix to
-    # one point — a one-turn protection GAP, by design, not a poisoned fit.
+    # one point — a one-turn gap, by design, not a poisoned fit.
     admit(self, 90_345)
-    # X at the five-crash ordinal: the suffix has re-accumulated two points
-    # and, with the observed-peak floor, must refuse — a whole-deque fit
-    # flattened by the 40k point is what the suffix rule exists to prevent.
-    with pytest.raises(PrefillAdmissionError):
-        admit(self, 95_994)
+    assert "Prefill admission ADVISORY" not in caplog.text
+    # X at the five-crash ordinal: the suffix has re-accumulated and, with the
+    # observed-peak floor, flags the turn (advisory; the forward runs).
+    admit(self, 95_994)
+    assert "Prefill admission ADVISORY" in caplog.text
 
 
 def test_turn_walk_aux_clean_path_prefill_is_exempt(monkeypatch):

@@ -36,21 +36,33 @@ def fixture(monkeypatch, active, peaks, *, family="naive_n05_flash", enabled=Tru
     return gen, req, calls, events
 
 
-def test_completed_peak_rejects_next_chunk_before_model_submission(monkeypatch):
-    gen, req, calls, events = fixture(monkeypatch, [80, 81], [96])
-    with pytest.raises(PrefillAdmissionError):
-        gen._prefill([1, 2, 3, 4], req)
-    assert calls == [[1, 2]]
-    assert req.context_tokens == [1, 2]
-    assert events == ["reset", "sync", "peak"]
+def test_completed_peak_flags_next_chunk_and_still_runs_it(monkeypatch, caplog):
+    """The completed chunk's peak (16GB transient) projects the next chunk past
+    the limit. Since 2026-10-08 (ISSUES I-36: estimates ADVISE, never REFUSE)
+    the projection is logged and the chunk RUNS."""
+    import logging
 
-
-def test_smaller_later_peak_does_not_forget_largest_transient(monkeypatch):
-    gen, req, calls, _ = fixture(monkeypatch, [80, 80, 86], [92, 81])
-    with pytest.raises(PrefillAdmissionError):
-        gen._prefill([1, 2, 3, 4, 5, 6], req)
+    caplog.set_level(logging.WARNING)
+    gen, req, calls, events = fixture(monkeypatch, [80, 81], [96, 97])
+    gen._prefill([1, 2, 3, 4], req)
     assert calls == [[1, 2], [3, 4]]
     assert req.context_tokens == [1, 2, 3, 4]
+    assert events == ["reset", "sync", "peak", "reset", "sync", "peak"]
+    assert "Prefill admission ADVISORY" in caplog.text
+
+
+def test_smaller_later_peak_does_not_forget_largest_transient(monkeypatch, caplog):
+    """The third chunk is flagged only if the 12GB transient of chunk 1 is still
+    the projection input after chunk 2's 1GB transient (a forgetting valve
+    would project 86 + 2 = 88GB and stay quiet)."""
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    gen, req, calls, _ = fixture(monkeypatch, [80, 80, 86], [92, 81, 87])
+    gen._prefill([1, 2, 3, 4, 5, 6], req)
+    assert calls == [[1, 2], [3, 4], [5, 6]]
+    assert req.context_tokens == [1, 2, 3, 4, 5, 6]
+    assert caplog.text.count("Prefill admission ADVISORY") == 1
 
 
 @pytest.mark.parametrize("family,enabled", [("other", True), ("naive_n05_flash", False)])

@@ -318,7 +318,14 @@ class TestMediaForwardFallbacks:
         "no_cache", "no_seam", "disabled", "merge_error", "no_embeddings",
         "oversized_span",
     ])
-    def test_bounded_glm_never_falls_back_to_unbounded_forward(self, monkeypatch, failure):
+    def test_bounded_glm_advises_and_runs_instead_of_refusing(self, monkeypatch, caplog, failure):
+        """Bounded GLM media prefill is chosen by a memory PROJECTION (tight-
+        memory classification). Since 2026-10-08 (ISSUES I-36: estimates
+        ADVISE, never REFUSE) none of these cases refuses the request: each
+        logs the advisory and serves it — the ordinary one-shot forward every
+        non-bounded model uses, or (oversized span) the chunked forward with
+        the protected span kept whole."""
+        import logging
         from types import SimpleNamespace
         import vmlx_engine.mllm_batch_generator as mllm
 
@@ -327,7 +334,7 @@ class TestMediaForwardFallbacks:
             model_type = "glm5_next"
             def __call__(self, ids, inputs_embeds=None, cache=None):
                 calls.append("language-forward")
-                raise AssertionError("unadmitted forward")
+                return SimpleNamespace(logits=mllm.mx.zeros((1, 1, 4)))
         gen = self._gen(_OneShotModel(calls), LM())
         gen._tight_memory_prefill_drain = True
         gen._native_media_clean_boundary = lambda *args: 0
@@ -351,10 +358,17 @@ class TestMediaForwardFallbacks:
             gen.model.get_input_embeddings = fail
         elif failure == "no_embeddings":
             gen.model.get_input_embeddings = lambda *a, **kw: None
-        with pytest.raises(mllm.PrefillAdmissionError, match="GLM"):
-            gen._media_forward(SimpleNamespace(request_id="bounded-glm-refusal"),
-                               ids, 2500, cache, {})
-        assert calls == []
+        monkeypatch.setattr(mllm, "_materialize_prefill_cache_state", lambda c: None)
+        caplog.set_level(logging.WARNING)
+        gen._media_forward(SimpleNamespace(request_id="bounded-glm-advisory"),
+                           ids, 2500, cache, {})
+        if failure == "oversized_span":
+            assert "language-forward" in calls and "one-shot" not in calls
+            assert "runs an oversized protected media span whole" in caplog.text
+        else:
+            assert calls == ["one-shot"]
+            assert "fell back to the ordinary one-shot forward" in caplog.text
+        assert "Prefill admission ADVISORY" in caplog.text
 
     def _gen(self, model, lm):
         from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator

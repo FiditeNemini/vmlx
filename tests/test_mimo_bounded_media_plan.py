@@ -10,7 +10,11 @@ ROOT = Path(__file__).resolve().parents[1] / 'vmlx_engine'
 
 
 def owners():
-    ns = {'PrefillAdmissionError': RuntimeError, '_TIGHT_PROJECTED_STEP_CAP': 1024}
+    advisories = []
+    ns = {'PrefillAdmissionError': RuntimeError, '_TIGHT_PROJECTED_STEP_CAP': 1024,
+          # I-36 (2026-10-08): projection declines are advisories, never refusals.
+          'advise_admission': lambda err, request_id=None: advisories.append(str(err)),
+          '_advisories': advisories}
     for filename, names in [
         ('utils/prefill_admission.py', {'max_prefill_chunk_tokens', 'replace_chunk_transient_observation'}),
         ('mllm_batch_generator.py', {'_media_chunk_boundaries', '_bounded_mimo_media_plan', '_native_media_clean_boundary', '_media_forward', '_media_placeholder_runs'}),
@@ -65,23 +69,31 @@ class BoundedMiMoMediaPlanTests(unittest.TestCase):
         self.assertLess(step, 1024)
         self.assertEqual(bounds[-1], 6236)
 
-    def test_actual_media_owner_never_falls_back_when_tight_native(self):
+    def test_tight_native_owner_advises_and_runs_ordinary_forward(self):
+        # Bounded MiMo mode is chosen by a memory PROJECTION (tight-memory
+        # classification). Since I-36 (2026-10-08) an unusable bounded path
+        # does not refuse: it records an advisory and runs the ordinary
+        # one-shot forward every other model uses.
         for cause in ('disabled', 'missing_cache', 'missing_embedding_api'):
             with self.subTest(cause=cause):
+                ns = owners()
                 calls = []
                 class Model:
                     _mimo_v26_runtime = True
                     def __call__(self, *args, **kwargs):
-                        calls.append('unsafe_forward')
+                        calls.append('ordinary_forward')
+                        return 'result'
                 owner = SimpleNamespace(model=Model(), _tight_memory_prefill_drain=True,
                                         language_model=object())
-                self.ns.update(os=os, _raise_if_prefill_cancelled=lambda req: None,
-                               _media_embed_kwarg_name=lambda lm: None)
+                ns.update(os=os, _raise_if_prefill_cancelled=lambda req: None,
+                          _media_embed_kwarg_name=lambda lm: None,
+                          logger=SimpleNamespace(info=lambda *a: None))
                 with patch.dict(os.environ, {'VMLX_DISABLE_MEDIA_CHUNKED_PREFILL': '1' if cause == 'disabled' else '0'}):
-                    with self.assertRaises(RuntimeError):
-                        self.ns['_media_forward'](owner, object(), object(), 6236,
+                    result = ns['_media_forward'](owner, object(), object(), 6236,
                                                   None if cause == 'missing_cache' else [], {})
-                self.assertEqual(calls, [])
+                self.assertEqual(result, 'result')
+                self.assertEqual(calls, ['ordinary_forward'])
+                self.assertTrue(ns['_advisories'])
 
     def test_non_native_fallback_remains_available(self):
         calls = []
@@ -180,9 +192,10 @@ class BoundedMiMoMediaPlanTests(unittest.TestCase):
                         clear_cache=lambda: events.append('clear'), reset_peak_memory=lambda: None,
                         get_peak_memory=lambda: 104000001000))
                 with patch.dict(os.environ, {'VMLX_DISABLE_MEDIA_CHUNKED_PREFILL':'0'}):
-                    if mode == 'complete':
+                    if mode in ('complete', 'admission'):  # admission: advised, runs (I-36)
                         result = ns['_media_forward'](owner, request, Array(),6236,cache,{})
                         self.assertIsInstance(result, Logits)
+                        self.assertEqual(bool(ns['_advisories']), mode == 'admission')
                         self.assertEqual(events.count('forward'),8)
                         self.assertEqual(events.count('state'),8)
                         self.assertEqual(events.count('checkpoint'),1)
@@ -266,9 +279,10 @@ class BoundedMiMoMediaPlanTests(unittest.TestCase):
                         clear_cache=lambda: events.append('clear'), reset_peak_memory=lambda: None,
                         get_peak_memory=lambda: 104000001000))
                 with patch.dict(os.environ, {'VMLX_DISABLE_MEDIA_CHUNKED_PREFILL':'0'}):
-                    if mode == 'complete':
+                    if mode in ('complete', 'admission'):  # admission: advised, runs (I-36)
                         result = ns['_media_forward'](owner, request, Array(),6236,cache,{})
                         self.assertIsInstance(result, Logits)
+                        self.assertEqual(bool(ns['_advisories']), mode == 'admission')
                         self.assertEqual(events.count('forward'),8)
                         self.assertGreater(request._prefill_tokens_done,1976)
                         self.assertEqual(events.count('state'),8)

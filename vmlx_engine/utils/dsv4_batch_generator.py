@@ -1987,14 +1987,22 @@ class DSV4BatchGenerator:
                     )
             chunk = all_ids[:, off:end_off]
             if valve_active:
-                dsv4_prefill_valve_check(
-                    valve_active_before,
-                    valve_max_ws,
-                    valve_observed_transient,
-                    valve_min_margin,
-                    chunk_start=cached_tokens + off,
-                    chunk_end=cached_tokens + end_off,
-                )
+                try:
+                    dsv4_prefill_valve_check(
+                        valve_active_before,
+                        valve_max_ws,
+                        valve_observed_transient,
+                        valve_min_margin,
+                        chunk_start=cached_tokens + off,
+                        chunk_end=cached_tokens + end_off,
+                    )
+                except DSV4PrefillMemoryError as advisory:
+                    # Advise, never refuse (I-36): 1.25x the largest observed
+                    # transient is a projection; run the chunk and let Metal
+                    # fail loudly if memory genuinely runs out.
+                    from .prefill_admission import advise_admission
+
+                    advise_admission(advisory)
             if (valve_active or _PREFILL_MEM_LOG) and hasattr(
                 mx, "reset_peak_memory"
             ):

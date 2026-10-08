@@ -3112,6 +3112,7 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 from .utils.memory_limits import get_effective_metal_working_set_bytes
 from .utils.prefill_admission import (
     PrefillAdmissionError,
+    advise_admission,
     fit_peak_model,
     hybrid_chunk_valve_check,
     replace_chunk_transient_observation,
@@ -11647,6 +11648,9 @@ class MLLMBatchGenerator:
                         fitted_max_context=max(ctx for ctx, _ in _walk_pts),
                         model_label="hybrid delta",
                     )
+                except PrefillAdmissionError as advisory:
+                    # Advise, never refuse (I-36): the walk is a projection.
+                    advise_admission(advisory, request_id=getattr(request, "request_id", None))
                 except Exception:
                     self._last_deep_span_tokens = 0
                     raise
@@ -12602,6 +12606,9 @@ class MLLMBatchGenerator:
                             # narrower pieces.
                             degradable_chunks=True,
                         )
+                    except PrefillAdmissionError as advisory:
+                        # Advise, never refuse (I-36): the span fit is a projection.
+                        advise_admission(advisory, request_id=getattr(request, "request_id", None))
                     except Exception:
                         _restore_kv_step()
                         raise
@@ -12695,7 +12702,7 @@ class MLLMBatchGenerator:
                                 next_chunk_tokens=chunk_size,
                                 chunk_scaled=_valve_chunk_scaled,
                             )
-                        except PrefillAdmissionError:
+                        except PrefillAdmissionError as advisory:
                             # A decline used to fail the whole request with a
                             # 413. Halving and retrying is strictly better:
                             # the span the device CAN serve is served, just in
@@ -12718,8 +12725,10 @@ class MLLMBatchGenerator:
                                 _chunk_ceiling = min(_chunk_ceiling, _halved)
                                 _adaptive_chunk_active = True
                                 continue
-                            _restore_kv_step()
-                            raise
+                            # At the floor: advise and run the chunk (I-36).
+                            # The projection is not a measurement; if memory
+                            # genuinely runs out, Metal fails loudly.
+                            advise_admission(advisory, request_id=getattr(request, "request_id", None))
                         except Exception:
                             # A decline leaves the prefill; restore step first or
                             # the slot keeps span width into decode.
@@ -13642,15 +13651,13 @@ class MLLMBatchGenerator:
         )
 
         def one_shot():
-            if bounded_glm:
-                raise PrefillAdmissionError(
-                    "Bounded GLM media prefill cannot use an unbounded one-shot fallback"
-                )
-            if bounded_mimo:
-                raise PrefillAdmissionError(
-                    "Tight-memory MiMo media prefill requires bounded execution; "
-                    "one-shot fallback is unavailable"
-                )
+            if bounded_glm or bounded_mimo:
+                # The bounded modes were chosen by a memory PROJECTION
+                # (tight-memory classification); refusing the ordinary
+                # one-shot forward on that basis is a refusal by estimate.
+                advise_admission(PrefillAdmissionError(
+                    "bounded media prefill fell back to the ordinary one-shot forward"
+                ), request_id=getattr(request, "request_id", None))
             return self.model(input_ids, **kwargs)
 
         if os.environ.get("VMLX_DISABLE_MEDIA_CHUNKED_PREFILL") in (
@@ -13745,12 +13752,6 @@ class MLLMBatchGenerator:
         try:
             features = get_embeds(input_ids, **kwargs)
         except Exception as exc:
-            if bounded_mimo:
-                raise
-            if bounded_glm:
-                raise PrefillAdmissionError(
-                    "Bounded GLM media prefill requires successful embedding merge"
-                ) from exc
             logger.info(
                 "media chunked prefill unavailable for %s (embedding merge "
                 "failed: %s); using the one-shot forward",
@@ -13795,23 +13796,30 @@ class MLLMBatchGenerator:
             bounds = sorted(set(bounds) | {glm_native_boundary})
 
         if bounded_mimo:
-            if token_list is None or not media_ids:
-                raise PrefillAdmissionError("MiMo bounded media prefill requires protected token spans")
             # Complete the encoder independently before measuring LM headroom.
             mx.eval(embeds)
             active, limit = get_effective_metal_working_set_bytes(mx)
-            chunk, bounds = _bounded_mimo_media_plan(
-                seq_len, self.prefill_step_size,
-                _infer_attention_heads_for_hybrid_oom_guard(lm),
-                int(getattr(request, "_cached_tokens", 0) or 0),
-                active, limit, runs, clean_boundaries,
-                allow_oversized_merged_runs=True,
-            )
-            logger.info(
-                "MiMo bounded media plan request=%s active_bytes=%d limit_bytes=%d "
-                "target=%d span_widths=%s", request.request_id, active, limit, chunk,
-                [end - begin for begin, end in zip([0] + bounds[:-1], bounds)],
-            )
+            try:
+                if token_list is None or not media_ids:
+                    raise PrefillAdmissionError("MiMo bounded media prefill requires protected token spans")
+                chunk, bounds = _bounded_mimo_media_plan(
+                    seq_len, self.prefill_step_size,
+                    _infer_attention_heads_for_hybrid_oom_guard(lm),
+                    int(getattr(request, "_cached_tokens", 0) or 0),
+                    active, limit, runs, clean_boundaries,
+                    allow_oversized_merged_runs=True,
+                )
+            except PrefillAdmissionError as advisory:
+                # Advise, never refuse (I-36): keep the ordinary chunk plan
+                # computed above and leave bounded mode for this request.
+                advise_admission(advisory, request_id=getattr(request, "request_id", None))
+                bounded_mimo = False
+            if bounded_mimo:
+                logger.info(
+                    "MiMo bounded media plan request=%s active_bytes=%d limit_bytes=%d "
+                    "target=%d span_widths=%s", request.request_id, active, limit, chunk,
+                    [end - begin for begin, end in zip([0] + bounds[:-1], bounds)],
+                )
 
         # Verify the invariant the wrapper asked for instead of trusting it.
         _split_run = None
@@ -13831,10 +13839,6 @@ class MLLMBatchGenerator:
                 break
             _prev = _end
         if _split_run is not None:
-            if bounded_glm:
-                raise PrefillAdmissionError(
-                    "Bounded GLM media prefill checkpoint would split a protected media span"
-                )
             logger.info(
                 "media chunked prefill declined for %s: a chunk boundary at "
                 "%d would split the media run [%d, %d). Falling back to the "
@@ -13848,9 +13852,9 @@ class MLLMBatchGenerator:
             end - begin > chunk
             for begin, end in zip([0] + bounds[:-1], bounds)
         ):
-            raise PrefillAdmissionError(
-                "Bounded GLM media prefill cannot split an oversized protected media span"
-            )
+            advise_admission(PrefillAdmissionError(
+                "bounded GLM media prefill runs an oversized protected media span whole"
+            ), request_id=getattr(request, "request_id", None))
 
         logger.info(
             "media chunked prefill for %s: %d tokens in %d chunks (target step %d, "
@@ -13890,26 +13894,32 @@ class MLLMBatchGenerator:
                     heads = max(1, _infer_attention_heads_for_hybrid_oom_guard(lm))
                     ctx = int(getattr(request, "_cached_tokens", 0) or 0) + end
                     projected = heads * (end - start) * max(1, ctx) * 4
-                    hybrid_chunk_valve_check(
-                        active, limit, projected, ctx, ctx,
-                        prefill_valve_min_margin_bytes(), chunk_start=start, chunk_end=end,
-                        model_label="MiMo media prefill",
-                    )
-                    hybrid_chunk_valve_check(
-                        active, limit, observed_transient, observed_context, ctx,
-                        prefill_valve_min_margin_bytes(), chunk_start=start, chunk_end=end,
-                        model_label="MiMo media prefill measured projection",
-                        observed_chunk_tokens=observed_width,
-                        next_chunk_tokens=max(observed_width, end - start),
-                        chunk_scaled=True,
-                    )
+                    try:
+                        hybrid_chunk_valve_check(
+                            active, limit, projected, ctx, ctx,
+                            prefill_valve_min_margin_bytes(), chunk_start=start, chunk_end=end,
+                            model_label="MiMo media prefill",
+                        )
+                        hybrid_chunk_valve_check(
+                            active, limit, observed_transient, observed_context, ctx,
+                            prefill_valve_min_margin_bytes(), chunk_start=start, chunk_end=end,
+                            model_label="MiMo media prefill measured projection",
+                            observed_chunk_tokens=observed_width,
+                            next_chunk_tokens=max(observed_width, end - start),
+                            chunk_scaled=True,
+                        )
+                    except PrefillAdmissionError as advisory:
+                        advise_admission(advisory, request_id=request.request_id)
                 elif prefill_valve_enabled():
-                    hybrid_chunk_valve_check(
-                        active, limit, observed_transient, observed_context,
-                        end, prefill_valve_min_margin_bytes(),
-                        chunk_start=start, chunk_end=end,
-                        model_label="GLM media prefill",
-                    )
+                    try:
+                        hybrid_chunk_valve_check(
+                            active, limit, observed_transient, observed_context,
+                            end, prefill_valve_min_margin_bytes(),
+                            chunk_start=start, chunk_end=end,
+                            model_label="GLM media prefill",
+                        )
+                    except PrefillAdmissionError as advisory:
+                        advise_admission(advisory, request_id=request.request_id)
                 mx.reset_peak_memory()
             call_kwargs: Dict[str, Any] = {"cache": cache}
             call_kwargs[embed_kwarg] = embeds[:, start:end]

@@ -28,6 +28,8 @@ from .mamba_cache import _should_capture_generation_logprobs
 from .memory_limits import get_effective_metal_working_set_bytes
 from .prefill_admission import (
     prefill_keep_alloc_enabled as _prefill_keep_alloc_enabled,
+    PrefillAdmissionError as _PrefillAdmissionError,
+    advise_admission as _advise_admission,
     prefill_valve_check as _prefill_valve_check,
     prefill_valve_enabled as _prefill_valve_enabled,
     prefill_valve_min_margin_bytes as _prefill_valve_min_margin_bytes,
@@ -695,16 +697,19 @@ class SingleBatchGenerator:
                     _active = int(mx.get_active_memory())
                 except Exception:  # noqa: BLE001
                     _active = 0
-                # Unknown readings must never reject a request that would work.
-                _prefill_valve_check(
-                    _active,
-                    _valve_max_ws,
-                    _valve_transient,
-                    _valve_margin,
-                    chunk_start=pos,
-                    chunk_end=pos + n,
-                    model_label=type(self).__name__,
-                )
+                # Advise, never refuse (I-36): the projection only logs.
+                try:
+                    _prefill_valve_check(
+                        _active,
+                        _valve_max_ws,
+                        _valve_transient,
+                        _valve_margin,
+                        chunk_start=pos,
+                        chunk_end=pos + n,
+                        model_label=type(self).__name__,
+                    )
+                except _PrefillAdmissionError as advisory:
+                    _advise_admission(advisory, request_id=getattr(req, "request_id", None))
             if _measure_native_peak:
                 mx.reset_peak_memory()
             if _phase_trace:

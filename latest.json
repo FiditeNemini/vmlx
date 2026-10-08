@@ -1,21 +1,21 @@
 {
-  "version": "1.6.76",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.76/vMLX-1.6.76-tahoe-arm64.dmg",
-  "sha256": "36e7adaebdefdea23f45498b45856831ca32270765b34f6a4a8d37b8d8dcefa9",
-  "sha512": "umSqtuAxCdx2I1JqmT9+CHjxEB/JsnrMyYPAfqAmObgFuumKauD6rNYGn/6rDpO2txmRgSpAYv8u3xhy6UvzqA==",
+  "version": "1.6.77",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.77/vMLX-1.6.77-tahoe-arm64.dmg",
+  "sha256": "9c5d008b8d8fc5bb46209ec1baf07522b617983703ec7d985766c24d318eaf10",
+  "sha512": "mQ/f7k4xX2qsQ0lswnCrOK1YrKWp51oajJ0BxrBfDMMnNNB8DifdC5LZsY3BaID4m9pUPv/Xxtw0lgPHdl9C5g==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.76/vMLX-1.6.76-sequoia-arm64.dmg",
-      "bytes": 572830967,
-      "sha256": "07f9fa3b606d36a5ef8e58c64bfe58ab47ce62c0a94eb99fcac7adcaba26b253",
-      "sha512": "pzmOkvAEauxt/oHZUuvqe/iVjrQb5YaROXlPFxXQbevM8sO8apw7oZLd+o+yQUDn2JoFWEFy0XPc6iCz1p+GUg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.77/vMLX-1.6.77-sequoia-arm64.dmg",
+      "bytes": 573063118,
+      "sha256": "4dcc8c1752793f5381736b68169ec0f2cecfe102fb6078c359893954631a27c5",
+      "sha512": "22ww0Nt6ilLDJlESW6u+eN0AmgdHd3DmK/w5fspWPRRMzIyyNe+zBpHFdEWiHwc7gkMCcGmFzAfBZiTYeCG+nA=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.76/vMLX-1.6.76-tahoe-arm64.dmg",
-      "bytes": 598714918,
-      "sha256": "36e7adaebdefdea23f45498b45856831ca32270765b34f6a4a8d37b8d8dcefa9",
-      "sha512": "umSqtuAxCdx2I1JqmT9+CHjxEB/JsnrMyYPAfqAmObgFuumKauD6rNYGn/6rDpO2txmRgSpAYv8u3xhy6UvzqA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.77/vMLX-1.6.77-tahoe-arm64.dmg",
+      "bytes": 598651145,
+      "sha256": "9c5d008b8d8fc5bb46209ec1baf07522b617983703ec7d985766c24d318eaf10",
+      "sha512": "mQ/f7k4xX2qsQ0lswnCrOK1YrKWp51oajJ0BxrBfDMMnNNB8DifdC5LZsY3BaID4m9pUPv/Xxtw0lgPHdl9C5g=="
     }
   },
-  "notes": "# vMLX 1.6.76\n\nThis release improves image/video conversations and cache correctness while preserving the existing Qwen Adaptive MTP and DFlash2 execution paths.\n\n- Qwen DFlash2 sessions support image/video prefill and reusable media context. Mixed image/video history retains its original order.\n- SSD vision features are isolated by media, model weights and runtime identity, and are removed by the appropriate cache-clear action.\n- DFlash2 snapshots preserve the original prompt state across subsequent decoding and disk restoration; incompatible older snapshots are invalidated.\n- Explicit API stop strings work during DFlash2 generation, including markers split across streamed tokens.\n- Native multimodal usage and prefill reporting account for reused tokens correctly.\n- Failed or cancelled direct-engine requests release their request state and iterators. Direct media-cache clearing is synchronized with generation.\n- Rotating native caches preserve their absolute position and reject an unrecoverable rollback instead of returning corrupted continuations.\n\nPerformance depends on the model bundle, workload, context and hardware. Existing drafting and sampling defaults remain unchanged.\n\nChoose the Tahoe DMG for macOS 26, or the Sequoia DMG for supported earlier macOS versions."
+  "notes": "# vMLX 1.6.77\n\n## Changes\n\n- Batched MLLM: requests with stop strings no longer hang the server (`202d8d0b4`)\n- Qwen4 PLE warm: pause for in-flight reads, not for every forward (`43ed9a43a`)\n- Media in tool messages reaches the model with a placeholder (`e5a1aa0d9`)\n- SimpleEngine plans video frames like the batched engine; image limit is advisory (`7eb644703`)\n- GLM-5.3 JANGH2: fused expert-tile + Hadamard-32 prefill on by default (`58a26a396`)\n- Naive N0.5: serve long prompts with the padded fused prefill (auto) (`9cf0c2ef8`)\n- perf(glm5): memoize full-block checkpoint digests per live cache (`51e061e8a`)\n- fix(dflash2): keep rebuilt drafter caches physical under an absolute offset (`d385820ab`)\n- perf(glm5): qualify the KDA substitution kernel on MLX 0.32.3, default on (`06b89e614`)\n- fix(panel): typewriter snaps to rewritten final content of equal length (`1714fce45`)\n- fix(prefill): memory-projection admission advises instead of refusing (`8d17d508e`)\n- Honor stop strings completed during final detokenizer flush (`d7fbf6ae8`)\n- Recognize DFlash2 as an untranslated technical name (`c0fcb8c64`)\n- Correct outdated DFlash2 image acceleration guidance (`59f1319d0`)\n- Prepare v1.6.77 runtime and multimodal fixes (`5f007e6d5`)\n\n## Compatibility notes\n\n- Existing 27B DFlash2 disk snapshots are invalidated once by the corrected cache format; subsequent turns rebuild them automatically.\n- Projected-memory checks now adapt chunk sizes and issue warnings rather than refuse requests. Actual available memory still determines whether a workload fits.\n- GLM KDA acceleration is enabled only on its qualified hardware/runtime path.\n\n## Runtime provenance\n\n- vMLX source: `5f007e6d519aef97aa2307bc76e684bb1c139eb3`\n- JANG runtime: `3041941aee51384652548b8416f3f96d8e452f56` (`jang 2.5.49`)\n- Tahoe/macOS 26 is the default build; Sequoia is the compatibility build.\n- Both DMGs are Developer ID signed, independently notarized, stapled, and Gatekeeper checked by the candidate workflow.\n\n## Downloads\n\n- **Tahoe**: `vMLX-1.6.77-tahoe-arm64.dmg`\n  - SHA-256: `9c5d008b8d8fc5bb46209ec1baf07522b617983703ec7d985766c24d318eaf10`\n  - Size: `598651145` bytes\n- **Sequoia**: `vMLX-1.6.77-sequoia-arm64.dmg`\n  - SHA-256: `4dcc8c1752793f5381736b68169ec0f2cecfe102fb6078c359893954631a27c5`\n  - Size: `573063118` bytes\n\n## Python distributions\n\n- Wheel: `vmlx-1.6.77-py3-none-any.whl` \u2014 SHA-256 `28993e9b3df1a82ee7b7cc66a4764106a2ff4e57112e1a572c8ad43b5c9a6f61`\n- Source: `vmlx-1.6.77.tar.gz` \u2014 SHA-256 `741db01e4eb55ff2c75bf2a1bd21fa6ad6918ea64eec28bc705f91a2d52af716`"
 }

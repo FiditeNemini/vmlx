@@ -3651,20 +3651,48 @@ class MLLMScheduler:
                 # should not trigger user-specified stop sequences.
                 if request.sampling_params.stop:
                     full_text = detok.text
+                    stops = [s for s in request.sampling_params.stop if s]
+                    # Characters already sent to the client. Streamed deltas
+                    # cannot be retracted, so text that may be the START of a
+                    # stop string is held back until it either completes the
+                    # stop (dropped) or diverges (sent). Without the hold-back
+                    # a streamed "...16\n1" leaked before stop "\n17" matched.
+                    emitted = getattr(request, "_stop_emitted", None)
+                    if emitted is None:
+                        emitted = len(full_text) - len(new_text)
                     # Skip matching inside unclosed <think> blocks
                     in_think = '<think>' in full_text and '</think>' not in full_text.split('<think>')[-1]
-                    if not in_think:
-                        max_stop_len = max(len(s) for s in request.sampling_params.stop)
-                        search_start = max(0, len(full_text) - len(new_text) - max_stop_len + 1)
+                    if in_think or not stops:
+                        new_text = full_text[emitted:]
+                        emitted = len(full_text)
+                    else:
+                        max_stop_len = max(len(s) for s in stops)
+                        search_start = max(0, emitted - max_stop_len + 1)
                         last_think_end = full_text.rfind('</think>')
                         if last_think_end >= 0:
                             search_start = max(search_start, last_think_end + len('</think>'))
-                        for stop_str in request.sampling_params.stop:
-                            idx = full_text.find(stop_str, search_start)
-                            if idx >= 0:
-                                string_stop_truncate = idx
-                                new_text = ""
-                                break
+                        # Not `idx`: that is the enclosing response loop's
+                        # index. Reusing it (since v1.5.39) reset the loop to
+                        # the same response on every miss -- any request with
+                        # a stop list re-added one token forever and hung the
+                        # server -- and skipped other rows' responses on a hit.
+                        hits = [at for at in (full_text.find(s, search_start) for s in stops) if at >= 0]
+                        if hits:
+                            stop_at = min(hits)
+                            string_stop_truncate = stop_at
+                            new_text = full_text[emitted:stop_at] if stop_at > emitted else ""
+                            emitted = max(emitted, stop_at)
+                        else:
+                            hold = 0
+                            for s in stops:
+                                for size in range(min(len(s) - 1, len(full_text) - search_start), 0, -1):
+                                    if full_text.endswith(s[:size]):
+                                        hold = max(hold, size)
+                                        break
+                            safe_end = max(emitted, len(full_text) - hold)
+                            new_text = full_text[emitted:safe_end]
+                            emitted = safe_end
+                    request._stop_emitted = emitted
             else:
                 new_text = ""
 
@@ -3739,6 +3767,13 @@ class MLLMScheduler:
 
                 # Finalize detokenizer and use its complete text
                 final_text_delta = _finalize_detokenizer_delta(detok)
+                if string_stop_truncate < 0 and request.sampling_params.stop:
+                    # No stop matched: release the held-back tail (and any
+                    # text the finalize flushed) exactly once.
+                    _emitted = getattr(request, "_stop_emitted", None)
+                    if _emitted is not None:
+                        final_text_delta = detok.text[_emitted:]
+                        request._stop_emitted = len(detok.text)
                 if string_stop_truncate < 0 and final_text_delta:
                     output.new_text += final_text_delta
                 if string_stop_truncate >= 0:

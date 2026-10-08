@@ -285,11 +285,13 @@ def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     assert rows["projection_groups"]["state"] == "installed_unobserved"
     assert rows["startup_warmup"]["state"] == "active_observed"
     assert rows["kda_conv_state"]["state"] == "installed_unobserved"
+    # kda_substitution is requested by default since 2026-10-08 (10, not 9);
+    # this payload does not attest it, so it counts as unattested (7, not 6).
     assert contract["summary"] == {
-        "requested": 9,
+        "requested": 10,
         "installed": 3,
         "observed": 1,
-        "source_only_or_unattested": 6,
+        "source_only_or_unattested": 7,
     }
 
 

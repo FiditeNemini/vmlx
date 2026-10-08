@@ -53,7 +53,13 @@ def glm5_prefill_layer_fence_enabled() -> bool:
 
 
 # Startup-frozen selection: math, cache identity and health use one value.
-_KDA_SUBSTITUTION_REQUESTED = os.environ.get("VMLX_GLM5_KDA_SUBSTITUTION", "0") == "1"
+# Default ON since 2026-10-08 (bit-identical to the stock solver on MLX 0.32.2
+# and 0.32.3; served A/B GLM-5.3 JANGH2: 11/11 texts byte-identical in 6 arms,
+# cold prefill +7-13 % at matched clock). The kernel itself still runs only on
+# its qualified runtime (metal/glm5_kda_substitution._compatible_runtime);
+# elsewhere stock math runs. Unset or "1" selects it; any other value is stock.
+_KDA_SUBSTITUTION_VALUE = os.environ.get("VMLX_GLM5_KDA_SUBSTITUTION")
+_KDA_SUBSTITUTION_REQUESTED = _KDA_SUBSTITUTION_VALUE is None or _KDA_SUBSTITUTION_VALUE == "1"
 GLM5_KDA_SUBSTITUTION_MATH_ABI = "mlx0322_col32x32_i1stock_v1"
 
 

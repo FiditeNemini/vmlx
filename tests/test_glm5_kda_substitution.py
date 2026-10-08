@@ -22,7 +22,7 @@ def exact(a, b):
 @pytest.fixture
 def qualified(monkeypatch):
     if not fused._compatible_runtime():
-        pytest.skip("MLX0.32.2/M5 Max numerical qualification")
+        pytest.skip("MLX 0.32.2/0.32.3 on M5 Max numerical qualification")
     monkeypatch.setattr(fused, "_FAILED", False)
     monkeypatch.setattr(fused, "_OBSERVED", False)
     monkeypatch.setattr(fused, "_CALLS", 0)
@@ -99,7 +99,7 @@ def test_runtime_fallback_before_kernel(monkeypatch):
     assert fused.kda_substitution(mx.zeros((1,64,1,64,64)), enabled=True) is None
 
 
-@pytest.mark.parametrize("value,expected", [(None,False),("0",False),("1",True),("true",False),("2",False)])
+@pytest.mark.parametrize("value,expected", [(None,True),("0",False),("1",True),("true",False),("2",False)])
 def test_startup_policy_and_health_freeze(value, expected):
     env=dict(os.environ)
     env.pop("VMLX_GLM5_KDA_SUBSTITUTION", None)

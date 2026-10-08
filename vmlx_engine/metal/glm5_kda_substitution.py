@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in GLM WY substitution for MLX0.32.2/M5 Max, preserving FP32 sum order.
+"""GLM WY substitution for MLX 0.32.2/0.32.3 on M5 Max, preserving FP32 sum order.
+
+0.32.3 qualified 2026-10-08: bit-identical to the stock 63-step loop on 96 real
+A matrices (NT 1..32 x 3 decay regimes, A built by the real pairwise path) and
+14.36 -> 2.57 ms per KDA layer per 2,048-token chunk (audit kda_subst_exact.py).
+Before that the gate named 0.32.2 only, so the app (0.32.3) never engaged it.
 
 Keep row1 on stock MLX; rows2..63 use the qualified column-reduction tree.
 Every iteration snapshots its original row before any writes. No recurrence,
@@ -46,7 +51,7 @@ _SOURCE = r"""
 @lru_cache(maxsize=1)
 def _compatible_runtime():
     try:
-        return (importlib.metadata.version("mlx") == "0.32.2"
+        return (importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
                 and mx.metal.is_available()
                 and mx.device_info().get("device_name") == "Apple M5 Max")
     except (importlib.metadata.PackageNotFoundError, RuntimeError):

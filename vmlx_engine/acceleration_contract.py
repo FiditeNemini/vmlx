@@ -219,7 +219,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "features": [
             _feature(
                 "kda_substitution", label="bounded exact KDA prefill substitution",
-                kind="metal_kernel", scopes=("prefill",), default=False,
+                kind="metal_kernel", scopes=("prefill",), default=True,
                 env=("VMLX_GLM5_KDA_SUBSTITUTION",),
             ),
             _feature(

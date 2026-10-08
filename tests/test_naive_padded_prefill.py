@@ -68,18 +68,47 @@ def test_unqualified_or_disabled_calls_preserve_native_dispatch(monkeypatch, ena
 
 
 def test_arithmetic_policy_has_distinct_stable_cache_identity(monkeypatch):
+    """auto (default), on and off are three distinct, stable cache namespaces."""
     from vmlx_engine import prefix_cache
 
     monkeypatch.delenv("VMLX_NAIVE_PADDED_PREFILL", raising=False)
-    baseline = prefix_cache._resolve_runtime_cache_fingerprint()
+    auto = prefix_cache._resolve_runtime_cache_fingerprint()
+    assert "naive_padded_prefill_auto_v1:" in auto
+    monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "auto")
+    assert prefix_cache._resolve_runtime_cache_fingerprint() == auto
     monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "true")
     enabled = prefix_cache._resolve_runtime_cache_fingerprint()
-    assert enabled != baseline
-    assert "naive_padded_prefill_v1" in enabled
+    assert "naive_padded_prefill_v1" in enabled and enabled != auto
     monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "1")
     assert prefix_cache._resolve_runtime_cache_fingerprint() == enabled
     monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "false")
-    assert prefix_cache._resolve_runtime_cache_fingerprint() == baseline
+    stock = prefix_cache._resolve_runtime_cache_fingerprint()
+    assert "naive_padded_prefill" not in stock and stock not in (auto, enabled)
+
+
+def test_auto_keeps_stock_below_the_threshold_and_pads_above(monkeypatch):
+    """Default auto: byte-identical stock dispatch while the score tensor fits, fused padded path above."""
+    layer = attention(monkeypatch, True)
+    monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "auto")
+    q = mx.zeros((1, 64, 17, 192), mx.bfloat16)
+    k = mx.zeros((1, 4, 32, 192), mx.bfloat16)
+    v = mx.zeros((1, 4, 32, 128), mx.bfloat16)
+    mask = mx.ones((1, 1, 17, 32), mx.bool_)
+    calls = []
+
+    def observe(*args, **kwargs):
+        calls.append(kwargs)
+        return mx.zeros((1, 64, 17, args[2].shape[-1]), mx.bfloat16)
+
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", observe)
+    layer._full_sdpa(q, k, v, mask, None)          # 64*17*32*4 bytes, far below the default 4 GiB
+    assert "force_fused" not in calls[-1]
+    monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL_AUTO_GIB", "0.0000001")  # ~107 bytes: this chunk is above it
+    layer._full_sdpa(q, k, v, mask, None)
+    assert calls[-1].get("force_fused") is True
+    monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "0")  # forced stock wins at any size
+    layer._full_sdpa(q, k, v, mask, None)
+    assert "force_fused" not in calls[-1]
 
 
 def test_padding_does_not_change_native_cache_or_next_append(monkeypatch):
@@ -91,7 +120,7 @@ def test_padding_does_not_change_native_cache_or_next_append(monkeypatch):
     chunks = [mx.random.normal((1, n, 32)).astype(mx.bfloat16) for n in (17, 1)]
     saved = []
     for enabled in (False, True):
-        layer._padded_prefill = enabled
+        monkeypatch.setenv("VMLX_NAIVE_PADDED_PREFILL", "1" if enabled else "0")
         cache = CacheList(KVCache(), KVCache())
         for chunk in chunks:
             # This fixture remains below top-k, so provide the same causal

@@ -24,7 +24,7 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from vmlx_engine.utils.naive_prefill_policy import naive_padded_prefill_requested
+from vmlx_engine.utils.naive_prefill_policy import naive_use_padded_prefill
 
 from .base import BaseModelArgs, create_attention_mask
 from .cache import CacheList, KVCache, RotatingKVCache
@@ -163,17 +163,19 @@ class Attention(nn.Module):
         sink = a.add_swa_attention_sink_bias if is_swa else a.add_full_attention_sink_bias
         self.attention_sink_bias = mx.zeros((self.n_heads,)) if sink else None
         self.indexer = None if is_swa else Indexer(a)
-        self._padded_prefill = naive_padded_prefill_requested()
 
     def _full_sdpa(self, q, k, v, mask, sinks):
         # MLX's full fused kernel requires equal Q/V head widths. Native
         # 192/128 attention otherwise materializes a history-sized score
         # tensor. Zero-padding V preserves QK, scale, mask and softmax;
         # discard only the added output coordinates. The fused reduction is
-        # numerically different, so this opt-in has its own cache identity.
+        # numerically different, so the policy is part of the cache identity.
+        # Default "auto": stock while the score tensor fits 4 GiB, padded above
+        # (stock materialized ~11 GB at 22.5k history and the admission guard
+        # refused every prompt > ~20k). utils/naive_prefill_policy.py.
         if (
-            self._padded_prefill
-            and q.shape[2] > 8
+            q.shape[2] > 8
+            and naive_use_padded_prefill(q.shape[1], q.shape[2], k.shape[2])
             and q.shape[-1] == k.shape[-1] == 192
             and v.shape[-1] == 128
             and q.dtype in (mx.bfloat16, mx.float16)

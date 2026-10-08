@@ -163,13 +163,11 @@ def _resolve_runtime_cache_fingerprint() -> str:
     glm_video_mode = glm_video_temporal_mode()
     if glm_video_mode != "native_pairs":
         parts.append(f"glm_video_temporal_v1={glm_video_mode!r}")
-    from .utils.naive_prefill_policy import (
-        NAIVE_PADDED_PREFILL_IDENTITY,
-        naive_padded_prefill_requested,
-    )
+    from .utils.naive_prefill_policy import naive_padded_prefill_identity
 
-    if naive_padded_prefill_requested():
-        parts.append(NAIVE_PADDED_PREFILL_IDENTITY)
+    naive_prefill = naive_padded_prefill_identity()
+    if naive_prefill:
+        parts.append(naive_prefill)
     for package in ("jang", "mlx", "mlx-metal", "mlx-lm", "mlx-vlm"):
         try:
             version = importlib.metadata.version(package)

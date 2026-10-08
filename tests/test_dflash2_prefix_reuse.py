@@ -227,95 +227,114 @@ class TestDescribeMisses:
 
 
 class TestRotatingCacheResumeMath:
-    """The resume path force-sets ``cache.offset`` to the absolute
-    conversation position on a fresh drafter RotatingKVCache. Upstream sizes
-    physical buffer growth from that logical offset, so a resume at 14k into
-    a 2047-slot window computed a negative ``mx.zeros`` dimension and the
-    first 1-token update after an accepted==0 verify cycle died with
-    ``[full] Negative dimensions not allowed`` (live: turn 3 of the qwen 4D
-    matrix, transient because acceptance rarely hits zero inside the
-    under-filled window). The patch keys growth and the returned view on the
-    physical fill; every assertion here runs the REAL mlx_lm cache class."""
+    """The resume path rebuilds an EMPTY drafter RotatingKVCache at the
+    absolute conversation position (drafter RoPE and the session splice/trim
+    read that offset). Upstream reads ``offset`` as the physical fill, so a
+    forced offset (a) sized growth negatively at 14k into a 2047 window
+    (``[full] Negative dimensions not allowed``, qwen 4D matrix turn 3) and
+    (b) fed the drafter up to step-1 = 255 zero K/V rows after any 1-row
+    update (returned view ``keys[:offset]`` and ``_temporal_order`` reading
+    ``_idx < offset`` as wrapped; audit 2026-10-07/08). Rebased caches must
+    behave exactly like a natural cache that started at 0. Every assertion
+    runs the REAL mlx_lm cache class."""
 
-    def _patched_cache(self, max_size=31, keep=0, step=8):
+    def _caches(self, base, max_size=31, step=8):
         import mlx.core as mx
         from mlx_lm.models.cache import RotatingKVCache
 
-        from vmlx_engine.dflash2_runtime import _patch_rotating_cache_resume_math
+        from vmlx_engine.dflash2_runtime import _rebase_drafter_cache
 
-        _patch_rotating_cache_resume_math()
-        c = RotatingKVCache(max_size=max_size, keep=keep)
-        c.step = step
-        return mx, c
+        natural = RotatingKVCache(max_size=max_size, keep=0)
+        natural.step = step
+        rebased = RotatingKVCache(max_size=max_size, keep=0)
+        rebased.step = step
+        _rebase_drafter_cache([rebased], base)
+        return mx, natural, rebased
 
-    def _tok(self, mx, value, dims=(1, 2, 1, 4)):
-        return mx.full(dims, value, dtype=mx.float32)
+    @staticmethod
+    def _rows(mx, start, count):
+        return mx.arange(start, start + count, dtype=mx.float32).reshape(1, 1, count, 1)
 
-    def test_forced_offset_short_delta_survives_single_token_updates(self):
-        mx, c = self._patched_cache()
-        # Resume: fresh cache, forced absolute offset far past the window.
-        c.offset = 1000
-        # Short delta (< window) lands via the concat path.
-        delta = mx.zeros((1, 2, 5, 4), dtype=mx.float32)
-        c.update_and_fetch(delta, delta)
-        assert c.keys.shape[2] == 5
-        # The crash site: 1-token updates while the window is under-filled.
+    # Drafter-shaped sequence: multi-row context appends (concat path) mixed
+    # with 1-row appends (in-place path, a cycle that accepted nothing).
+    SEQUENCE = (5, 1, 6, 1, 1, 9, 1, 40, 1, 3, 1, 1, 1, 1, 12)
+
+    @pytest.mark.parametrize("base", [7, 500, 3000, 14000])
+    def test_rebased_cache_returns_exactly_the_natural_rows(self, base):
+        mx, natural, rebased = self._caches(base)
+        start = 1.0
+        for size in self.SEQUENCE:
+            x = self._rows(mx, start, size)
+            start += size
+            want, _ = natural.update_and_fetch(x, x)
+            got, _ = rebased.update_and_fetch(x, x)
+            assert got.shape == want.shape
+            assert bool(mx.all(got == want))
+            assert int((got == 0).sum()) == 0
+            assert rebased.offset == natural.offset + base
+
+    @pytest.mark.parametrize("base", [7, 3000])
+    def test_rebased_cache_trim_matches_natural(self, base):
+        """dflash ``_trim_recent_cache`` calls ``_temporal_order`` and edits
+        ``offset`` directly; the rebased cache must stay row-identical."""
+        from dflash.model_mlx import _trim_recent_cache
+
+        mx, natural, rebased = self._caches(base)
+        start = 1.0
+        for size, trim in ((9, 2), (1, 1), (6, 3), (1, 0), (40, 5), (1, 1), (4, 2)):
+            x = self._rows(mx, start, size)
+            start += size
+            natural.update_and_fetch(x, x)
+            rebased.update_and_fetch(x, x)
+            _trim_recent_cache([natural], trim)
+            _trim_recent_cache([rebased], trim)
+            want, _ = natural.state
+            got, _ = rebased.state
+            assert bool(mx.all(got == want)) and got.shape == want.shape
+            assert rebased.offset == natural.offset + base
+
+    def test_meta_state_round_trip_keeps_the_base(self):
+        """Session clones and the SSD tier rebuild caches through meta_state."""
+        from mlx_lm.models.cache import RotatingKVCache
+
+        mx, _, rebased = self._caches(3000)
+        x = self._rows(mx, 1.0, 5)
+        rebased.update_and_fetch(x, x)
+        clone = RotatingKVCache(max_size=31, keep=0)
+        clone.state = rebased.state
+        clone.meta_state = rebased.meta_state
+        assert clone.offset == rebased.offset and clone.__dict__.get("_vmlx_base") == 3000
+        y = self._rows(mx, 6.0, 1)
+        want, _ = rebased.update_and_fetch(y, y)
+        got, _ = clone.update_and_fetch(y, y)
+        assert bool(mx.all(got == want)) and got.shape == want.shape
+        plain = RotatingKVCache(max_size=31, keep=0)
+        plain.meta_state = ("0", "31", "4", "4")      # upstream 4-field meta: no base
+        assert plain.__dict__.get("_vmlx_base") == 0
+
+    def test_forced_offset_far_past_window_survives_single_row_updates(self):
+        """The original crash shape: 14k into a 2047 window, short delta, then
+        1-row updates while the window is under-filled."""
+        mx, natural, rebased = self._caches(14000, max_size=2047, step=256)
+        x = self._rows(mx, 1.0, 5)
+        rebased.update_and_fetch(x, x)
+        natural.update_and_fetch(x, x)
+        for i in range(300):
+            t = self._rows(mx, 6.0 + i, 1)
+            got, _ = rebased.update_and_fetch(t, t)
+            want, _ = natural.update_and_fetch(t, t)
+            mx.eval(got, want)
+        assert bool(mx.all(got == want)) and got.shape == want.shape
+
+    def test_unrebased_cache_runs_upstream_code(self):
+        mx, natural, _ = self._caches(1)
         for i in range(40):
-            t = self._tok(mx, float(i + 1))
-            k, v = c.update_and_fetch(t, t)
-            mx.eval(k, v)
-        assert c.keys.shape[2] <= 31 + c.step
-
-    def test_forced_offset_growth_has_no_mid_buffer_gap(self):
-        mx, c = self._patched_cache()
-        c.offset = 500
-        seed = mx.zeros((1, 2, 3, 4), dtype=mx.float32)
-        c.update_and_fetch(seed, seed)
-        # Write distinct values; the returned view must end with exactly the
-        # written sequence (no zero gap from a premature re-grow).
-        for i in range(10):
-            t = self._tok(mx, float(i + 1))
-            k, _ = c.update_and_fetch(t, t)
-        got = [float(k[0, 0, j, 0]) for j in range(k.shape[2])]
-        assert got[:3] == [0.0, 0.0, 0.0]
-        assert got[3:] == [float(i + 1) for i in range(10)]
-
-    def test_forced_offset_returned_view_excludes_unwritten_tail(self):
-        mx, c = self._patched_cache(step=8)
-        c.offset = 999
-        seed = mx.zeros((1, 2, 2, 4), dtype=mx.float32)
-        c.update_and_fetch(seed, seed)
-        t = self._tok(mx, 7.0)
-        k, v = c.update_and_fetch(t, t)
-        # Buffer grew to 2+8=10 wide, but only 3 positions are written.
-        assert k.shape[2] == 3
-        assert float(k[0, 0, 2, 0]) == 7.0
-
-    def test_normal_flow_semantics_unchanged(self):
-        mx, c = self._patched_cache(max_size=15, step=4)
-        # Pure upstream flow: no forced offset. Grow, fill, rotate.
-        for i in range(40):
-            t = self._tok(mx, float(i + 1))
-            k, v = c.update_and_fetch(t, t)
-            if c.offset < 15:
-                # While under the window the view is exactly the history.
-                assert k.shape[2] == c.offset
-        assert c.keys.shape[2] == 15
-        assert c.offset == 40
-        # Rotation is active: the most recent token is present in the buffer.
-        vals = [float(c.keys[0, 0, j, 0]) for j in range(15)]
-        assert 40.0 in vals
-
-    def test_delta_at_least_window_remains_immune(self):
-        mx, c = self._patched_cache(max_size=15, step=4)
-        c.offset = 2000
-        big = mx.zeros((1, 2, 20, 4), dtype=mx.float32)
-        c.update_and_fetch(big, big)
-        for i in range(10):
-            t = self._tok(mx, float(i + 1))
-            k, v = c.update_and_fetch(t, t)
-            mx.eval(k, v)
-        assert c.keys.shape[2] >= 15
+            t = self._rows(mx, float(i + 1), 1)
+            k, _ = natural.update_and_fetch(t, t)
+            if natural.offset < 31:
+                assert k.shape[2] == natural.offset
+        assert natural.keys.shape[2] == 31 and natural.offset == 40
+        assert "_vmlx_base" not in natural.__dict__
 
     def test_patch_is_idempotent(self):
         from vmlx_engine.dflash2_runtime import (

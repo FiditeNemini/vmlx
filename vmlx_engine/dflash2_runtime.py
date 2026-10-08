@@ -87,90 +87,95 @@ def _prefix_reuse_enabled() -> bool:
 
 _ROTATING_CACHE_MATH_PATCHED = False
 
+# Methods of mlx-lm RotatingKVCache that read ``self.offset`` as the PHYSICAL
+# token count of the buffer (growth, wrap detection, returned view, trim).
+_ROTATING_LOCAL_METHODS = (
+    "update_and_fetch", "_temporal_order", "size", "is_trimmable", "trim", "make_mask",
+)
+
 
 def _patch_rotating_cache_resume_math() -> None:
-    """Make RotatingKVCache tolerate a logical offset past its window.
+    """Let a resumed drafter RotatingKVCache keep an ABSOLUTE offset.
 
-    The resume path below rebuilds a fresh drafter cache and force-sets
-    ``cache.offset`` to the absolute conversation position (rope needs
-    absolute positions), which upstream never anticipates: its
-    ``_update_in_place`` sizes physical buffer growth from the LOGICAL
-    offset —
+    The resume path rebuilds a fresh (empty) drafter cache whose ``offset``
+    must stay the absolute conversation position: the drafter's RoPE reads it,
+    and the session splice / per-cycle trim / exit checkpoint compare it with
+    the target's absolute length. Upstream RotatingKVCache, however, reads
+    ``offset`` as the physical fill: growth size (``max_size - offset``: a
+    negative ``mx.zeros`` dimension at 14k into a 2047 window), the returned
+    view (``keys[:offset]``) and wrap detection in ``_temporal_order``
+    (``_idx < offset`` == "wrapped"). The first version of this patch fixed
+    only the growth size; the other two kept feeding the drafter up to
+    ``step - 1`` = 255 ZERO K/V rows after any 1-row update (a verify cycle
+    that accepted nothing) on every follow-up that rebuilt its drafter cache.
+    Output stayed correct (lossless verify), acceptance did not (audit
+    2026-10-07; the Swift port found the same in e54e7388).
 
-        new_size = min(self.step, self.max_size - self.offset)
-
-    — so a resume at 14k tokens into a 2047-slot sliding window computes a
-    negative size, and the first 1-token update after an accepted==0 verify
-    cycle dies with ``[full] Negative dimensions not allowed``. A delta
-    >= the window is immune (the concat path fills the buffer to max_size
-    and the growth branch never runs again), which is why only short
-    follow-up turns on a resumed conversation crashed.
-
-    Three corrections, each a no-op whenever offset == physical fill (every
-    upstream flow): growth is sized from physical fill, the write index is
-    the physical fill, and the returned view is sliced to the written region
-    while the buffer is still below its window.
+    Fix: a rebuilt cache carries ``_vmlx_base`` (the absolute position of its
+    first physical row, set by ``_rebase_drafter_cache``). The upstream methods
+    that treat ``offset`` as the fill run on ``offset - base``; everything
+    outside them sees the absolute offset. A cache without a base (every
+    upstream flow) runs the unmodified upstream code. ``meta_state`` carries
+    the base so clones and the RAM/SSD session tiers keep it.
     """
     global _ROTATING_CACHE_MATH_PATCHED
     if _ROTATING_CACHE_MATH_PATCHED:
         return
     from mlx_lm.models.cache import RotatingKVCache
 
-    import mlx.core as mx
+    def _localized(original):
+        def method(self, *args, **kwargs):
+            base = self.__dict__.get("_vmlx_base", 0)
+            if not base or self.__dict__.get("_vmlx_localized"):
+                return original(self, *args, **kwargs)
+            self._vmlx_localized = True
+            self.offset -= base
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                self.offset += base
+                self._vmlx_localized = False
 
-    def _update_in_place(self, keys, values):
-        B, n_kv_heads, S, k_head_dim = keys.shape
-        filled = 0 if self.keys is None else self.keys.shape[2]
-        # Growth keys on the WRITE INDEX reaching the physical end — in every
-        # upstream flow offset == _idx while growing, so this is the same
-        # branch; with a forced offset it is the only correct signal (offset
-        # stays permanently past the window, and re-growing before _idx
-        # catches up would leave an unwritten gap mid-buffer).
-        if self.keys is None or (self._idx >= filled and filled < self.max_size):
-            v_head_dim = values.shape[3]
-            new_size = min(self.step, self.max_size - filled)
-            k_shape = (B, n_kv_heads, new_size, k_head_dim)
-            v_shape = (B, n_kv_heads, new_size, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
-            if self.keys is not None:
-                self.keys = mx.concatenate([self.keys, new_k], axis=2)
-                self.values = mx.concatenate([self.values, new_v], axis=2)
-            else:
-                self.keys, self.values = new_k, new_v
-            self._idx = filled
+        return method
 
-        trim_size = self.keys.shape[2] - self.max_size
-        if trim_size > 0:
-            self.keys = self._trim(trim_size, self.keys)
-            self.values = self._trim(trim_size, self.values)
-            self._idx = self.max_size
+    for name in _ROTATING_LOCAL_METHODS:
+        setattr(RotatingKVCache, name, _localized(getattr(RotatingKVCache, name)))
 
-        if self._idx == self.max_size:
-            self._idx = self.keep
+    state = RotatingKVCache.state
+    RotatingKVCache.state = property(_localized(state.fget), state.fset)
 
-        self.keys[..., self._idx : self._idx + S, :] = keys
-        self.values[..., self._idx : self._idx + S, :] = values
-        self.offset += S
-        self._idx += S
+    meta = RotatingKVCache.meta_state
 
-        if self.offset < self.max_size:
-            return (
-                self.keys[..., : self.offset, :],
-                self.values[..., : self.offset, :],
-            )
-        if self.keys.shape[2] < self.max_size:
-            # Force-set offset past the window with the buffer still
-            # growing: the valid region is exactly what has been written.
-            return (
-                self.keys[..., : self._idx, :],
-                self.values[..., : self._idx, :],
-            )
-        return self.keys, self.values
+    def _meta_get(self):
+        values = tuple(meta.fget(self))
+        base = self.__dict__.get("_vmlx_base", 0)
+        return values + (str(base),) if base else values
 
-    RotatingKVCache._update_in_place = _update_in_place
+    def _meta_set(self, v):
+        v = tuple(v)
+        meta.fset(self, v[:4])
+        self._vmlx_base = int(v[4]) if len(v) > 4 else 0
+
+    RotatingKVCache.meta_state = property(_meta_get, _meta_set)
     _ROTATING_CACHE_MATH_PATCHED = True
-    logger.info("DFlash2: RotatingKVCache resume math patch installed")
+    logger.info("DFlash2: RotatingKVCache absolute-offset resume patch installed")
+
+
+def _rebase_drafter_cache(cache: list, offset: int) -> None:
+    """Start EMPTY drafter caches at absolute position ``offset``.
+
+    Rotating layers record it as their base, so their buffers stay physical
+    from row 0 (no zero rows). Other layer types keep the historical forced
+    offset (no shipped drafter has one: every bundled dflash2 is all-sliding;
+    ISSUES I-38 notes the KVCache case).
+    """
+    from mlx_lm.models.cache import RotatingKVCache
+
+    _patch_rotating_cache_resume_math()
+    for layer in cache:
+        if isinstance(layer, RotatingKVCache) and layer.keys is None:
+            layer._vmlx_base = int(offset)
+        layer.offset = int(offset)
 
 
 class _TargetAdapter:
@@ -873,6 +878,7 @@ def _stream_generate_resumable(
                     runtime, adapter, delta, target_cache, hidden_limit, prefill_step_size
                 )
             draft_spliced = False
+            draft_rebuild = None
             if stored_draft_cache is not None and hidden.shape[1] == delta.size:
                 gap_arr = resume.get("draft_hidden_gap") if resume else None
                 gap_len = int(gap_arr.shape[1]) if gap_arr is not None else 0
@@ -885,16 +891,16 @@ def _stream_generate_resumable(
                     draft_cache = stored_draft_cache
                     draft_spliced = True
             if not draft_spliced:
-                # The forced absolute offset below is the state upstream's
-                # RotatingKVCache growth math cannot represent; install the
-                # resume-math patch before creating it.
+                # Fresh drafter cache at an absolute offset: rotating layers
+                # keep it as a base so their buffers stay physical (see
+                # _patch_rotating_cache_resume_math).
                 _patch_rotating_cache_resume_math()
                 draft_cache = runtime.make_prompt_cache(draft)
                 hidden, draft_offset = _rebuild_draft_hidden(
                     hidden, resume, cache_len, int(delta.size), hidden_offset, hidden_limit
                 )
-                for cache in draft_cache:
-                    cache.offset = draft_offset
+                _rebase_drafter_cache(draft_cache, draft_offset)
+                draft_rebuild = (int(draft_offset), int(hidden.shape[1]))
         mx.eval(logits, hidden)
         prefill_elapsed = time.perf_counter() - tic
         _prefill_usage = {
@@ -914,7 +920,10 @@ def _stream_generate_resumable(
                 cache_len,
                 len(prompt_list),
                 int(delta.size),
-                "spliced" if draft_cache is stored_draft_cache else "rebuilt",
+                "spliced" if draft_cache is stored_draft_cache else (
+                    "rebuilt at %d from %d context rows" % draft_rebuild
+                    if draft_rebuild is not None else "rebuilt"
+                ),
                 prefill_elapsed,
             )
 

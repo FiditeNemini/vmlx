@@ -154,14 +154,16 @@ def test_legacy_partial_suffix_is_not_certified_as_full_draft_context():
     assert state['draft_context'] is None
 
 
-def test_v2_schema_clears_legacy_v1_entries(tmp_path):
-    """v1 entries were written while snapshots aliased live GDN state: never read them, clear them at startup."""
+@pytest.mark.parametrize("legacy", ["dflash2_session_v1", "dflash2_session_v2"])
+def test_v3_schema_clears_legacy_entries(tmp_path, legacy):
+    """v1 entries were written while snapshots aliased live GDN state; v2 drafter caches rebuilt on resume could hold
+    zero K/V rows (forced absolute offset). Never read them, clear them at startup."""
     import mlx.core as mx
     from vmlx_engine.dflash2_session_disk import DFlash2SessionSSD, SCHEMA
     from vmlx_engine.utils.omni_session_disk_store import OmniSessionDiskStore
 
-    assert SCHEMA == "dflash2_session_v2"
-    old = OmniSessionDiskStore(root=tmp_path, model_key="m", max_size_bytes=1 << 30, schema="dflash2_session_v1")
+    assert SCHEMA == "dflash2_session_v3"
+    old = OmniSessionDiskStore(root=tmp_path, model_key="m", max_size_bytes=1 << 30, schema=legacy)
     old.save("sig", lambda tmp: mx.save_safetensors(str(tmp), {"a": mx.ones((4,))}, {"dflash2": "{}"}))
     old.close()
     assert any(old.directory.glob("*.safetensors"))

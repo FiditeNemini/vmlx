@@ -69,8 +69,11 @@ logger = logging.getLogger(__name__)
 # aliased the live GatedDeltaNet state (recurrent state advanced past the cut;
 # restores changed answers -- dflash2_runtime._clone_cache_shells). v1 also had
 # no rope_delta metadata. Never read v1; its namespace is cleared at startup.
-SCHEMA = "dflash2_session_v2"
-LEGACY_SCHEMAS = ("dflash2_session_v1",)
+# v3 (2026-10-08): v2 drafter caches rebuilt on resume were written with a
+# forced absolute offset over a physical buffer and could hold up to 255 zero
+# K/V rows (dflash2_runtime._patch_rotating_cache_resume_math). Never read v2.
+SCHEMA = "dflash2_session_v3"
+LEGACY_SCHEMAS = ("dflash2_session_v1", "dflash2_session_v2")
 
 
 def _token_digest(tokens: list[int]) -> str:

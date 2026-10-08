@@ -20,13 +20,15 @@ TAIL_SPLIT = _producer_binary_flag("JANGH_TAIL_SPLIT", "1")
 # prefill chunk below the limit runs the gather kernels (fp32 weighted accumulate) instead of the
 # sorted NAX path, which is a different (both exact-gated) rounding path for stored KV.
 DECODE_MAX_TOKENS = os.environ.get("JANGH_DECODE_MAX_TOKENS", "").strip()
-# GLM-5.3 JANGH2 (E=288, D=4096, I=2048, k=8, bf16): the glm5_next loader can opt its modules into the expert-tile NAX
-# prefill with the fused Hadamard-32 output epilogue (JANGH_GLM_FUSED_TILES=1). Served A/B/A/B on M5 Max / MLX 0.32.3,
-# 2026-10-04 (fresh server per arm, 90 s cool-downs, ~5.1k-token prompts): fused 402.7 / 406.1 vs host-rotation
-# 343.2 / 370.8 tok/s prefill (1.133x), decode 1.017x, greedy 400-char text byte-identical across 16 rounds. A later
-# default/control pair on the warmed box was inconclusive (fused 405->364 within one arm vs control 386), so the
-# default stays OFF until a rested A/B/A/B confirms it; the path, its kernel witness log and tests are in place.
-GLM_FUSED_TILES = _producer_binary_flag("JANGH_GLM_FUSED_TILES", "0")
+# GLM-5.3 JANGH2 (E=288, D=4096, I=2048, k=8, bf16): the glm5_next loader opts its modules into the expert-tile NAX
+# prefill with the fused Hadamard-32 output epilogue (instead of host mx.hadamard_transform + casts). DEFAULT ON since
+# 2026-10-07: rested, clock-logged A/B, 1.6.76 bundled python, app argv, fresh evicted server per arm, alternating order,
+# per-size clock windows: cold 32k prefill 258.5 / 249.0 tok/s fused (1,358 / 1,462 MHz) vs 175.1 control (1,547 MHz,
+# cool) = +42-48 %; 2k / 8k at parity (383-395 / 347-377 vs 371-422 / 361-373); decode unchanged (25.6-26.2 vs
+# 25.8-26.4); greedy text byte-identical in every arm (10 anatomy texts + two 2,000-token runs). The 2026-10-04 pair
+# (1.133x at ~5.1k tokens) agreed; the later "inconclusive" warm-box pair was heat drift. JANGH_GLM_FUSED_TILES=0
+# reverts to host rotation. Part of the runtime identity, so flipping it changes the persisted-state namespace.
+GLM_FUSED_TILES = _producer_binary_flag("JANGH_GLM_FUSED_TILES", "1")
 # Measured 2026-10-04 on M5 Max / MLX 0.32.3 for qwen4_exp (D=2560, I=640, E=512, k=10, JANGH 4/6-bit),
 # jangh_crossover_bench.py, interleaved A/B/A/B, medians of 14 rounds: the gather decode path wins
 # through 96 tokens and the sorted NAX path from 128.

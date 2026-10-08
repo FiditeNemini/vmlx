@@ -118,11 +118,10 @@ class Model(nn.Module):
             from ...jangh.runtime_identity import GLM_FUSED_TILES
 
             install_jangh(self, tq_config)
-            # Opt-in fused prefill for this geometry: expert-tile NAX gate/up with the Hadamard-32 output
-            # epilogue (served A/B/A/B 2026-10-04: prefill 1.133x, decode 1.017x, greedy text identical; a later
-            # warm-box pair was inconclusive, so the default stays off — see runtime_identity.GLM_FUSED_TILES).
-            # JANGH_GLM_FUSED_TILES=1 arms it; switch._use_expert_tiles still checks the exact shapes, dtype and
-            # NAX availability per call, so a non-qualifying module falls back; a one-shot witness log names the path.
+            # Fused prefill for this geometry (DEFAULT ON, see runtime_identity.GLM_FUSED_TILES for the A/B): expert-tile
+            # NAX gate/up with the Hadamard-32 output epilogue. JANGH_GLM_FUSED_TILES=0 reverts to host rotation;
+            # switch._use_expert_tiles still checks the exact shapes, dtype and NAX availability per call, so a
+            # non-qualifying module falls back; a one-shot witness log names the path that ran.
             if GLM_FUSED_TILES == "1":
                 armed = 0
                 for _path, mod in self.named_modules():
@@ -130,7 +129,7 @@ class Model(nn.Module):
                         mod.use_expert_tiles = True
                         mod.use_gateup_h32 = True
                         armed += 1
-                logger.info("glm5_next: %d JANGH modules opted into expert-tile + H32 prefill (JANGH_GLM_FUSED_TILES=1)", armed)
+                logger.info("glm5_next: %d JANGH modules opted into expert-tile + H32 prefill (JANGH_GLM_FUSED_TILES=%s)", armed, GLM_FUSED_TILES)
 
     def get_input_embeddings(
         self,

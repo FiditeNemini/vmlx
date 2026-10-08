@@ -15,7 +15,7 @@ FLAGS = {
     "QWEN4_PREFILL_FUSED": "1",
     "WEIGHTED_UNSORT": "0",
     "TAIL_SPLIT": "1",
-    "GLM_FUSED_TILES": "0",
+    "GLM_FUSED_TILES": "1",  # default ON since 2026-10-07 (rested clocked A/B, runtime_identity comment)
 }
 
 

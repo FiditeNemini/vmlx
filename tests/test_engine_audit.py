@@ -6034,7 +6034,11 @@ class TestH4EmptyOutputIsNotAssistantText:
 
 
 class TestH2VideoFrameBypass:
-    """Test that total image count (including video frames) is enforced."""
+    """Every SimpleEngine generate path consults the image limit (including video frames).
+
+    2026-10-07: the limit is ADVISORY (warning), and video frames are PLANNED to the per-video cap in
+    _prepare_video like the batched frame fallback. The old refusal returned HTTP 400 for a 20 s clip at the
+    default 2 fps on 27B (ISSUES I-33)."""
 
     @staticmethod
     def _read_mllm_source():
@@ -6048,8 +6052,11 @@ class TestH2VideoFrameBypass:
         assert guard_count >= 4, (
             f"Expected max_images_per_request guard in at least 4 places, found {guard_count}"
         )
-        assert source.count("including video frames") >= 4, (
-            "Expected 'including video frames' error message in all 4 generate paths"
+        assert source.count("above the advisory") >= 4, (
+            "Expected the advisory image-limit warning in all 4 generate paths"
+        )
+        assert source.count("frame_cap=_simple_video_frame_cap(") >= 4, (
+            "Expected every SimpleEngine video path to plan frames to the per-video cap"
         )
 
 

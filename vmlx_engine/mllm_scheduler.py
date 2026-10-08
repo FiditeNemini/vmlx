@@ -2815,12 +2815,15 @@ class MLLMScheduler:
         if request_id is None:
             request_id = str(uuid.uuid4())
 
-        # H2: Guard against excessive images causing Metal OOM
+        # H2 was a refusal ("Guard against excessive images causing Metal OOM"),
+        # i.e. a prediction with veto power. ADVISORY now (Eric's rule: estimates
+        # may advise, never refuse); the allocator fails loudly if a request
+        # truly does not fit. Video frames are planned to the per-video cap
+        # before they get here (engine/batched.py frame fallback).
         if images and len(images) > self.config.max_images_per_request:
-            raise ValueError(
-                f"Request contains {len(images)} images, exceeding the limit of "
-                f"{self.config.max_images_per_request}. Reduce image count or increase "
-                f"max_images_per_request in config."
+            logger.warning(
+                "Request carries %d images, above the advisory max_images_per_request=%d; "
+                "attempting it.", len(images), self.config.max_images_per_request,
             )
 
         sampling_params = SamplingParams(

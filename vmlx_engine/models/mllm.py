@@ -4386,6 +4386,13 @@ def save_frames_to_temp(frames: list[np.ndarray]) -> list[str]:
     return paths
 
 
+def _simple_video_frame_cap(kwargs: dict, n_videos: int, n_images: int) -> int:
+    """Per-video frame cap for SimpleEngine: the request's image limit split across its
+    videos, after its own images -- the same split the batched frame fallback uses."""
+    limit = int(kwargs.get("max_images_per_request", 20) or 20)
+    return max(1, (limit - int(n_images)) // max(1, int(n_videos)))
+
+
 # Families whose SimpleEngine video handling routes through sampled frames
 # sent as images. Mirror of the BatchedEngine's _video_frame_fallback_messages
 # family gate (batched.py) minus native-gemma4: qwen3_5's native video tensors
@@ -4983,6 +4990,7 @@ class MLXMultimodalLM:
         fps: float = DEFAULT_FPS,
         max_frames: int = MAX_FRAMES,
         controls: Any = None,
+        frame_cap: int | None = None,
     ) -> list[str]:
         """
         Process video input and extract frames.
@@ -5010,18 +5018,77 @@ class MLXMultimodalLM:
             fps=fps,
             max_frames=max_frames,
         )
-        # Per-request sizing (explicit size or per-frame pixel budget) applies
-        # to the sampled frames before they become image inputs.
-        from ..video_controls import VideoControls, bound_video_frames
+        # Every SimpleEngine video reaches the model as sampled frames sent as
+        # images. Plan them exactly like the batched engine's frame fallback
+        # (engine/batched.py): per-video frame cap (the request's image limit
+        # split across its videos, and video_max_frames), the token budget fit
+        # against the image processor's real per-frame cost, and a 768 px
+        # default long edge. Before this, SimpleEngine kept every sampled frame
+        # at full resolution and then REFUSED the request at the image limit:
+        # a 20 s video at the default 2 fps (40 frames) returned HTTP 400 on
+        # 27B, and the same clip cost ~882 tokens/frame there vs ~292 on the
+        # batched engine (ISSUES I-24, I-33).
+        from ..video_controls import (
+            VideoControls,
+            bound_video_frames,
+            image_pixel_floor,
+            image_token_pixels,
+            plan_fallback_frames,
+            subsample_frames_evenly,
+        )
 
-        if isinstance(controls, VideoControls) and controls.has_pixel_controls:
-            bounds = controls.fallback_bounds(default_long_edge=0, num_frames=len(frames))
-            frames = bound_video_frames(
-                frames,
-                max_long_edge=bounds.max_long_edge,
-                max_pixels=bounds.max_pixels,
-                resize=bounds.resize,
+        controls = controls if isinstance(controls, VideoControls) else VideoControls(fps=fps, max_frames=max_frames)
+        processor = getattr(self, "processor", None)
+        try:
+            planned = controls.with_processor(processor) if processor is not None else controls
+        except Exception:
+            planned = controls
+        image_ceiling = None
+        try:
+            ip = getattr(processor, "image_processor", None) or processor
+            size = getattr(ip, "size", None)
+            image_ceiling = getattr(ip, "max_pixels", None) or (
+                size.get("longest_edge") if isinstance(size, dict) else None
             )
+            image_ceiling = int(image_ceiling) if image_ceiling else None
+        except Exception:
+            image_ceiling = None
+        try:
+            long_edge = max(224, int(os.environ.get("VMLINUX_VIDEO_FALLBACK_MAX_LONG_EDGE", "768")))
+        except (TypeError, ValueError):
+            long_edge = 768
+        sampled = len(frames)
+        shape = getattr(frames[0], "shape", None) if frames else None
+        cap = int(max_frames) if frame_cap is None else min(int(max_frames), int(frame_cap))
+        plan = plan_fallback_frames(
+            planned,
+            frames_available=sampled,
+            frame_cap=max(1, cap),
+            frame_height=int(shape[0]) if shape is not None and len(shape) >= 2 else None,
+            frame_width=int(shape[1]) if shape is not None and len(shape) >= 2 else None,
+            token_pixels=image_token_pixels(processor),
+            pixel_floor=image_pixel_floor(processor),
+            pixel_ceiling=image_ceiling,
+        )
+        frames = subsample_frames_evenly(frames, plan.num_frames)
+        bounds = controls.fallback_bounds(
+            default_long_edge=long_edge,
+            num_frames=len(frames),
+            per_frame_max_pixels=plan.per_frame_max_pixels,
+        )
+        frames = bound_video_frames(
+            frames,
+            max_long_edge=bounds.max_long_edge,
+            max_pixels=bounds.max_pixels,
+            resize=bounds.resize,
+        )
+        logger.info(
+            "SimpleEngine video frame plan: sampled=%d kept=%d frame_cap=%d per_frame_max_pixels=%s "
+            "expected_tokens_per_frame=%s expected_total=%s token_budget=%s met=%s reason=%s",
+            sampled, len(frames), plan.frame_cap, bounds.max_pixels, plan.expected_tokens_per_frame,
+            plan.expected_total, plan.budget if plan.budget is not None else "-",
+            plan.met if plan.met is not None else "-", plan.reason,
+        )
         return save_frames_to_temp(frames)
 
     def _guard_simple_image_prefill(
@@ -5840,6 +5907,7 @@ class MLXMultimodalLM:
                 fps=video_fps,
                 max_frames=video_max_frames,
                 controls=video_controls,
+                frame_cap=_simple_video_frame_cap(kwargs, len(videos), len(images)),
             )
             all_images.extend(frames)
             # Include video params in cache key (pixel controls only when set,
@@ -5851,13 +5919,15 @@ class MLXMultimodalLM:
             )
             logger.info(f"Added {len(frames)} frames from video: {video_path}")
 
-        # Guard against excessive total images (including video frames)
+        # ADVISORY only (Eric's rule: estimates may advise, never refuse). Video
+        # frames are already planned to the per-video cap in _prepare_video; a
+        # request that still carries many images is attempted -- the allocator
+        # fails loudly if it truly does not fit.
         _max_images = kwargs.get("max_images_per_request", 20)
         if len(all_images) > _max_images:
-            raise ValueError(
-                f"Total image count ({len(all_images)}, including video frames) "
-                f"exceeds limit of {_max_images}. Reduce images/videos or increase "
-                f"max_images_per_request."
+            logger.warning(
+                "Request carries %d images (incl. video frames), above the advisory "
+                "max_images_per_request=%d; attempting it.", len(all_images), _max_images,
             )
 
         # Apply chat template if needed
@@ -6074,7 +6144,8 @@ class MLXMultimodalLM:
             all_sources.extend(images)
         for video_path in videos:
             frames = self._prepare_video(
-                video_path, fps=video_fps, max_frames=video_max_frames, controls=video_controls
+                video_path, fps=video_fps, max_frames=video_max_frames, controls=video_controls,
+                frame_cap=_simple_video_frame_cap(kwargs, len(videos), len(images)),
             )
             all_images.extend(frames)
             video_str = video_path if isinstance(video_path, str) else str(video_path)
@@ -6083,13 +6154,15 @@ class MLXMultimodalLM:
                 + _video_pixel_key_suffix(video_controls)
             )
 
-        # Guard against excessive total images (including video frames)
+        # ADVISORY only (Eric's rule: estimates may advise, never refuse). Video
+        # frames are already planned to the per-video cap in _prepare_video; a
+        # request that still carries many images is attempted -- the allocator
+        # fails loudly if it truly does not fit.
         _max_images = kwargs.get("max_images_per_request", 20)
         if len(all_images) > _max_images:
-            raise ValueError(
-                f"Total image count ({len(all_images)}, including video frames) "
-                f"exceeds limit of {_max_images}. Reduce images/videos or increase "
-                f"max_images_per_request."
+            logger.warning(
+                "Request carries %d images (incl. video frames), above the advisory "
+                "max_images_per_request=%d; attempting it.", len(all_images), _max_images,
             )
 
         # Apply chat template
@@ -6295,7 +6368,8 @@ class MLXMultimodalLM:
         video_frame_counts: list[int] = []
         for video_path in videos:
             frames = self._prepare_video(
-                video_path, fps=video_fps, max_frames=video_max_frames, controls=_video_controls
+                video_path, fps=video_fps, max_frames=video_max_frames, controls=_video_controls,
+                frame_cap=_simple_video_frame_cap(kwargs, len(videos), len(prepared_images)),
             )
             all_images.extend(frames)
             video_frame_counts.append(len(frames))
@@ -6318,13 +6392,15 @@ class MLXMultimodalLM:
                 video_frame_counts,
             )
 
-        # Guard against excessive total images (including video frames)
+        # ADVISORY only (Eric's rule: estimates may advise, never refuse). Video
+        # frames are already planned to the per-video cap in _prepare_video; a
+        # request that still carries many images is attempted -- the allocator
+        # fails loudly if it truly does not fit.
         _max_images = kwargs.get("max_images_per_request", 20)
         if len(all_images) > _max_images:
-            raise ValueError(
-                f"Total image count ({len(all_images)}, including video frames) "
-                f"exceeds limit of {_max_images}. Reduce images/videos or increase "
-                f"max_images_per_request."
+            logger.warning(
+                "Request carries %d images (incl. video frames), above the advisory "
+                "max_images_per_request=%d; attempting it.", len(all_images), _max_images,
             )
 
         # Apply chat template
@@ -6762,7 +6838,8 @@ class MLXMultimodalLM:
         video_frame_counts: list[int] = []
         for video_path in videos:
             frames = self._prepare_video(
-                video_path, fps=video_fps, max_frames=video_max_frames, controls=_video_controls
+                video_path, fps=video_fps, max_frames=video_max_frames, controls=_video_controls,
+                frame_cap=_simple_video_frame_cap(kwargs, len(videos), len(prepared_images)),
             )
             all_images.extend(frames)
             video_frame_counts.append(len(frames))
@@ -6784,13 +6861,15 @@ class MLXMultimodalLM:
                 video_frame_counts,
             )
 
-        # Guard against excessive total images (including video frames)
+        # ADVISORY only (Eric's rule: estimates may advise, never refuse). Video
+        # frames are already planned to the per-video cap in _prepare_video; a
+        # request that still carries many images is attempted -- the allocator
+        # fails loudly if it truly does not fit.
         _max_images = kwargs.get("max_images_per_request", 20)
         if len(all_images) > _max_images:
-            raise ValueError(
-                f"Total image count ({len(all_images)}, including video frames) "
-                f"exceeds limit of {_max_images}. Reduce images/videos or increase "
-                f"max_images_per_request."
+            logger.warning(
+                "Request carries %d images (incl. video frames), above the advisory "
+                "max_images_per_request=%d; attempting it.", len(all_images), _max_images,
             )
 
         # Apply chat template

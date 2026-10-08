@@ -3775,8 +3775,29 @@ class MLLMScheduler:
                     # text the finalize flushed) exactly once.
                     _emitted = getattr(request, "_stop_emitted", None)
                     if _emitted is not None:
-                        final_text_delta = detok.text[_emitted:]
-                        request._stop_emitted = len(detok.text)
+                        # finalize() can complete a stop string that was not
+                        # visible during add_token (e.g. a buffered word or
+                        # UTF-8 tail). Apply the same visible-content boundary
+                        # before releasing that tail to either API surface.
+                        final_text = detok.text
+                        in_think = '<think>' in final_text and '</think>' not in final_text.split('<think>')[-1]
+                        search_start = _emitted
+                        last_think_end = final_text.rfind('</think>')
+                        if last_think_end >= 0:
+                            search_start = max(search_start, last_think_end + len('</think>'))
+                        hits = [] if in_think else [
+                            at for stop in request.sampling_params.stop if stop
+                            for at in [final_text.find(stop, search_start)] if at >= 0
+                        ]
+                        if hits:
+                            string_stop_truncate = min(hits)
+                            output.new_text += final_text[_emitted:string_stop_truncate]
+                            finish_reason = output.finish_reason = request.finish_reason = "stop"
+                            request.status = RequestStatus.FINISHED_STOPPED
+                            request._stop_emitted = string_stop_truncate
+                        else:
+                            final_text_delta = detok.text[_emitted:]
+                            request._stop_emitted = len(detok.text)
                 if string_stop_truncate < 0 and final_text_delta:
                     output.new_text += final_text_delta
                 if string_stop_truncate >= 0:

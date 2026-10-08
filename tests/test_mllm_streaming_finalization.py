@@ -550,3 +550,18 @@ async def test_responses_stream_emits_terminal_visible_suffix(monkeypatch, tools
     ]
     assert deltas == text
     assert done == [text]
+
+@pytest.mark.parametrize('stop', [']', 'A]'])
+@pytest.mark.parametrize('finish_reason', ['stop', 'length'])
+def test_stop_completed_by_terminal_detokenizer_flush_is_not_emitted(stop, finish_reason):
+    scheduler = _scheduler('stop-final-tail')
+    scheduler.running['stop-final-tail'].sampling_params.stop = [stop]
+    first, _ = scheduler._process_batch_responses([_response('stop-final-tail', 0)])
+    terminal, finished = scheduler._process_batch_responses([
+        _response('stop-final-tail', 99, finish_reason)
+    ])
+    expected = 'A' if stop == ']' else ''
+    assert ''.join(o.new_text for o in first + terminal) == expected
+    assert terminal[0].output_text == expected
+    assert terminal[0].finish_reason == 'stop'
+    assert finished == {'stop-final-tail'}

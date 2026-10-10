@@ -186,6 +186,12 @@ _LOG = logging.getLogger("vmlx_engine")
 _GLM5_MLA_PATHS_LOGGED: set[str] = set()
 
 
+def mla_qmm_requested() -> bool:
+    """VMLX_GLM5_MLA_QMM=1: absorbed-MLA decode/verify matmuls read kv_b_proj's affine codes (gather_qmm, one matrix per
+    head) instead of the bf16 factors; read per call (in-process A/B)."""
+    return os.environ.get("VMLX_GLM5_MLA_QMM", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def glm5_mla_absorb_enabled() -> bool:
     """Return whether the compact MLA cache is enabled.
 
@@ -1643,6 +1649,44 @@ class MLAAttention(nn.Module):
             mx.eval(self._w_kb_nope, self._w_kb_v)
         return self._w_kb_nope, self._w_kb_v
 
+    def _kb_quant(self):
+        """Per-head kv_b factors as the STORED affine codes (2026-10-10, VMLX_GLM5_MLA_QMM): ((wk, sk, bk), (wv, sv, bv),
+        group_size, bits), rows sliced per head; None when kv_b_proj is not affine-quantized. The bf16 factors of
+        _kb_factors read 2x the bytes of 8-bit codes on every decode step."""
+        kbq = getattr(self, "_kb_q", None)
+        if kbq is None:
+            p = self.kv_b_proj
+            if not hasattr(p, "scales") or getattr(p, "mode", "affine") != "affine":
+                kbq = False
+            else:
+                H, R = self.n_heads, self.qk + self.vd
+                parts = [p.weight, p.scales, getattr(p, "biases", None)]
+                parts = [None if a is None else a.reshape(H, R, a.shape[-1]) for a in parts]
+                cut = lambda lo, hi: tuple(None if a is None else mx.contiguous(a[:, lo:hi]) for a in parts)
+                kbq = (cut(0, self.qk), cut(self.qk, R), int(p.group_size), int(p.bits))
+                mx.eval([a for t in kbq[:2] for a in t if a is not None])
+            self._kb_q = kbq
+        return kbq or None
+
+    def _heads_idx(self, B: int):
+        return mx.tile(mx.arange(self.n_heads, dtype=mx.uint32), (B,))
+
+    def _qmm_q_eff(self, q, kbq):
+        """q (B, H, T, qk) @ W_k (qk, r) per head from the codes: W_k rows are quantized along r (= N), transpose=False."""
+        B, H, T, D = q.shape
+        (w, s, b), _, gs, bits = kbq
+        out = mx.gather_qmm(q.reshape(B * H, T, D), w, s, b, lhs_indices=mx.arange(B * H, dtype=mx.uint32),
+                            rhs_indices=self._heads_idx(B), transpose=False, group_size=gs, bits=bits)
+        return out.reshape(B, H, T, -1)
+
+    def _qmm_values(self, attended, kbq):
+        """attended (B, H, T, r) @ W_v^T per head from the codes: W_v (vd, r) quantized along r (= K), transpose=True."""
+        B, H, T, R = attended.shape
+        _, (w, s, b), gs, bits = kbq
+        out = mx.gather_qmm(attended.reshape(B * H, T, R), w, s, b, lhs_indices=mx.arange(B * H, dtype=mx.uint32),
+                            rhs_indices=self._heads_idx(B), transpose=True, group_size=gs, bits=bits)
+        return out.reshape(B, H, T, -1)
+
     def _gather_absorbed_attention(
         self,
         queries: mx.array,
@@ -1816,8 +1860,13 @@ class MLAAttention(nn.Module):
             )
             return self._materialized_from_latent_attention(q, latent)
 
-        w_k, w_v = self._kb_factors()
-        q_eff = mx.matmul(q, w_k[None].astype(q.dtype))
+        kbq = self._kb_quant() if (T <= 16 and mla_qmm_requested()) else None
+        if kbq is not None:
+            q_eff = self._qmm_q_eff(q, kbq).astype(q.dtype)
+            w_v = None
+        else:
+            w_k, w_v = self._kb_factors()
+            q_eff = mx.matmul(q, w_k[None].astype(q.dtype))
         if small_slab and total <= self.index_topk:
             # speculative-verify slab (2..16 rows): absorbed attention per row, row t attends latent[: past + t + 1]
             # (causal), instead of expanding kv_b over the whole cached context (the prefill path)
@@ -1826,7 +1875,8 @@ class MLAAttention(nn.Module):
             if all(r_ is not None for r_ in rows):
                 self._log_mla_path_once("absorbed-dense-verify-slab", query_tokens=T, total=total)
                 attended = mx.concatenate(rows, axis=2)
-                values = mx.matmul(attended, w_v[None].swapaxes(-1, -2).astype(attended.dtype))
+                values = (self._qmm_values(attended, kbq).astype(attended.dtype) if kbq is not None else
+                          mx.matmul(attended, w_v[None].swapaxes(-1, -2).astype(attended.dtype)))
                 values = values.transpose(0, 2, 1, 3).reshape(B, T, self.n_heads * self.vd)
                 return self.o_proj(values)
         if total <= self.index_topk:
@@ -1889,10 +1939,13 @@ class MLAAttention(nn.Module):
                     valid,
                     past=past,
                 )
-        values = mx.matmul(
-            attended,
-            w_v[None].swapaxes(-1, -2).astype(attended.dtype),
-        )
+        if kbq is not None:
+            values = self._qmm_values(attended, kbq).astype(attended.dtype)
+        else:
+            values = mx.matmul(
+                attended,
+                w_v[None].swapaxes(-1, -2).astype(attended.dtype),
+            )
         values = values.transpose(0, 2, 1, 3).reshape(
             B, T, self.n_heads * self.vd
         )

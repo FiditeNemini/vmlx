@@ -317,7 +317,21 @@ class SingleBatchGenerator:
                 )
                 for layer, state in zip(layers, req.cache)
             )
-        return (plain_kv or native_naive) and not self._needs_affine2_sync(req.cache)
+        # GLM-5.3 (glm5_next): exactly one native KDA or MLA/DSA cache per layer and no speculative states in flight.
+        # KDA state is replaced functionally every step and MLA/DSA appends are graph-ordered like plain KV; the
+        # in-process pipelined loop (glm_dflash2.generate_ar) has run this overlap since 2026-10-10. Qualified by
+        # tests/test_glm5_decode_overlap.py (sparse selection active; length / stop / cancel == synchronous, logprobs
+        # and final state bit-identical). Synchronous evaluation cost ~6 ms per token (served 31 vs 38 tok/s).
+        native_glm = False
+        if not plain_kv and not native_naive and os.environ.get("VMLX_GLM5_DECODE_OVERLAP", "1") != "0" and all(
+            type(layer).__name__ in ("Glm5KDACache", "Glm5MLACache") for layer in req.cache
+        ):
+            from vmlx_engine.models.glm5_next.glm5_next import Glm5KDACache, Glm5MLACache
+
+            native_glm = all(type(layer) in (Glm5KDACache, Glm5MLACache) for layer in req.cache) and not any(
+                getattr(layer, "_speculative_states", None) for layer in req.cache
+            )
+        return (plain_kv or native_naive or native_glm) and not self._needs_affine2_sync(req.cache)
 
     def _submit_on_stream(self, *values):
         with self._stream_context():

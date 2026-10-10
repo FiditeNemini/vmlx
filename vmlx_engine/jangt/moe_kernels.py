@@ -441,8 +441,14 @@ def _tdot3(K, L: int, wr: str, acc: str) -> str:
 def _xload3() -> str:
     return f"""float xt[16];
       {_UNROLL} for (uint i = 0; i < 16u; i++) xt[i] = xp[i];
+      float xm = 0.0f;
+      {_UNROLL} for (uint i = 0; i < 16u; i++) xm = metal::max(xm, metal::abs(xt[i]));
+      // fp16 range guard: the trellis dot runs on half2. A lane whose 16 inputs exceed 1024 in magnitude (Naive-N0.5
+      // expert hidden units reach 1e5+) is scaled by a power of two first and the fp32 partial sums are scaled back;
+      // below 1024 xs = 1 and the arithmetic is unchanged. Raw codes are < 2 in magnitude (all 2^12 states), so 8 products stay < 16384.
+      float xs = xm > 1024.0f ? metal::exp2(-metal::ceil(metal::log2(xm * (1.0f / 1024.0f)))) : 1.0f; float xi = 1.0f / xs;
       half2 xh[8];
-      {_UNROLL} for (uint i = 0; i < 8u; i++) {{ xh[i] = half2(half(xt[2u*i]), half(xt[2u*i+1u])); se += xt[2u*i]; so += xt[2u*i+1u]; }}"""
+      {_UNROLL} for (uint i = 0; i < 8u; i++) {{ xh[i] = half2(half(xt[2u*i] * xs), half(xt[2u*i+1u] * xs)); se += xt[2u*i]; so += xt[2u*i+1u]; }}"""
 
 
 @functools.lru_cache(maxsize=None)
@@ -492,7 +498,7 @@ def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, 
         half2 ag = half2(0.0h), au = half2(0.0h);
         const device uint32_t* wr = wp + r * {W}u; {_tdot3(K, L, "wr", "ag")}
         const device uint32_t* ur = up + r * {W}u; {_tdot3(K, L, "ur", "au")}
-        g0[r] += float(ag.x); g1[r] += float(ag.y); u0[r] += float(au.x); u1[r] += float(au.y);
+        g0[r] += float(ag.x) * xi; g1[r] += float(ag.y) * xi; u0[r] += float(au.x) * xi; u1[r] += float(au.y) * xi;
       }}
       wp += {adv}u; up += {adv}u; xp += 512u;
     }}
@@ -539,7 +545,7 @@ def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: 
         {_UNROLL} for (uint r = 0; r < 4u; r++) {{
           half2 ad = half2(0.0h);
           const device uint32_t* wr = wp + r * {W}u; {_tdot3(K, L, "wr", "ad")}
-          d0[r] += float(ad.x); d1[r] += float(ad.y);
+          d0[r] += float(ad.x) * xi; d1[r] += float(ad.y) * xi;
         }}
         wp += {adv}u; xp += 512u;
       }}

@@ -101,3 +101,18 @@ def test_routing_uses_fused_kernels(monkeypatch):
     n0 = F._OBSERVED["place"]
     mx.eval(hc_place(post, comb, x, s))
     assert F._OBSERVED["place"] == n0 + 1
+
+
+@pytest.mark.parametrize("tok", [2, 4])
+@pytest.mark.parametrize("T", [1, 7, 64, 257])
+def test_mix_multi_token_is_bit_identical(monkeypatch, tok, T):
+    """VMLX_GLM5_MHC_PREFILL_TOK > 1 (tokens per threadgroup, hc_fn loaded once per group) == the one-token kernel,
+    bit for bit, including a tail group (T not a multiple of tok)."""
+    hc, norm = _mods(T + tok)
+    streams = (mx.random.normal((1, T, 4, 4096)) * 2).astype(mx.bfloat16)
+    monkeypatch.setenv("VMLX_GLM5_MHC_PREFILL_TOK", "1")
+    mx.clear_cache(); ref = F.glm5_mhc_mix_norm_prefill(streams, hc, norm); mx.eval(ref)
+    monkeypatch.setenv("VMLX_GLM5_MHC_PREFILL_TOK", str(tok))
+    mx.clear_cache(); got = F.glm5_mhc_mix_norm_prefill(streams, hc, norm); mx.eval(got)
+    for a, b in zip(got, ref):
+        assert bool(mx.array_equal(a, b)), (tok, T)

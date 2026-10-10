@@ -4405,6 +4405,10 @@ _VIDEO_FRAME_FALLBACK_MODEL_TYPES = {
     "step3p7",
     "qwen3_5",
     "qwen3_5_moe",
+    # SimpleEngine (always used by DFlash2 sessions) passes decoded video frames as images; without the placeholder
+    # expansion the GLM template rendered a video slot and the request failed with "GLM image features and
+    # placeholders disagree: tokens=0, features=672" (2026-10-10). The batched engine keeps native video processing.
+    "glm5_next",
 }
 
 

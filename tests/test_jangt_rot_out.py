@@ -56,3 +56,15 @@ def test_routed_unchanged(monkeypatch):
     mx.eval(a, b)
     a_, b_ = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
     assert np.isfinite(a_).all() and np.max(np.abs(a_ - b_)) <= 8e-3 * np.max(np.abs(a_))
+
+
+def test_down_rotation_in_kernel_matches(monkeypatch):
+    """JANGT_DN_ROT_KERNEL=1: the JANGH down kernel's in-kernel Hadamard-32 == h32_rows + plain kernel."""
+    m = _module(11)
+    x, idx = _inputs(3)
+    w = mx.full(idx.shape, 0.25)
+    monkeypatch.setenv("JANGT_DN_ROT_KERNEL", "0"); a = m.routed(x, idx, w)
+    monkeypatch.setenv("JANGT_DN_ROT_KERNEL", "1"); b = m.routed(x, idx, w)
+    mx.eval(a, b)
+    a_, b_ = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
+    assert np.isfinite(b_).all() and np.max(np.abs(a_ - b_)) <= 8e-3 * np.max(np.abs(a_))

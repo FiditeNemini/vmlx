@@ -118,9 +118,12 @@ class JTMixedSwitchGLU(nn.Module):
             return MK.gather_down_weighted_v3(MK.rotate_rows(h, U["sv_dn"], idx2.reshape(-1)), h, idx2, w2, U).astype(out_dtype)
         from vmlx_engine.jangh import kernels as K
         d = self.down_proj
-        hr = h if h_rotated else K.h32_rows(h, mx.float32)
+        # JANGT_DN_ROT_KERNEL=1: the JANGH down kernel rotates each lane pair's 32 inputs itself (one dispatch less);
+        # read per call for in-process A/B
+        in_kernel = not h_rotated and os.environ.get("JANGT_DN_ROT_KERNEL", "0") == "1"
+        hr = h if (h_rotated or in_kernel) else K.h32_rows(h, mx.float32)
         return K.gather_qmv_weighted_down(hr, d.tq2_packed, d.tq2_scales, d._cb, idx2.astype(mx.uint32), w2,
-                                          d.bits, out_dtype)
+                                          d.bits, out_dtype, rotate=in_kernel)
 
     def _jt_mm(self, xs_rot, xs_raw, idx_s, P, plan=None):
         """Expert-sorted JANGT projection: NAX trellis tiles (jangt.prefill) + outlier columns. fp32 out."""

@@ -52,7 +52,7 @@ def test_routed_unchanged(monkeypatch):
     x, idx = _inputs(2)
     w = mx.full(idx.shape, 0.25)
     monkeypatch.setenv("JANGT_ROT_OUT_DECODE", "0"); a = m.routed(x, idx, w)
-    monkeypatch.setenv("JANGT_ROT_OUT_DECODE", "1"); b = m.routed(x, idx, w)
+    monkeypatch.setenv("JANGT_ROT_OUT_DECODE", "1"); b = m.routed(x, idx, w)   # opt-in path
     mx.eval(a, b)
     a_, b_ = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
     assert np.isfinite(a_).all() and np.max(np.abs(a_ - b_)) <= 8e-3 * np.max(np.abs(a_))

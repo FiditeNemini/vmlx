@@ -187,7 +187,7 @@ class JTMixedSwitchGLU(nn.Module):
         if idx2.size < SORT_THRESHOLD:
             # JANGT gate/up feeding a JANGH down: rotate the activations in the gate/up epilogue (one dispatch less)
             ro = (self.gu_fmt == "jangt" and self.dn_fmt != "jangt" and self.I % 32 == 0
-                  and os.environ.get("JANGT_ROT_OUT_DECODE", "1") != "0")
+                  and os.environ.get("JANGT_ROT_OUT_DECODE", "0") == "1")   # measured neutral (-0.6%), off
             y = self._decode_down(self._decode_h(x2, idx2, rot_out=ro), idx2, w2, x.dtype, h_rotated=ro)
         else:
             y = self._prefill(x2, idx2, w2).astype(x.dtype)

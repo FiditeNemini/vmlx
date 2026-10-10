@@ -409,6 +409,10 @@ def pad_rows(U: dict, align_words: int) -> dict:
 _UNROLL = '_Pragma("clang loop unroll(full)")'
 
 
+def _fp16_guard() -> bool:
+    return _os.environ.get("JANGT_FP16_GUARD", "1") != "0"      # read per call: in-process A/B
+
+
 def _lane_geom(K):
     """bits per lane per 512-value block, words advanced per block, words the lane window needs."""
     PL = int(VL.step_offsets(K, 17)[16]) // 2          # bits per lane (8 steps)
@@ -438,7 +442,14 @@ def _tdot3(K, L: int, wr: str, acc: str) -> str:
     return "{ " + ld + " " + " ".join(st) + " }"
 
 
-def _xload3() -> str:
+def _xload3(guard: bool = True) -> str:
+    """guard=False (JANGT_FP16_GUARD=0): the pre-2026-10-10 conversion, kept for A/B only."""
+    if not guard:
+        return f"""float xt[16];
+      {_UNROLL} for (uint i = 0; i < 16u; i++) xt[i] = xp[i];
+      const float xi = 1.0f;
+      half2 xh[8];
+      {_UNROLL} for (uint i = 0; i < 8u; i++) {{ xh[i] = half2(half(xt[2u*i]), half(xt[2u*i+1u])); se += xt[2u*i]; so += xt[2u*i+1u]; }}"""
     return f"""float xt[16];
       {_UNROLL} for (uint i = 0; i < 16u; i++) xt[i] = xp[i];
       float xm = 0.0f;
@@ -452,7 +463,8 @@ def _xload3() -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, limit: float = 0.0, rot_out: bool = False):
+def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, limit: float = 0.0, rot_out: bool = False,
+           guard: bool = True):
     mu, isd = VL.code_stats(L, K); PL, adv, _ = _lane_geom(K)
     # outlier columns: lane j < n_out owns column j for the simdgroup's 4 rows, one simd_sum per row (the first
     # version looped them on lane 0: -21 us per layer, 515 -> 389 GB/s)
@@ -493,7 +505,7 @@ def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, 
     {_UNROLL} for (uint r = 0; r < 4u; r++) {{ g0[r] = 0.0f; g1[r] = 0.0f; u0[r] = 0.0f; u1[r] = 0.0f; }}
     float se = 0.0f, so = 0.0f;
     for (uint k0 = 0; k0 < {kin}u; k0 += 512u) {{
-      {_xload3()}
+      {_xload3(guard)}
       {_UNROLL} for (uint r = 0; r < 4u; r++) {{
         half2 ag = half2(0.0h), au = half2(0.0h);
         const device uint32_t* wr = wp + r * {W}u; {_tdot3(K, L, "wr", "ag")}
@@ -515,11 +527,11 @@ def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, 
     ins = ["xr", "x", "idx", "kslots", "wg", "sg", "wu", "su_"] + (["ocol", "woutg", "woutu"] if n_out else [])
     lim = "" if not limit > 0 else f"_lim{str(float(limit)).replace('.', 'p')}"
     ro = "_ro" if rot_out else ""
-    return mx.fast.metal_kernel(name=f"jt4_gu_k{kin}_n{N}_K{_kname(K)}_o{n_out}_w{W}_{xdt}_{odt}{lim}{ro}", input_names=ins, output_names=["out"], source=src)
+    return mx.fast.metal_kernel(name=f"jt4_gu_k{kin}_n{N}_K{_kname(K)}_o{n_out}_w{W}_{xdt}_{odt}{lim}{ro}{'' if guard else '_ng'}", input_names=ins, output_names=["out"], source=src)
 
 
 @functools.lru_cache(maxsize=None)
-def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: str):
+def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: str, guard: bool = True):
     mu, isd = VL.code_stats(L, K); PL, adv, _ = _lane_geom(K)
     outl_pre = "" if n_out == 0 else f"""
       float od[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -541,7 +553,7 @@ def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: 
       {_UNROLL} for (uint r = 0; r < 4u; r++) {{ d0[r] = 0.0f; d1[r] = 0.0f; }}
       float se = 0.0f, so = 0.0f;
       for (uint k0 = 0; k0 < {kin}u; k0 += 512u) {{
-        {_xload3()}
+        {_xload3(guard)}
         {_UNROLL} for (uint r = 0; r < 4u; r++) {{
           half2 ad = half2(0.0h);
           const device uint32_t* wr = wp + r * {W}u; {_tdot3(K, L, "wr", "ad")}
@@ -559,7 +571,7 @@ def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: 
     if (lane == 0u) {{ {_UNROLL} for (uint r = 0; r < 4u; r++) out[(size_t)t * {N}u + row0 + r] = acc[r]; }}
     """
     ins = ["hr", "h", "idx", "rw", "wd", "sd"] + (["ocol", "wout"] if n_out else [])
-    return mx.fast.metal_kernel(name=f"jt4_dn_k{kin}_n{N}_K{_kname(K)}_o{n_out}_s{kslots}_w{W}_{hdt}", input_names=ins, output_names=["out"], source=src)
+    return mx.fast.metal_kernel(name=f"jt4_dn_k{kin}_n{N}_K{_kname(K)}_o{n_out}_s{kslots}_w{W}_{hdt}{'' if guard else '_ng'}", input_names=ins, output_names=["out"], source=src)
 
 
 def gather_gate_up_swiglu_v3(xr, x, idx, U, out_dtype=mx.bfloat16, limit: float = 0.0, rot_out: bool = False):
@@ -568,7 +580,8 @@ def gather_gate_up_swiglu_v3(xr, x, idx, U, out_dtype=mx.bfloat16, limit: float 
     rot_out = bool(rot_out) and N % 32 == 0
     ins = [xr, x, idx.reshape(-1).astype(mx.uint32), mx.array([k], dtype=mx.uint32), U["gate"]["packed"], U["gate"]["scale"],
            U["up"]["packed"], U["up"]["scale"]] + ([U["gate"]["ocol"], U["gate"]["wout"], U["up"]["wout"]] if n_out else [])
-    kern = _gu_v3(kin, N, U["K"], U["L"], n_out, W, _dt(x), {mx.bfloat16: "bfloat16_t", mx.float16: "half", mx.float32: "float"}[out_dtype], float(limit), rot_out)
+    kern = _gu_v3(kin, N, U["K"], U["L"], n_out, W, _dt(x), {mx.bfloat16: "bfloat16_t", mx.float16: "half", mx.float32: "float"}[out_dtype], float(limit), rot_out,
+                   _fp16_guard())
     if rot_out:
         return kern(inputs=ins, grid=(256, N // 32, T * k), threadgroup=(256, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
     return kern(inputs=ins, grid=(64, N // 8, T * k), threadgroup=(64, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
@@ -578,7 +591,7 @@ def gather_down_weighted_v3(hr, h, idx, rw, U):
     T, k = idx.shape; kin = h.shape[1]; N = U["down"]["scale"].shape[1]; n_out = U["down"]["n_out"]; W = int(U["down"]["packed"].shape[-1])
     ins = [hr, h, idx.reshape(-1).astype(mx.uint32), rw.reshape(-1).astype(mx.float32), U["down"]["packed"], U["down"]["scale"]] + \
           ([U["down"]["ocol"], U["down"]["wout"]] if n_out else [])
-    kern = _down_v3(kin, N, U["K_dn"], U["L"], n_out, k, W, _dt(h))
+    kern = _down_v3(kin, N, U["K_dn"], U["L"], n_out, k, W, _dt(h), _fp16_guard())
     return kern(inputs=ins, grid=(64, N // 8, T), threadgroup=(64, 1, 1), output_shapes=[(T, N)], output_dtypes=[mx.float32])[0]
 
 

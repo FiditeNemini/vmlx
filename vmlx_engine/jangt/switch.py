@@ -122,10 +122,10 @@ class JTMixedSwitchGLU(nn.Module):
         return K.gather_qmv_weighted_down(hr, d.tq2_packed, d.tq2_scales, d._cb, idx2.astype(mx.uint32), w2,
                                           d.bits, out_dtype)
 
-    def _jt_mm(self, xs_rot, xs_raw, idx_s, P):
+    def _jt_mm(self, xs_rot, xs_raw, idx_s, P, plan=None):
         """Expert-sorted JANGT projection: NAX trellis tiles (jangt.prefill) + outlier columns. fp32 out."""
         from vmlx_engine.jangt.prefill import gather_qmm_sorted_jt
-        y = gather_qmm_sorted_jt(xs_rot.astype(mx.bfloat16), P, idx_s).astype(mx.float32)
+        y = gather_qmm_sorted_jt(xs_rot.astype(mx.bfloat16), P, idx_s, plan=plan).astype(mx.float32)
         if P["n_out"]:
             if not hasattr(self, "_wo"):
                 self._wo = {}
@@ -140,19 +140,34 @@ class JTMixedSwitchGLU(nn.Module):
     def _prefill(self, x2, idx2, w2):
         T, k = idx2.shape
         flat = idx2.reshape(-1); order = mx.argsort(flat); idx_s = flat[order].astype(mx.uint32); tok = order // k
+        # expert-aligned tiles (the JANGH prefill schedule): one GPU-side plan per layer, shared by gate/up and down;
+        # a 64-row tile never mixes two experts' rows, so no simdgroup decodes a weight tile it does not use
+        plan = None
+        if EXPERT_TILES and os.environ.get("JANGT_EXPERT_TILES", "1") != "0":      # env read per call: in-process A/B
+            from vmlx_engine.jangh import kernels as JK
+            plan = JK.expert_tile_plan(idx_s, self.E)
+        # JANGT gate/up feeding a JANGH down: the fused pass stores the activations Hadamard-32 rotated (H32 epilogue),
+        # removing the separate h32_rows dispatch; same rounding (bf16 store, fp32 transform, bf16 store)
+        h_rot = False
         if self.gu_fmt == "jangt":
             U = self._unit(); xr = MK.rotate_rows(x2, U["su_gu"])
+            ro = (plan is not None and self.dn_fmt != "jangt" and self.I % 64 == 0 and H32_EPILOGUE
+                  and os.environ.get("JANGT_H32_EPILOGUE", "1") != "0")
             if FUSED_GU_PREFILL and U["gate"]["n_out"] > 0 and U.get("gu_cols") is not None:
                 # one NAX pass: both weight tiles + outlier columns in the epilogue (jangt/prefill.py)
                 from vmlx_engine.jangt.prefill import gather_gate_up_sorted_jt
                 xo = x2[:, U["gu_cols"]].astype(mx.float32)[tok]
-                h_s = gather_gate_up_sorted_jt(xr.astype(mx.bfloat16)[tok], xo, U["gate"], U["up"], idx_s, limit=self.limit).astype(mx.float32)
+                h_s = gather_gate_up_sorted_jt(xr.astype(mx.bfloat16)[tok], xo, U["gate"], U["up"], idx_s, limit=self.limit,
+                                               plan=plan, rotate_output=ro)
+                h_rot = ro
             elif FUSED_GU_PREFILL and U["gate"]["n_out"] == 0:
                 from vmlx_engine.jangt.prefill import gather_qmm_sorted_jt      # no outliers: plain fused SwiGLU pass
-                h_s = gather_qmm_sorted_jt(xr.astype(mx.bfloat16)[tok], U["gate"], idx_s, U["up"], limit=self.limit).astype(mx.float32)
+                h_s = gather_qmm_sorted_jt(xr.astype(mx.bfloat16)[tok], U["gate"], idx_s, U["up"], limit=self.limit,
+                                           plan=plan, rotate_output=ro)
+                h_rot = ro
             else:
                 xs_r, xs_x = xr[tok], x2[tok]
-                g = self._jt_mm(xs_r, xs_x, idx_s, U["gate"]); u = self._jt_mm(xs_r, xs_x, idx_s, U["up"])
+                g = self._jt_mm(xs_r, xs_x, idx_s, U["gate"], plan); u = self._jt_mm(xs_r, xs_x, idx_s, U["up"], plan)
                 if self.limit > 0:
                     g = mx.minimum(g, self.limit); u = mx.clip(u, -self.limit, self.limit)
                 h_s = g * mx.sigmoid(g) * u
@@ -165,12 +180,15 @@ class JTMixedSwitchGLU(nn.Module):
                                       packed_u=upr.tq2_packed, scales_u=upr.tq2_scales, limit=self.limit).astype(mx.float32)
         if self.dn_fmt == "jangt":
             U = self._unit()
-            y_s = self._jt_mm(MK.rotate_rows(h_s, U["sv_dn"], idx_s), h_s, idx_s, U["down"])
+            y_s = self._jt_mm(MK.rotate_rows(h_s, U["sv_dn"], idx_s), h_s, idx_s, U["down"], plan)
         else:
             from vmlx_engine.jangh import kernels as K
             d = self.down_proj
-            y_s = K.gather_qmm_sorted(K.h32_rows(h_s.astype(mx.bfloat16), mx.bfloat16), d.tq2_packed, d.tq2_scales, d._cb,
-                                      idx_s, d.bits)
+            hr = h_s.astype(mx.bfloat16) if h_rot else K.h32_rows(h_s.astype(mx.bfloat16), mx.bfloat16)
+            if plan is not None:
+                y_s = K.gather_qmm_expert_sorted(hr, d.tq2_packed, d.tq2_scales, idx_s, d.bits, plan)
+            else:
+                y_s = K.gather_qmm_sorted(hr, d.tq2_packed, d.tq2_scales, d._cb, idx_s, d.bits)
         if BMM_COMBINE:
             # unsort in the producer dtype (bf16 from JANGH down: half the gather bytes), then the routing-weighted sum
             # as ONE fp32 batched (1 x k) @ (k x D) matmul instead of broadcast-multiply + reduce: 3.6 -> 2.1 ms per
@@ -197,6 +215,8 @@ class JTMixedSwitchGLU(nn.Module):
 ROUND_H_CONTROL = False
 BMM_COMBINE = os.environ.get("JANGT_BMM_COMBINE", "1") != "0"
 FUSED_GU_PREFILL = os.environ.get("JANGT_FUSED_GU_PREFILL", "1") != "0"
+EXPERT_TILES = os.environ.get("JANGT_EXPERT_TILES", "1") != "0"       # expert-aligned prefill tiles (2026-10-10)
+H32_EPILOGUE = os.environ.get("JANGT_H32_EPILOGUE", "1") != "0"       # rotated gate/up store for JANGH downs
 
 
 def contract_key(path: str) -> str:

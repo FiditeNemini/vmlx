@@ -80,35 +80,69 @@ def _impl(K, W: int) -> str:
     return s
 
 
+def _tail_args(expert: bool, h32: bool) -> str:
+    """Trailing template arguments of the expert-aligned schedule (tiles never span two experts: JK.expert_tile_plan)
+    and of the H32 output epilogue (rotate the activations for a JANGH down unit before the store)."""
+    return (", expert_offsets, tile_offsets, meta[3]" if expert else "") + (", scale[0]" if h32 else "")
+
+
+def _tail_inputs(expert: bool, h32: bool) -> list:
+    return (["expert_offsets", "tile_offsets"] if expert else []) + (["scale"] if h32 else [])
+
+
+def _variant(fused: bool, expert: bool, h32: bool) -> str:
+    return f"{'fused' if fused else 'single'}{'_et' if expert else ''}{'_h32' if h32 else ''}"
+
+
 @functools.lru_cache(maxsize=None)
-def _kernel(K, W: int, fused: bool, tname: str):
+def _kernel(K, W: int, fused: bool, tname: str, expert: bool = False, h32: bool = False):
     header = JK._mlx_headers(["steel/gemm/gemm.h", "steel/gemm/nax.h", "steel/gemm/loader.h", "quantized_nax.h"]) + \
         _loader(K, 12, W) + _impl(K, W)
     src = f'''
   constexpr int BK_padded = (64 + 16 / sizeof({tname}));
   threadgroup {tname} Wg[64 * BK_padded];
   threadgroup {tname} Wu[{'64' if fused else '1'} * BK_padded];
-  jt_gather_qmm_nax_K{_tag(K)}<{tname}, 2, {'true' if fused else 'false'}>(
+  jt_gather_qmm_nax_K{_tag(K)}<{tname}, 2, {'true' if fused else 'false'}, {'true' if expert else 'false'}, {'true' if h32 else 'false'}>(
       x, wg, sg, wu, su, indices, y, meta[0], meta[1], meta[2], lim[0], Wg, Wu,
-      threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
+      threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup{_tail_args(expert, h32)});
 '''
-    return mx.fast.metal_kernel(name=f"jt_qmm_nax_K{_tag(K)}_w{W}_{'fused' if fused else 'single'}_{tname}",
-                                input_names=["x", "wg", "sg", "wu", "su", "indices", "meta", "lim"],
+    return mx.fast.metal_kernel(name=f"jt_qmm_nax_K{_tag(K)}_w{W}_{_variant(fused, expert, h32)}_{tname}",
+                                input_names=["x", "wg", "sg", "wu", "su", "indices", "meta", "lim"] + _tail_inputs(expert, h32),
                                 output_names=["y"], header=header, source=src)
 
 
-def gather_qmm_sorted_jt(x, P: dict, idx_sorted, Pu: dict | None = None, limit: float = 0.0):
-    """x (M, K_in) bf16 rows sorted by expert, ROTATED basis; P = unit projection dict (packed (E,N,W), scale (E,N)).
-    Returns (M, N) x.dtype. Outlier columns are NOT included (caller adds them)."""
-    M, Kin = x.shape; E, N, W = P["packed"].shape
+def _pad_idx(idx_sorted):
     idx = idx_sorted.astype(mx.uint32).reshape(-1)
     if idx.size < 8:
         idx = mx.concatenate([idx, mx.broadcast_to(idx[-1:], (8 - idx.size,))])
+    return idx
+
+
+def _launch(M: int, N: int, E: int, plan, rotate_output: bool):
+    """meta, extra inputs and grid for the row-tiled (plan None) or expert-aligned schedule."""
+    if plan is None:
+        if rotate_output:
+            raise ValueError("JANGT H32 output epilogue needs the expert-aligned schedule")
+        return [], (M + 63) // 64, []
+    starts, tiles = plan
+    extra = [starts, tiles] + ([JK._h32_scale()] if rotate_output else [])
+    return [E], (M + 63) // 64 + E, extra
+
+
+def gather_qmm_sorted_jt(x, P: dict, idx_sorted, Pu: dict | None = None, limit: float = 0.0, plan=None,
+                         rotate_output: bool = False):
+    """x (M, K_in) bf16 rows sorted by expert, ROTATED basis; P = unit projection dict (packed (E,N,W), scale (E,N)).
+    Returns (M, N) x.dtype. Outlier columns are NOT included (caller adds them). plan = JK.expert_tile_plan(idx, E):
+    tiles never span two experts (the JANGH prefill schedule). rotate_output (fused bf16 + plan): the activations come
+    back Hadamard-32 rotated, the input basis of a JANGH down unit."""
+    M, Kin = x.shape; E, N, W = P["packed"].shape
+    idx = _pad_idx(idx_sorted)
     fused = Pu is not None
-    k = _kernel(P["K"], W, fused, JK._TNAME[x.dtype])
+    meta_x, gy, extra = _launch(M, N, E, plan, rotate_output)
+    k = _kernel(P["K"], W, fused, JK._TNAME[x.dtype], plan is not None, bool(rotate_output))
     return k(inputs=[x, P["packed"], P["scale"], Pu["packed"] if fused else P["packed"], Pu["scale"] if fused else P["scale"], idx,
-                     mx.array([M, N, Kin], dtype=mx.int32), mx.array([float(limit)], dtype=mx.float32)],
-             grid=(((N + 63) // 64) * 128, (M + 63) // 64, 1), threadgroup=(128, 1, 1),
+                     mx.array([M, N, Kin] + meta_x, dtype=mx.int32), mx.array([float(limit)], dtype=mx.float32)] + extra,
+             grid=(((N + 63) // 64) * 128, gy, 1), threadgroup=(128, 1, 1),
              output_shapes=[(M, N)], output_dtypes=[x.dtype])[0]
 
 
@@ -149,31 +183,33 @@ def _impl_out(K, W: int, NO: int) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _kernel_out(K, W: int, NO: int, tname: str):
+def _kernel_out(K, W: int, NO: int, tname: str, expert: bool = False, h32: bool = False):
     header = JK._mlx_headers(["steel/gemm/gemm.h", "steel/gemm/nax.h", "steel/gemm/loader.h", "quantized_nax.h"]) + \
         _loader(K, 12, W) + _impl_out(K, W, NO)
     src = f"""
   constexpr int BK_padded = (64 + 16 / sizeof({tname}));
   threadgroup {tname} Wg[64 * BK_padded];
   threadgroup {tname} Wu[64 * BK_padded];
-  jt_gather_qmm_nax_out_K{_tag(K)}_n{NO}<{tname}, 2, true>(
+  jt_gather_qmm_nax_out_K{_tag(K)}_n{NO}<{tname}, 2, true, {'true' if expert else 'false'}, {'true' if h32 else 'false'}>(
       x, wg, sg, wu, su, indices, y, meta[0], meta[1], meta[2], lim[0], xo, wog, wou, Wg, Wu,
-      threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
+      threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup{_tail_args(expert, h32)});
 """
-    return mx.fast.metal_kernel(name=f"jt_qmm_nax_out_K{_tag(K)}_w{W}_n{NO}_{tname}",
-                                input_names=["x", "wg", "sg", "wu", "su", "indices", "meta", "lim", "xo", "wog", "wou"],
+    return mx.fast.metal_kernel(name=f"jt_qmm_nax_out_K{_tag(K)}_w{W}_n{NO}_{_variant(True, expert, h32)}_{tname}",
+                                input_names=["x", "wg", "sg", "wu", "su", "indices", "meta", "lim", "xo", "wog", "wou"]
+                                + _tail_inputs(expert, h32),
                                 output_names=["y"], header=header, source=src)
 
 
-def gather_gate_up_sorted_jt(x, xo, Pg: dict, Pu: dict, idx_sorted, limit: float = 0.0):
+def gather_gate_up_sorted_jt(x, xo, Pg: dict, Pu: dict, idx_sorted, limit: float = 0.0, plan=None,
+                             rotate_output: bool = False):
     """h = act(g, u) for expert-sorted rows in ONE NAX pass (act = SwiGLU, clamped at `limit` when > 0 like JANGH tq_act). x (M, D) bf16 ROTATED rows; xo (M, NO) fp32 raw-basis
-    outlier activations (NO = Pg n_out; gate and up share the layer-wide columns). Returns (M, I) bf16."""
+    outlier activations (NO = Pg n_out; gate and up share the layer-wide columns). Returns (M, I) bf16. plan /
+    rotate_output: as gather_qmm_sorted_jt."""
     M, Kin = x.shape; E, N, W = Pg["packed"].shape; NO = int(Pg["n_out"])
-    idx = idx_sorted.astype(mx.uint32).reshape(-1)
-    if idx.size < 8:
-        idx = mx.concatenate([idx, mx.broadcast_to(idx[-1:], (8 - idx.size,))])
-    k = _kernel_out(Pg["K"], W, NO, JK._TNAME[x.dtype])
-    return k(inputs=[x, Pg["packed"], Pg["scale"], Pu["packed"], Pu["scale"], idx, mx.array([M, N, Kin], dtype=mx.int32),
-                     mx.array([float(limit)], dtype=mx.float32), xo.astype(mx.float32), Pg["_wout32"], Pu["_wout32"]],
-             grid=(((N + 63) // 64) * 128, (M + 63) // 64, 1), threadgroup=(128, 1, 1),
+    idx = _pad_idx(idx_sorted)
+    meta_x, gy, extra = _launch(M, N, E, plan, rotate_output)
+    k = _kernel_out(Pg["K"], W, NO, JK._TNAME[x.dtype], plan is not None, bool(rotate_output))
+    return k(inputs=[x, Pg["packed"], Pg["scale"], Pu["packed"], Pu["scale"], idx, mx.array([M, N, Kin] + meta_x, dtype=mx.int32),
+                     mx.array([float(limit)], dtype=mx.float32), xo.astype(mx.float32), Pg["_wout32"], Pu["_wout32"]] + extra,
+             grid=(((N + 63) // 64) * 128, gy, 1), threadgroup=(128, 1, 1),
              output_shapes=[(M, N)], output_dtypes=[x.dtype])[0]

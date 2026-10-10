@@ -308,3 +308,87 @@ def test_prefix_store_byte_cap_evicts_lru():
         assert next(iter(store.entries)) == tuple(range(40, 70))  # the most recent prompt survives
     finally:
         target.close()
+
+
+def _run(model, target, prompt, n, store, **kw):
+    ref, _ = _ar_logits(model, prompt, n)
+    st = SpecStats()
+    got = list(generate_dflash2(target, ScriptedDraft(ref, 4), prompt, n, eos=set(), stats=st, prefix_store=store, **kw))
+    return got, st
+
+
+def test_prefix_disk_tier_restores_after_restart(tmp_path):
+    """SSD tier: a NEW store over the same directory (a restarted server) restores the longest stored prefix from disk
+    and prefills only the suffix; tokens equal a cold run, and the restored state is not shared with the file."""
+    from vmlx_engine.glm_dflash2 import PrefixDiskTier, PrefixStore
+    model = _target(8)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        p1 = list(range(5, 42)); p2 = p1 + list(range(60, 77))
+        cold, _ = _run(model, target, p2, 20, None)
+        first = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
+        _run(model, target, p1, 20, first)
+        first.disk.flush()
+        assert first.disk.writes == 1 and len(list(tmp_path.glob("*.safetensors"))) == 1
+        second = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))      # restart: empty RAM, same directory
+        got, st = _run(model, target, p2, 20, second)
+        assert st.cached_tokens == len(p1) and second.disk.hits == 1
+        assert got == cold
+        third = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
+        again, st3 = _run(model, target, p2, 20, third)                      # the p2 snapshot written by `second`
+        second.disk.flush()
+        assert again == cold
+    finally:
+        target.close()
+
+
+def test_prefix_disk_tier_corrupt_file_is_a_miss(tmp_path):
+    from vmlx_engine.glm_dflash2 import PrefixDiskTier, PrefixStore
+    model = _target(9)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        p1 = list(range(5, 42)); p2 = p1 + list(range(60, 70))
+        cold, _ = _run(model, target, p2, 12, None)
+        first = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
+        _run(model, target, p1, 12, first); first.disk.flush()
+        f = next(tmp_path.glob("*.safetensors"))
+        f.write_bytes(f.read_bytes()[: f.stat().st_size // 2])              # truncated file
+        second = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
+        got, st = _run(model, target, p2, 12, second)
+        assert st.cached_tokens == 0 and got == cold and not f.exists() and second.disk.errors == 1
+    finally:
+        target.close()
+
+
+def test_prefix_disk_tier_budget_keeps_newest(tmp_path):
+    from vmlx_engine.glm_dflash2 import PrefixDiskTier, PrefixStore
+    model = _target(10)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        disk = PrefixDiskTier(tmp_path, 2 ** 30)
+        store = PrefixStore(4, disk=disk)
+        _run(model, target, list(range(5, 30)), 4, store); disk.flush()
+        one = disk.nbytes()
+        disk.max_bytes = one * 1.5                                          # room for one snapshot, not two
+        _run(model, target, list(range(40, 70)), 4, store); disk.flush()
+        assert len(disk.index) == 1 and disk.evictions == 1
+        assert next(iter(disk.index.values()))["n"] == 30
+        assert len(list(tmp_path.glob("*.safetensors"))) == 1
+    finally:
+        target.close()
+
+
+def test_prefix_disk_fingerprint_tracks_bundle_metadata(tmp_path, monkeypatch):
+    import vmlx_engine.glm_dflash2 as GD
+    monkeypatch.delenv("VMLX_GLM_DFLASH2_DISK_DIR", raising=False)
+    monkeypatch.delenv("VMLX_GLM_DFLASH2_DISK_MAX_GB", raising=False)
+    b = tmp_path / "bundle"; b.mkdir()
+    (b / "config.json").write_text('{"model_type": "glm5_next"}')
+    GD.configure_prefix_disk(True, tmp_path / "blocks", 0, b)
+    r1 = GD._PREFIX_DISK["root"]
+    assert r1.startswith(str(tmp_path / "blocks") + "-glm-dflash2") and GD._PREFIX_DISK["max_bytes"] == float("inf")
+    (b / "config.json").write_text('{"model_type": "glm5_next", "x": 1}')
+    GD.configure_prefix_disk(True, tmp_path / "blocks", 5, b)
+    assert GD._PREFIX_DISK["root"] != r1 and GD._PREFIX_DISK["max_bytes"] == 5 * 2 ** 30
+    GD.configure_prefix_disk(False, tmp_path / "blocks", 5, b)
+    assert GD._PREFIX_DISK["root"] is None

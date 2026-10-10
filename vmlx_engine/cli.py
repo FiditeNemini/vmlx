@@ -3020,6 +3020,16 @@ def serve_command(args):
     else:
         # Text model path — existing flow
         server._model_type = "text"
+        if not args.continuous_batching:
+            # The GLM DFlash2 lane (non-batched) keeps its prompt-prefix snapshots on SSD under the block cache flags.
+            from .glm_dflash2 import configure_prefix_disk
+
+            configure_prefix_disk(
+                not (getattr(args, "disable_block_disk_cache", False) or getattr(args, "disable_prefix_cache", False)),
+                getattr(args, "block_disk_cache_dir", None),
+                getattr(args, "block_disk_cache_max_gb", None),
+                args.model,
+            )
         load_model(
             args.model,
             use_batching=args.continuous_batching,

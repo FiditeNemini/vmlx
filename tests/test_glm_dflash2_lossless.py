@@ -241,3 +241,70 @@ def test_adaptive_policy_prefers_large_blocks_for_good_drafts():
         q.update_spec(4, 0, 0.060)                           # nothing accepted
     q.ar_since_probe = 0
     assert q.choose()[0] == "ar"
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_prefix_store_reuse_is_lossless(adaptive):
+    """A follow-up prompt that extends a stored prompt restores the KDA/MLA state and prefills only the suffix; its
+    tokens must equal a cold run. An identical repeat restores the whole prompt. The store must not be corrupted by
+    the generations that ran on restored copies (third request checks the first prompt again)."""
+    from vmlx_engine.glm_dflash2 import PrefixStore
+    model = _target(5)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        p1 = list(range(5, 42)); p2 = p1 + list(range(60, 77))          # 37 then 54 tokens (not multiples of 4/64)
+        cold = {}
+        for name, p in (("p1", p1), ("p2", p2)):
+            ref, _ = _ar_logits(model, p, 24)
+            cold[name] = list(generate_dflash2(target, ScriptedDraft(ref, 4), p, 24, eos=set(), adaptive=adaptive))
+        store = PrefixStore(4)
+        runs = []
+        for name, p in (("p1", p1), ("p2", p2), ("p1", p1)):
+            ref, _ = _ar_logits(model, p, 24)
+            st = SpecStats()
+            got = list(generate_dflash2(target, ScriptedDraft(ref, 4), p, 24, eos=set(), stats=st, adaptive=adaptive,
+                                        prefix_store=store))
+            runs.append((name, got, st.cached_tokens))
+        assert runs[0][2] == 0 and runs[1][2] == len(p1) and runs[2][2] == len(p1)
+        for name, got, _ in runs:
+            assert got == cold[name], (name, got, cold[name])
+        assert store.hits == 2 and store.misses == 1
+    finally:
+        target.close()
+
+
+def test_prefix_store_boundary_snapshot_partial_hit(monkeypatch):
+    """Same long prefix, different tail: restores the last 16-token boundary snapshot (shrunk from 2048 for the tiny
+    model) before the divergence, prefills the rest; tokens equal a cold run."""
+    import vmlx_engine.glm_dflash2 as GD
+    monkeypatch.setattr(GD, "PREFIX_SNAPSHOT_EVERY", 16)
+    model = _target(6)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        common = list(range(5, 45))                                     # 40 tokens: boundaries at 16 and 32
+        pa, pb = common + [70, 71, 72], common + [80, 81, 82, 83, 84]
+        refb, _ = _ar_logits(model, pb, 16)
+        cold = list(generate_dflash2(target, ScriptedDraft(refb, 4), pb, 16, eos=set()))
+        store = GD.PrefixStore(12)
+        refa, _ = _ar_logits(model, pa, 16)
+        list(generate_dflash2(target, ScriptedDraft(refa, 4), pa, 16, eos=set(), prefix_store=store))
+        st = SpecStats()
+        got = list(generate_dflash2(target, ScriptedDraft(refb, 4), pb, 16, eos=set(), stats=st, prefix_store=store))
+        assert st.cached_tokens == 32 and got == cold
+    finally:
+        target.close()
+
+
+def test_prefix_store_byte_cap_evicts_lru():
+    from vmlx_engine.glm_dflash2 import PrefixStore
+    model = _target(7)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        store = PrefixStore(12, max_bytes=1)                        # any second snapshot exceeds the cap
+        for p in (list(range(5, 30)), list(range(40, 70))):
+            ref, _ = _ar_logits(model, p, 4)
+            list(generate_dflash2(target, ScriptedDraft(ref, 4), p, 4, eos=set(), prefix_store=store))
+        assert len(store.entries) == 1 and store.evictions == 1
+        assert next(iter(store.entries)) == tuple(range(40, 70))  # the most recent prompt survives
+    finally:
+        target.close()

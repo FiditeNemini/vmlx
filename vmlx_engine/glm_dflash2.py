@@ -144,6 +144,7 @@ class SpecStats:
     rounds: int = 0
     accepted: list = field(default_factory=list)
     ar_steps: int = 0                       # adaptive mode: tokens produced by plain target steps
+    cached_tokens: int = 0                  # prompt tokens restored from the lane's prefix store
     blocks: list = field(default_factory=list)   # block size used by each verify round
 
     @property
@@ -202,6 +203,96 @@ def generate_ar(target: GLMDFlashTarget, prompt_ids, max_tokens: int, eos: set, 
             break
         tok = nxt
     st.tokens, st.decode_s = n, time.perf_counter() - t1
+
+
+class _PrefixSnapshot:
+    __slots__ = ("cache", "hidden", "logits")
+
+    def __init__(self, cache, hidden, logits):
+        self.cache, self.hidden, self.logits = cache, hidden, logits
+
+
+def _detached_copy(v):
+    return mx.logical_and(v, True) if v.dtype == mx.bool_ else v * 1      # a new buffer, logical size only
+
+
+def _clone_caches(cache, detach_mla: bool = False):
+    """Isolated GLM native-state copies (the prefix caches' clone contract).
+
+    detach_mla=True (snapshots taken DURING a live prefill): MLA state is really copied at its logical size. Sharing
+    storage would mark the live cache's preallocated capacity buffers copy-on-write, and its next append then copies the
+    whole buffer: boundary snapshots every 2048 tokens made an 8k cold prefill 15.7 -> 27.7 s (2026-10-10). KDA state is
+    replaced functionally on every step, so it is shared safely either way."""
+    from vmlx_engine.models.glm5_next.glm5_next import Glm5MLACache, clone_glm5_next_layer_cache
+    out = []
+    for c in cache:
+        if detach_mla and isinstance(c, Glm5MLACache):
+            out.append(clone_glm5_next_layer_cache(c, copy_fn=_detached_copy, copy_is_detached=True))
+        else:
+            out.append(clone_glm5_next_layer_cache(c, copy_fn=lambda v: v))
+    return out
+
+
+def _cache_nbytes(cache) -> int:
+    return sum(int(v.nbytes) for c in cache for v in list(c.state) if v is not None)
+
+
+class PrefixStore:
+    """In-RAM prompt-prefix snapshots for the GLM DFlash2 lane (2026-10-10).
+
+    The lane rebuilt the whole history every turn (served multi-turn: 18 s TTFT at 8k tokens, while the batched AR
+    lane restored its prefix cache in 0.3 s). After each prompt prefill this keeps the target's KDA/MLA caches, the
+    drafter's context rows (its sliding window of tapped hidden states) and the last logits, keyed by the prompt token
+    ids. A request whose prompt starts with a stored prompt restores that state and prefills only the suffix. The
+    drafter cache itself is rebuilt from the context rows exactly as after a cold prefill, so no drafter state is kept.
+    Also snapshots every PREFIX_SNAPSHOT_EVERY (2048) absolute prompt tokens during prefill, for mid-history
+    divergence. LRU over `max_entries` snapshots (VMLX_GLM_DFLASH2_PREFIX_ENTRIES, default 12) and a total cap
+    (VMLX_GLM_DFLASH2_PREFIX_MAX_GB, default 3; shared KDA arrays are counted per snapshot, so this over-counts)."""
+
+    def __init__(self, max_entries: int = 4, max_bytes: float = 3 * 2 ** 30):
+        from collections import OrderedDict
+        self.max_entries = max(1, int(max_entries))
+        self.max_bytes = float(max_bytes)
+        self.entries = OrderedDict()
+        self.hits = self.misses = self.evictions = 0
+
+    def lookup(self, ids):
+        best = None
+        for key in self.entries:
+            n = len(key)
+            if n <= len(ids) and (best is None or n > len(best)) and tuple(ids[:n]) == key:
+                best = key
+        if best is None:
+            self.misses += 1
+            return None
+        self.entries.move_to_end(best); self.hits += 1
+        return len(best), self.entries[best]
+
+    def put(self, ids, cache, hidden, logits):
+        key = tuple(int(t) for t in ids)
+        snap = _PrefixSnapshot(_clone_caches(cache, detach_mla=True), hidden, logits)
+        mx.eval([c.state for c in snap.cache])
+        self.entries[key] = snap
+        self.entries.move_to_end(key)
+        while len(self.entries) > self.max_entries or (len(self.entries) > 1 and self.nbytes() > self.max_bytes):
+            self.entries.popitem(last=False)
+            self.evictions += 1
+
+    def nbytes(self) -> int:
+        return sum(_cache_nbytes(e.cache) for e in self.entries.values())
+
+
+_PREFIX_STORES: dict = {}
+PREFIX_SNAPSHOT_EVERY = int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_EVERY", "2048"))
+
+
+def prefix_store_for(target) -> "PrefixStore":
+    key = id(target)
+    st = _PREFIX_STORES.get(key)
+    if st is None:
+        st = _PREFIX_STORES[key] = PrefixStore(int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_ENTRIES", "12")),
+                                                float(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_MAX_GB", "3")) * 2 ** 30)
+    return st
 
 
 class AdaptiveSpec:
@@ -299,7 +390,8 @@ class AdaptiveSpec:
 
 def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int, eos: set, temperature: float = 0.0,
                     top_p: float = 1.0, top_k: int = 0, block_size: int | None = None, prefill_step: int = 2048,
-                    stats: SpecStats | None = None, controls=None, adaptive: bool = False):
+                    stats: SpecStats | None = None, controls=None, adaptive: bool = False,
+                    prefix_store: "PrefixStore | None" = None):
     """Yields (new_tokens, drafted) per cycle: first the token sampled from the prompt (drafted 0), then each verify
     round's accepted drafts + bonus token (drafted = verify width - 1). Upstream dflash loop with GLM verify/rollback.
     controls: optional vmlx_engine.dflash2_sampling.DFlash2SamplingControls (min_p, logit_bias, penalties) applied to
@@ -311,10 +403,39 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
     bs0 = int(block_size or draft.config.block_size)
     mask_id = int(draft.config.mask_token_id)
     prompt = mx.array(prompt_ids); st = stats if stats is not None else SpecStats()
-    cache = target.make_cache(); dcache = draft.make_cache(); draft.bind(target)
+    dcache = draft.make_cache(); draft.bind(target)
     hidden_limit = draft.config.sliding_window - 1 if all(t == "sliding_attention" for t in draft.config.layer_types) else None
     t0 = time.perf_counter()
-    logits, hidden = _prefill(target, prompt, cache, prefill_step, hidden_limit)
+    hit = prefix_store.lookup(prompt_ids) if prefix_store is not None else None
+    reused, cache = 0, None
+    if hit is not None:
+        reused, snap = hit
+        cache = _clone_caches(snap.cache)
+    if cache is None:
+        cache = target.make_cache()
+    if reused == prompt.size:                       # whole prompt already prefilled
+        logits, hidden = snap.logits, snap.hidden
+    else:
+        # Prefill the suffix; with a prefix store, stop at every absolute multiple of PREFIX_SNAPSHOT_EVERY and keep a
+        # snapshot there too, so a later prompt that diverges mid-history (same long prefix, different last turn)
+        # restores the last boundary before the divergence instead of starting cold. KDA recurrent state cannot be
+        # truncated, so only stored boundaries are restorable.
+        every = PREFIX_SNAPSHOT_EVERY if prefix_store is not None else 0
+        pos, hidden = reused, (snap.hidden if reused else None)
+        while pos < prompt.size:
+            end = min(prompt.size, (pos // every + 1) * every) if every else prompt.size
+            logits, h = _prefill(target, prompt[pos:end], cache, prefill_step, hidden_limit)
+            hidden = h if hidden is None else mx.concatenate([hidden, h], axis=1)
+            if hidden_limit is not None:
+                hidden = hidden[:, -hidden_limit:]
+            pos = end
+            if every and pos < prompt.size:
+                mx.eval(logits, hidden, [c.state for c in cache])
+                prefix_store.put(prompt_ids[:pos], cache, hidden, logits[:, -1:])
+    st.cached_tokens = reused
+    if prefix_store is not None:
+        mx.eval(logits, hidden, [c.state for c in cache])
+        prefix_store.put(prompt_ids, cache, hidden, logits[:, -1:])
     for c in dcache:
         c.offset = prompt.size - hidden.shape[1]
     history = list(prompt_ids)
@@ -449,11 +570,12 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
 
 def generate_dflash2(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int, eos: set, temperature: float = 0.0,
                      top_p: float = 1.0, block_size: int | None = None, prefill_step: int = 2048,
-                     stats: SpecStats | None = None, adaptive: bool = False) -> Iterator[int]:
+                     stats: SpecStats | None = None, adaptive: bool = False,
+                     prefix_store: "PrefixStore | None" = None) -> Iterator[int]:
     """DFlash2 speculative generation as a token iterator. Greedy output == generate_ar's (also with adaptive=True:
     AR bursts and verify rounds both emit the target's argmax)."""
     for new, _ in _dflash2_rounds(target, draft, prompt_ids, max_tokens, eos, temperature, top_p, 0, block_size,
-                                  prefill_step, stats, adaptive=adaptive):
+                                  prefill_step, stats, adaptive=adaptive, prefix_store=prefix_store):
         yield from new
 
 
@@ -500,7 +622,10 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
     st = SpecStats(); tic = time.perf_counter(); n = 0
     for new, drafted in _dflash2_rounds(target, draft, list(prompt_tokens), int(max_tokens), eos, float(temperature),
                                         float(top_p), int(top_k), stats=st, controls=sampling_controls,
-                                        adaptive=os.environ.get("VMLX_GLM_DFLASH2_ADAPTIVE", "1") != "0"):
+                                        adaptive=os.environ.get("VMLX_GLM_DFLASH2_ADAPTIVE", "1") != "0",
+                                        prefix_store=(prefix_store_for(target)
+                                                      if os.environ.get("VMLX_GLM_DFLASH2_PREFIX_CACHE", "1") != "0"
+                                                      else None)):
         if n == 0:
             tic = time.perf_counter()
         for t in new:
@@ -515,6 +640,7 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
                                st.prompt_tokens / max(st.prefill_s, 1e-9), n, n / max(time.perf_counter() - tic, 1e-9),
                                mx.get_peak_memory() / 1e9, reason)
         r.drafted = int(drafted)
+        r.cached_tokens = int(st.cached_tokens)        # prompt tokens restored from the prefix store (usage)
         yield r
         if finished:
             return

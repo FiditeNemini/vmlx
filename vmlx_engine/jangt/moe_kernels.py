@@ -446,7 +446,7 @@ def _xload3() -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, limit: float = 0.0):
+def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, limit: float = 0.0, rot_out: bool = False):
     mu, isd = VL.code_stats(L, K); PL, adv, _ = _lane_geom(K)
     # outlier columns: lane j < n_out owns column j for the simdgroup's 4 rows, one simd_sum per row (the first
     # version looped them on lane 0: -21 us per layer, 515 -> 389 GB/s)
@@ -460,9 +460,24 @@ def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, 
     outl = "" if n_out == 0 else " g += og[r]; u += ou[r];"
     # clamped SwiGLU (GLM-5.3: silu(min(g, L)) * clip(u, -L, L), the JANGH tq_act rule); limit 0 = plain SwiGLU (N0.5)
     clamp = "" if not limit > 0 else f" g = metal::min(g, {float(limit)}f); u = metal::clamp(u, {-float(limit)}f, {float(limit)}f);"
+    # rot_out (2026-10-10): 8 simdgroups x 4 rows = 32 rows = one Hadamard-32 block per threadgroup; the activations are
+    # rotated in the epilogue (the JANGH down unit's input basis), removing the separate h32_rows dispatch per MoE layer.
+    # Same butterfly as jangh.kernels.h32_rows (5 shuffle stages, 1/sqrt(32)).
+    if rot_out:
+        store = "hb[sgi * 4u + r] = (g / (1.0f + metal::fast::exp(-g))) * u;"
+        epi = f"""
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgi == 0u) {{
+      float v = hb[lane];
+      for (ushort hh = 1; hh < 32; hh <<= 1) {{ float o = simd_shuffle_xor(v, hh); v = (lane & hh) ? (o - v) : (v + o); }}
+      out[(size_t)ts * {N}u + threadgroup_position_in_grid.y * 32u + lane] = {odt}(v * 0.17677669529663687f);
+    }}"""
+    else:
+        store = f"out[(size_t)ts * {N}u + row0 + r] = {odt}((g / (1.0f + metal::fast::exp(-g))) * u);"
+        epi = ""
     src = f"""
-    uint sgi = simdgroup_index_in_threadgroup, lane = thread_index_in_simdgroup;
-    uint row0 = threadgroup_position_in_grid.y * 8u + sgi * 4u; uint ts = threadgroup_position_in_grid.z;
+    uint sgi = simdgroup_index_in_threadgroup, lane = thread_index_in_simdgroup;{"" if not rot_out else chr(10) + "    threadgroup float hb[32];"}
+    uint row0 = threadgroup_position_in_grid.y * {32 if rot_out else 8}u + sgi * 4u; uint ts = threadgroup_position_in_grid.z;
     uint t = ts / kslots[0]; uint e = idx[ts];{outl_pre}
     const uint lb = lane * {PL}u; const uint sh = lb & 31u; (void)sh;
     const device uint32_t* wp = wg + ((size_t)e * {N}u + row0) * {W}u + (lb >> 5);
@@ -487,13 +502,14 @@ def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, 
       if (lane == 0u) {{
         float g = ((G0 - {float(mu[0])}f * SE) * {float(isd[0])}f + (G1 - {float(mu[1])}f * SO) * {float(isd[1])}f) * sg[(size_t)e * {N}u + row0 + r];
         float u = ((U0 - {float(mu[0])}f * SE) * {float(isd[0])}f + (U1 - {float(mu[1])}f * SO) * {float(isd[1])}f) * su_[(size_t)e * {N}u + row0 + r];{outl}{clamp}
-        out[(size_t)ts * {N}u + row0 + r] = {odt}((g / (1.0f + metal::fast::exp(-g))) * u);
+        {store}
       }}
-    }}
+    }}{epi}
     """
     ins = ["xr", "x", "idx", "kslots", "wg", "sg", "wu", "su_"] + (["ocol", "woutg", "woutu"] if n_out else [])
     lim = "" if not limit > 0 else f"_lim{str(float(limit)).replace('.', 'p')}"
-    return mx.fast.metal_kernel(name=f"jt4_gu_k{kin}_n{N}_K{_kname(K)}_o{n_out}_w{W}_{xdt}_{odt}{lim}", input_names=ins, output_names=["out"], source=src)
+    ro = "_ro" if rot_out else ""
+    return mx.fast.metal_kernel(name=f"jt4_gu_k{kin}_n{N}_K{_kname(K)}_o{n_out}_w{W}_{xdt}_{odt}{lim}{ro}", input_names=ins, output_names=["out"], source=src)
 
 
 @functools.lru_cache(maxsize=None)
@@ -540,11 +556,15 @@ def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: 
     return mx.fast.metal_kernel(name=f"jt4_dn_k{kin}_n{N}_K{_kname(K)}_o{n_out}_s{kslots}_w{W}_{hdt}", input_names=ins, output_names=["out"], source=src)
 
 
-def gather_gate_up_swiglu_v3(xr, x, idx, U, out_dtype=mx.bfloat16, limit: float = 0.0):
+def gather_gate_up_swiglu_v3(xr, x, idx, U, out_dtype=mx.bfloat16, limit: float = 0.0, rot_out: bool = False):
+    """rot_out: return the activations already Hadamard-32 rotated (input basis of a JANGH down unit); N % 32 == 0."""
     T, kin = x.shape; k = idx.shape[1]; N = U["gate"]["scale"].shape[1]; n_out = U["gate"]["n_out"]; W = int(U["gate"]["packed"].shape[-1])
+    rot_out = bool(rot_out) and N % 32 == 0
     ins = [xr, x, idx.reshape(-1).astype(mx.uint32), mx.array([k], dtype=mx.uint32), U["gate"]["packed"], U["gate"]["scale"],
            U["up"]["packed"], U["up"]["scale"]] + ([U["gate"]["ocol"], U["gate"]["wout"], U["up"]["wout"]] if n_out else [])
-    kern = _gu_v3(kin, N, U["K"], U["L"], n_out, W, _dt(x), {mx.bfloat16: "bfloat16_t", mx.float16: "half", mx.float32: "float"}[out_dtype], float(limit))
+    kern = _gu_v3(kin, N, U["K"], U["L"], n_out, W, _dt(x), {mx.bfloat16: "bfloat16_t", mx.float16: "half", mx.float32: "float"}[out_dtype], float(limit), rot_out)
+    if rot_out:
+        return kern(inputs=ins, grid=(256, N // 32, T * k), threadgroup=(256, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
     return kern(inputs=ins, grid=(64, N // 8, T * k), threadgroup=(64, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
 
 

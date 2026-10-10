@@ -102,22 +102,24 @@ class JTMixedSwitchGLU(nn.Module):
             self._U = U
         return self._U
 
-    def _decode_h(self, x2, idx2):
+    def _decode_h(self, x2, idx2, rot_out: bool = False):
         if self.gu_fmt == "jangt":
             U = self._unit()
-            return MK.gather_gate_up_swiglu_v3(MK.rotate_rows(x2, U["su_gu"]), x2, idx2, U, out_dtype=mx.float32, limit=self.limit)
+            return MK.gather_gate_up_swiglu_v3(MK.rotate_rows(x2, U["su_gu"]), x2, idx2, U, out_dtype=mx.float32, limit=self.limit,
+                                               rot_out=rot_out)
         from vmlx_engine.jangh import kernels as K
         g, u = self.gate_proj, self.up_proj
         return K.gather_qmv(K.h32_rows(x2, mx.float32), g.tq2_packed, g.tq2_scales, g._cb, idx2.reshape(-1).astype(mx.uint32),
                             g.bits, x_per_dispatch=False, packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit)
 
-    def _decode_down(self, h, idx2, w2, out_dtype):
+    def _decode_down(self, h, idx2, w2, out_dtype, h_rotated: bool = False):
         if self.dn_fmt == "jangt":
             U = self._unit()
             return MK.gather_down_weighted_v3(MK.rotate_rows(h, U["sv_dn"], idx2.reshape(-1)), h, idx2, w2, U).astype(out_dtype)
         from vmlx_engine.jangh import kernels as K
         d = self.down_proj
-        return K.gather_qmv_weighted_down(K.h32_rows(h, mx.float32), d.tq2_packed, d.tq2_scales, d._cb, idx2.astype(mx.uint32), w2,
+        hr = h if h_rotated else K.h32_rows(h, mx.float32)
+        return K.gather_qmv_weighted_down(hr, d.tq2_packed, d.tq2_scales, d._cb, idx2.astype(mx.uint32), w2,
                                           d.bits, out_dtype)
 
     def _jt_mm(self, xs_rot, xs_raw, idx_s, P):
@@ -183,7 +185,10 @@ class JTMixedSwitchGLU(nn.Module):
         lead, kk = x.shape[:-1], indices.shape[-1]
         x2 = x.reshape(-1, self.D); idx2 = indices.reshape(-1, kk).astype(mx.int32); w2 = scores.reshape(-1, kk).astype(mx.float32)
         if idx2.size < SORT_THRESHOLD:
-            y = self._decode_down(self._decode_h(x2, idx2), idx2, w2, x.dtype)
+            # JANGT gate/up feeding a JANGH down: rotate the activations in the gate/up epilogue (one dispatch less)
+            ro = (self.gu_fmt == "jangt" and self.dn_fmt != "jangt" and self.I % 32 == 0
+                  and os.environ.get("JANGT_ROT_OUT_DECODE", "1") != "0")
+            y = self._decode_down(self._decode_h(x2, idx2, rot_out=ro), idx2, w2, x.dtype, h_rotated=ro)
         else:
             y = self._prefill(x2, idx2, w2).astype(x.dtype)
         return y.reshape(*lead, self.D)

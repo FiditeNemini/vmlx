@@ -504,7 +504,8 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
         if n == 0:
             tic = time.perf_counter()
         for t in new:
-            detok.add_token(t)
+            if t not in eos:                  # stop tokens end the turn; their text (<|user|>) is not content
+                detok.add_token(t)
         n += len(new)
         finished = new[-1] in eos or n >= max_tokens or getattr(detok, "matched", False)
         reason = None

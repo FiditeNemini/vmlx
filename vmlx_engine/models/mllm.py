@@ -4664,7 +4664,11 @@ class MLXMultimodalLM:
             try:
                 from ..speculative import is_dflash2_enabled
 
-                if is_dflash2_enabled() and os.environ.get(
+                _lm_type = str(getattr(getattr(self.model, "config", None), "model_type", "") or "")
+                # glm5_next: the lane matmul corrupts the target from the first token (served DFlash2 lane answered
+                # "17 x 15" for 17 x 19 at temperature 0; VMLX_LANE_QMM=0 restored the exact answer, 2026-10-10). Its
+                # verify slabs are measured without it; keep GLM on the native kernels.
+                if is_dflash2_enabled() and _lm_type != "glm5_next" and os.environ.get(
                     "VMLX_LANE_QMM", "1"
                 ).strip().lower() not in ("0", "off", "false", "no"):
                     import time as _time

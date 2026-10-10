@@ -26,7 +26,16 @@ def count_reasoning_tokens(token_ids, parser, tokenizer):
     max_end_length = max(map(len, ends), default=0)
     ids = list(token_ids)
     inside = bool(getattr(parser, '_think_in_prompt', False))
-    eos = set(getattr(tokenizer, "eos_token_ids", ()) or ())
+    # eos_token_ids is a list on most tokenizer wrappers but a bare int on others (GLM-5.3-Flash via the VLM
+    # processor): a set() of an int raised and turned every non-streaming chat completion into HTTP 500 (2026-10-10)
+    raw = getattr(tokenizer, "eos_token_ids", None)
+    if isinstance(raw, int):
+        eos = {raw}
+    else:
+        try:
+            eos = set(raw or ())
+        except TypeError:
+            eos = set()
     if getattr(tokenizer, "eos_token_id", None) is not None:
         eos.add(tokenizer.eos_token_id)
     count = i = 0

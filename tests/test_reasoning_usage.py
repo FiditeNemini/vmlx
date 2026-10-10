@@ -64,3 +64,24 @@ async def test_batched_stream_exports_ids_only_at_terminal(monkeypatch):
     assert outputs[-1].tokens == ids
     assert outputs[-1].tokens is not ids
     assert count_reasoning_tokens(outputs[-1].tokens, Parser(), None) == 1
+
+
+def test_int_eos_token_ids_does_not_raise():
+    """GLM's tokenizer wrapper exposes eos_token_ids as an int; non-streaming chat completions returned HTTP 500."""
+    from types import SimpleNamespace
+    from vmlx_engine.reasoning.usage import count_reasoning_tokens
+
+    tok = SimpleNamespace(eos_token_ids=2, eos_token_id=2)
+    parser = SimpleNamespace(reasoning_tag_token_seqs=lambda t: {"start": [[10]], "end": [[11]]}, _think_in_prompt=False)
+    assert count_reasoning_tokens([10, 5, 6, 11, 7, 2], parser, tok) == 2
+
+
+def test_record_usage_never_raises(monkeypatch):
+    from types import SimpleNamespace
+    import vmlx_engine.server as server
+    import vmlx_engine.reasoning.usage as U
+    monkeypatch.setattr(U, "count_reasoning_tokens", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = SimpleNamespace(output_token_ids=[1, 2, 3], reasoning_tokens=None)
+    monkeypatch.setattr(server, "_output_token_ids_for_reasoning", lambda o: [1, 2, 3])
+    server._record_reasoning_token_usage(out, object(), object())     # must not raise
+    assert out.reasoning_tokens is None

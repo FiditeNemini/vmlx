@@ -9824,10 +9824,14 @@ def load_model(
 
 
 def _record_reasoning_token_usage(output, parser, tokenizer):
+    """Usage accounting is advisory: it must never abort a response (the streaming path already guarded this)."""
     from .reasoning.usage import count_reasoning_tokens
     ids = _output_token_ids_for_reasoning(output)
     if ids is not None:
-        output.reasoning_tokens = count_reasoning_tokens(ids, parser, tokenizer)
+        try:
+            output.reasoning_tokens = count_reasoning_tokens(ids, parser, tokenizer)
+        except Exception:
+            logger.warning("reasoning-token accounting failed; usage omits reasoning_tokens", exc_info=True)
 
 
 def _reasoning_usage_details(output):

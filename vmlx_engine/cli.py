@@ -3022,10 +3022,14 @@ def serve_command(args):
         server._model_type = "text"
         if not args.continuous_batching:
             # The GLM DFlash2 lane (non-batched) keeps its prompt-prefix snapshots on SSD under the block cache flags.
+            # --disable-prefix-cache is NOT consulted: it governs the batched scheduler's cache, and the app passes it
+            # for every non-batched launch (its prefix toggle is forced off when batching is off), which silently
+            # disabled this tier in the app. --disable-block-disk-cache (or VMLX_GLM_DFLASH2_DISK_DIR=0) turns it off;
+            # VMLX_GLM_DFLASH2_PREFIX_CACHE=0 turns off the lane's whole store.
             from .glm_dflash2 import configure_prefix_disk
 
             configure_prefix_disk(
-                not (getattr(args, "disable_block_disk_cache", False) or getattr(args, "disable_prefix_cache", False)),
+                not getattr(args, "disable_block_disk_cache", False),
                 getattr(args, "block_disk_cache_dir", None),
                 getattr(args, "block_disk_cache_max_gb", None),
                 args.model,

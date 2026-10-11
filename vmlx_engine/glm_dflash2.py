@@ -476,7 +476,8 @@ def _bundle_fingerprint(model_path) -> str:
 
 def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path) -> None:
     """CLI hook (non-batched launches): the DFlash2 lane's SSD tier follows the server's block disk cache flags
-    (on unless --disable-block-disk-cache / --disable-prefix-cache; --block-disk-cache-dir; --block-disk-cache-max-gb,
+    (on unless --disable-block-disk-cache; --disable-prefix-cache governs the batched scheduler only; --block-disk-cache-dir;
+    --block-disk-cache-max-gb,
     where 0 = unlimited as for the block store). Files live in the sibling directory
     '<block cache dir>-glm-dflash2/<bundle fingerprint>', outside the block store's own budget scan.
     VMLX_GLM_DFLASH2_DISK_DIR (a directory, or 0 = off) and VMLX_GLM_DFLASH2_DISK_MAX_GB override."""

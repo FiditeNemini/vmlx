@@ -6682,14 +6682,25 @@ class MLXMultimodalLM:
         rope delta (language_model._position_ids / _rope_deltas). The DFlash2
         target adapter consumes these; nothing here forwards the language
         model. None (native VLM path) for models without that interface.
+
+        GLM-5.3-Flash (glm5_next) has no M-RoPE: its language model takes
+        merged input embeddings and positions from the cache offset, so its
+        plan carries embeddings only (no position ids, rope delta 0) and the
+        GLM DFlash2 lane prefills them. Image requests only: any video keeps
+        the native VLM path.
         """
         import hashlib
 
         import mlx.core as mx
         import numpy as np
 
+        from ..glm_dflash2 import is_glm5_next
+
         language_model = getattr(self.model, "language_model", None)
-        if (
+        glm = is_glm5_next(self.model)
+        if glm and (language_model is None or not hasattr(self.model, "get_input_embeddings")):
+            return None
+        if not glm and (
             language_model is None
             or not hasattr(language_model, "get_rope_index")
             or not hasattr(self.model, "get_input_embeddings")
@@ -6731,6 +6742,10 @@ class MLXMultimodalLM:
             runs (M-RoPE delta caching)."""
             features = self.model.get_input_embeddings(input_ids, pixel_values, mask=attention_mask, **extra)
             embeds = getattr(features, "inputs_embeds", features)
+            if glm:
+                # 1-D positions from the cache offset: nothing else to plan.
+                mx.eval(embeds)
+                return {"embeds": embeds, "positions": None, "rope_delta": 0}
             positions = getattr(language_model, "_position_ids", None)
             rope_delta = getattr(language_model, "_rope_deltas", None)
             # The VLM's next forward must not reuse this request's rope state.
@@ -6746,6 +6761,22 @@ class MLXMultimodalLM:
             int(v) for v in (getattr(config, "image_token_index", None), getattr(config, "video_token_index", None))
             if v is not None
         }
+        if glm:
+            media_ids |= {
+                int(v) for v in (getattr(config, "image_token_id", None), getattr(config, "video_token_id", None))
+                if v is not None
+            }
+            video_start = getattr(config, "video_start_token_id", None)
+            if (
+                extra.get("pixel_values_videos") is not None
+                or extra.get("video_grid_thw") is not None
+                or (video_start is not None and int(video_start) in tokens)
+            ):
+                logger.info(
+                    "DFlash2 media request on %s: GLM video in the conversation; native VLM path",
+                    self.model_name,
+                )
+                return None
         first_media = next((i for i, t in enumerate(tokens) if t in media_ids), len(tokens))
         # Session-store salt: the processed pixels (placeholder ids are the
         # same for every image, so the token ids cannot tell images apart).
@@ -6942,7 +6973,13 @@ class MLXMultimodalLM:
                         formatted_prompt, True, images=all_images,
                         resize_shape=kwargs.get("resize_shape"),
                     )
-                    _df2_media = self._dflash2_media_plan(formatted_prompt, all_images, kwargs)
+                    from ..glm_dflash2 import is_glm5_next as _is_glm5_next
+
+                    # GLM video is not planned (the lane prefills image
+                    # embeddings only); keep the whole request on the native
+                    # VLM path rather than dropping a historical clip.
+                    if not (videos and _is_glm5_next(self.model)):
+                        _df2_media = self._dflash2_media_plan(formatted_prompt, all_images, kwargs)
                     _df2_route = _df2_media is not None
         if _df2_route:
             from ..dflash2_runtime import stream_dflash2_generate

@@ -75,10 +75,12 @@ class GLMDFlashTarget:
     def make_cache(self):
         return self.lm.make_cache()
 
-    def forward(self, ids: mx.array, cache, verify: bool, taps: bool = True, last_row: bool = False):
+    def forward(self, ids: mx.array, cache, verify: bool, taps: bool = True, last_row: bool = False,
+                inputs_embeds: mx.array | None = None):
         self._armed["on"] = taps
         try:
-            h = self.inner(ids, cache=cache, n_confirmed=1 if (verify and ids.shape[1] > 1) else 0, return_pre_norm=True)
+            h = self.inner(ids, cache=cache, n_confirmed=1 if (verify and ids.shape[1] > 1) else 0, return_pre_norm=True,
+                           inputs_embeds=inputs_embeds)
         finally:
             self._armed["on"] = False
         if last_row:
@@ -146,6 +148,7 @@ class SpecStats:
     ar_steps: int = 0                       # adaptive mode: tokens produced by plain target steps
     cached_tokens: int = 0                  # prompt tokens restored from the lane's prefix store
     cache_source: str = ""                  # "ram" | "disk" for a restored prefix (usage cache_detail)
+    vision_tower: bool = False              # an image plan's embeddings were materialized for this prefill
     blocks: list = field(default_factory=list)   # block size used by each verify round
     output_token_ids: list = field(default_factory=list)
 
@@ -158,12 +161,16 @@ class SpecStats:
         return self.tokens / max(self.decode_s, 1e-9)
 
 
-def _prefill(target: GLMDFlashTarget, prompt: mx.array, cache, step: int, hidden_limit: int | None, taps: bool = True):
+def _prefill(target: GLMDFlashTarget, prompt: mx.array, cache, step: int, hidden_limit: int | None, taps: bool = True,
+             embeds: mx.array | None = None):
+    """embeds: (1, prompt.size, D) merged input embeddings for this segment (image features at their placeholders),
+    or None to embed the token ids."""
     chunks, start, logits = [], 0, None
     while start < prompt.size:
         rem = prompt.size - start
         end = start + (1 if rem == 1 else min(step, rem - 1)) if taps else start + min(step, rem)
-        logits = target.forward(prompt[None, start:end], cache, verify=False, taps=taps, last_row=True)
+        logits = target.forward(prompt[None, start:end], cache, verify=False, taps=taps, last_row=True,
+                                inputs_embeds=None if embeds is None else embeds[:, start:end])
         if taps:
             h = target.hidden()
             if hidden_limit is not None:
@@ -417,7 +424,8 @@ class PrefixDiskTier:
 
     def _write(self, name, key, snap):
         import json
-        arrays = {"ids": mx.array(list(key), dtype=mx.int32), "hidden": snap.hidden, "logits": snap.logits}
+        # int64: image prefixes are keyed with per-item ids above the int32 range (_dflash2_rounds key_ids).
+        arrays = {"ids": mx.array(list(key), dtype=mx.int64), "hidden": snap.hidden, "logits": snap.logits}
         layers = []
         for i, c in enumerate(snap.cache):
             state = list(c.state)
@@ -714,11 +722,17 @@ class AdaptiveSpec:
 def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int, eos: set, temperature: float = 0.0,
                     top_p: float = 1.0, top_k: int = 0, block_size: int | None = None, prefill_step: int = 2048,
                     stats: SpecStats | None = None, controls=None, adaptive: bool = False,
-                    prefix_store: "PrefixStore | None" = None):
+                    prefix_store: "PrefixStore | None" = None, key_ids=None, media: dict | None = None):
     """Yields (new_tokens, drafted) per cycle: first the token sampled from the prompt (drafted 0), then each verify
     round's accepted drafts + bonus token (drafted = verify width - 1). Upstream dflash loop with GLM verify/rollback.
     controls: optional vmlx_engine.dflash2_sampling.DFlash2SamplingControls (min_p, logit_bias, penalties) applied to
-    the TARGET distribution of every verified row, as the Qwen lane does (rejection sampling stays exact)."""
+    the TARGET distribution of every verified row, as the Qwen lane does (rejection sampling stays exact).
+    media: an image plan from MLXMultimodalLM._dflash2_media_plan. The prompt rows up to its last image are prefilled
+    from the VLM's merged input embeddings (vision features at their placeholders); text rows embed their ids.
+    key_ids: the prefix-store key (the plan's per-item media key: every image placeholder run replaced by ids derived
+    from THAT image's pixels), so a later turn restores through identical earlier images and diverges at a new one.
+    A restore that already covers every image never runs the vision tower. Without per-item keys, prefixes are reused
+    and stored only up to the first image."""
     import dflash.model_mlx as runtime
     from dflash.model_mlx import DFlash2DraftModel, _rejection_sample, _sampling_probs, _trim_recent_cache, make_sampler
 
@@ -729,7 +743,18 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
     dcache = draft.make_cache(); draft.bind(target)
     hidden_limit = draft.config.sliding_window - 1 if all(t == "sliding_attention" for t in draft.config.layer_types) else None
     t0 = time.perf_counter()
-    hit = prefix_store.lookup(prompt_ids) if prefix_store is not None else None
+    lookup_ids = [int(t) for t in (key_ids if key_ids is not None else prompt_ids)]
+    if len(lookup_ids) != len(prompt_ids):
+        raise ValueError("glm dflash2: prefix key and prompt lengths differ")
+    store_limit = None
+    if media is not None and key_ids is None:
+        store_limit = int(media.get("first_media_index", 0))      # unkeyed images: text before the first one only
+    media_end = int(media.get("media_end", 0)) if media is not None else 0
+    hit = None
+    if prefix_store is not None:
+        hit = prefix_store.lookup(lookup_ids if store_limit is None else lookup_ids[:store_limit])
+        if store_limit is not None:
+            prefix_store.last_persistence = None
     reused, cache = 0, None
     if hit is not None:
         reused, snap = hit
@@ -745,21 +770,28 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
         # truncated, so only stored boundaries are restorable.
         every = PREFIX_SNAPSHOT_EVERY if prefix_store is not None else 0
         pos, hidden = reused, (snap.hidden if reused else None)
+        embeds = None
+        if media is not None and reused < media_end:
+            if media.get("embeds") is None:
+                media.update(media["materialize"]())
+            embeds = media["embeds"]
+        st.vision_tower = media is not None and embeds is not None
         while pos < prompt.size:
             end = min(prompt.size, (pos // every + 1) * every) if every else prompt.size
-            logits, h = _prefill(target, prompt[pos:end], cache, prefill_step, hidden_limit)
+            seg = embeds[:, pos:end] if (embeds is not None and pos < media_end) else None
+            logits, h = _prefill(target, prompt[pos:end], cache, prefill_step, hidden_limit, embeds=seg)
             hidden = h if hidden is None else mx.concatenate([hidden, h], axis=1)
             if hidden_limit is not None:
                 hidden = hidden[:, -hidden_limit:]
             pos = end
-            if every and pos < prompt.size:
+            if every and pos < prompt.size and (store_limit is None or pos <= store_limit):
                 mx.eval(logits, hidden, [c.state for c in cache])
-                prefix_store.put(prompt_ids[:pos], cache, hidden, logits[:, -1:])
+                prefix_store.put(lookup_ids[:pos], cache, hidden, logits[:, -1:])
     st.cached_tokens = reused
     st.cache_source = prefix_store.last_source if (prefix_store is not None and reused) else ""
-    if prefix_store is not None:
+    if prefix_store is not None and store_limit is None:
         mx.eval(logits, hidden, [c.state for c in cache])
-        prefix_store.put(prompt_ids, cache, hidden, logits[:, -1:])
+        prefix_store.put(lookup_ids, cache, hidden, logits[:, -1:])
     for c in dcache:
         c.offset = prompt.size - hidden.shape[1]
     history = list(prompt_ids)
@@ -897,11 +929,13 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
 def generate_dflash2(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int, eos: set, temperature: float = 0.0,
                      top_p: float = 1.0, block_size: int | None = None, prefill_step: int = 2048,
                      stats: SpecStats | None = None, adaptive: bool = False,
-                     prefix_store: "PrefixStore | None" = None) -> Iterator[int]:
+                     prefix_store: "PrefixStore | None" = None, key_ids=None,
+                     media: dict | None = None) -> Iterator[int]:
     """DFlash2 speculative generation as a token iterator. Greedy output == generate_ar's (also with adaptive=True:
     AR bursts and verify rounds both emit the target's argmax)."""
     for new, _ in _dflash2_rounds(target, draft, prompt_ids, max_tokens, eos, temperature, top_p, 0, block_size,
-                                  prefill_step, stats, adaptive=adaptive, prefix_store=prefix_store):
+                                  prefill_step, stats, adaptive=adaptive, prefix_store=prefix_store,
+                                  key_ids=key_ids, media=media):
         yield from new
 
 
@@ -926,15 +960,13 @@ def is_glm5_next(model) -> bool:
 def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int, temperature: float, top_p: float = 1.0,
                        top_k: int = 0, stop=None, prompt_tokens=None, media=None, sampling_controls=None):
     """Server lane: yields upstream ``dflash.model_mlx.GenerationResponse`` chunks (text segment, tokens, accepted = tokens
-    emitted this cycle, drafted = verify width - 1) for a glm5_next target. Text-only: media requests must take the
-    ordinary VLM path (the caller checks ``media``)."""
+    emitted this cycle, drafted = verify width - 1) for a glm5_next target. ``media``: an image plan (see
+    ``_dflash2_rounds``) with ``prompt_tokens`` set to its processor-expanded ids."""
     from dflash.model_mlx import GenerationResponse
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    if media is not None:
-        # mllm._dflash2_media_plan returns None for glm5_next (no M-RoPE prefill interface), so image/video requests
-        # always take the native VLM path; reaching here with media would be a caller bug.
-        raise ValueError("glm5_next DFlash2 lane received a media plan; media requests use the native VLM path")
+    if media is not None and prompt_tokens is None:
+        raise ValueError("glm5_next DFlash2 media plan without its processor-expanded prompt tokens")
     tw = tokenizer if isinstance(tokenizer, TokenizerWrapper) else TokenizerWrapper(tokenizer)
     if prompt_tokens is None:
         specials = tuple(t for t in ("[gMASK]", getattr(tw, "bos_token", None)) if t)
@@ -951,7 +983,9 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
     for new, drafted in _dflash2_rounds(target, draft, list(prompt_tokens), int(max_tokens), eos, float(temperature),
                                         float(top_p), int(top_k), stats=st, controls=sampling_controls,
                                         adaptive=os.environ.get("VMLX_GLM_DFLASH2_ADAPTIVE", "1") != "0",
-                                        prefix_store=store):
+                                        prefix_store=store,
+                                        key_ids=media.get("key_tokens") if media is not None else None,
+                                        media=media):
         if n == 0:
             tic = time.perf_counter()
         for t in new:
@@ -971,6 +1005,13 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
             r.output_token_ids = list(st.output_token_ids)
         # usage prompt_tokens_details.cache_detail, like the batched lanes' "native-glm+disk" / "block-disk"
         r.cache_detail = {"ram": "glm-dflash2-prefix", "disk": "glm-dflash2-prefix+disk"}.get(st.cache_source, "")
+        if finished and media is not None:
+            import logging
+            logging.getLogger(__name__).info(
+                "GLM DFlash2 image prefill: prompt_tokens=%d cached=%d source=%s media_end=%d key=%s vision_tower=%s",
+                st.prompt_tokens, st.cached_tokens, st.cache_source or "-", int(media.get("media_end", 0)),
+                "per-item" if media.get("key_tokens") is not None else "text-before-first-image",
+                "ran" if st.vision_tower else "skipped")
         if finished and store is not None:
             # Publish the terminal immediately; SimpleEngine waits for this
             # request's SSD receipt only at the next admission or teardown.

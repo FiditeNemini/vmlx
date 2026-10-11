@@ -400,3 +400,50 @@ def test_prefix_disk_fingerprint_tracks_bundle_metadata(tmp_path, monkeypatch):
     assert GD._PREFIX_DISK["root"] != r1 and GD._PREFIX_DISK["max_bytes"] == 5 * 2 ** 30
     GD.configure_prefix_disk(False, tmp_path / "blocks", 5, b)
     assert GD._PREFIX_DISK["root"] is None
+
+
+def test_prefix_disk_identity_tracks_selected_drafter_and_runtime(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import vmlx_engine.glm_dflash2 as GD
+    import vmlx_engine.prefix_cache as PC
+
+    monkeypatch.delenv("VMLX_GLM_DFLASH2_DISK_DIR", raising=False)
+    monkeypatch.delenv("VMLX_GLM_DFLASH2_DISK_MAX_GB", raising=False)
+    target = tmp_path / "target"
+    draft = tmp_path / "external drafter"
+    target.mkdir(); draft.mkdir()
+    (target / "config.json").write_text('{"model_type":"glm5_next"}')
+    config = draft / "config.json"
+    config.write_text('{"target_layer_ids":[5,14,24,33,42]}')
+    monkeypatch.setattr(PC, "runtime_cache_fingerprint", lambda: "runtime-a")
+
+    def root():
+        GD.configure_prefix_disk(True, tmp_path / "blocks", 5, target, draft)
+        return GD._PREFIX_DISK["root"]
+
+    first = root()
+    assert root() == first  # Same bundles/runtime remain restart-compatible.
+    old = Path(first)
+    old.mkdir(parents=True)
+    sentinel = old / "retained-old-entry"
+    sentinel.write_text("preserve")
+    config.write_text('{"target_layer_ids":[6,15,25,34,43],"revision":2}')
+    second = root()
+    assert second != first
+    monkeypatch.setattr(PC, "runtime_cache_fingerprint", lambda: "runtime-b")
+    assert root() != second
+    assert sentinel.read_text() == "preserve"
+
+
+def test_prefix_disk_identity_separates_external_drafter_paths(tmp_path):
+    import vmlx_engine.glm_dflash2 as GD
+
+    target = tmp_path / "target"
+    target.mkdir()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir(); second.mkdir()
+    for draft in (first, second):
+        (draft / "config.json").write_text('{"target_layer_ids":[5,14]}')
+    assert GD._bundle_fingerprint(target, first) != GD._bundle_fingerprint(target, second)

@@ -548,12 +548,18 @@ def clear_sessions(include_ssd: bool) -> int:
     return removed
 
 
-def _bundle_fingerprint(model_path) -> str:
-    """Bundle identity for the SSD tier: path + the small metadata files + shard names/sizes/mtimes."""
+def _bundle_fingerprint(model_path, draft_path=None) -> str:
+    """Startup-only identity for native state and drafter-dependent hidden taps."""
     import hashlib
     from pathlib import Path
+    from .dflash2_session_disk import model_identity
+
     h = hashlib.sha256(PrefixDiskTier.FORMAT.encode())
     p = Path(model_path).expanduser().resolve()
+    # Use the shared target/drafter/runtime contract. The hidden rows stored
+    # beside target state depend on the drafter's selected target layers.
+    # A target-only namespace could silently restore incompatible taps.
+    h.update(model_identity(str(p), str(draft_path or p)).encode())
     h.update(str(p).encode())
     for name in ("config.json", "jang_config.json", "model.safetensors.index.json"):
         f = p / name
@@ -565,7 +571,7 @@ def _bundle_fingerprint(model_path) -> str:
     return h.hexdigest()[:16]
 
 
-def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path) -> None:
+def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path, draft_path=None) -> None:
     """CLI hook (non-batched launches): the DFlash2 lane's SSD tier follows the server's block disk cache flags
     (on unless --disable-block-disk-cache; --disable-prefix-cache governs the batched scheduler only; --block-disk-cache-dir;
     --block-disk-cache-max-gb,
@@ -583,7 +589,7 @@ def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path) ->
     env_gb = os.environ.get("VMLX_GLM_DFLASH2_DISK_MAX_GB")
     gb = float(env_gb) if env_gb else float(max_gb if max_gb is not None else 10.0)
     if root is not None and model_path:
-        root = root / _bundle_fingerprint(model_path)
+        root = root / _bundle_fingerprint(model_path, draft_path)
     _PREFIX_DISK.update(root=str(root) if root is not None else None,
                         max_bytes=gb * 2 ** 30 if gb > 0 else float("inf"))
     close_prefix_stores()

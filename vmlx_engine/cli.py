@@ -3033,6 +3033,7 @@ def serve_command(args):
                 getattr(args, "block_disk_cache_dir", None),
                 getattr(args, "block_disk_cache_max_gb", None),
                 args.model,
+                getattr(args, "speculative_model", None),
             )
         load_model(
             args.model,

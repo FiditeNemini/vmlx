@@ -443,7 +443,10 @@ def nax_available() -> bool:
     import platform
     try:
         ver = tuple(int(v) for v in platform.mac_ver()[0].split(".")[:2])
-        arch = (mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info())["architecture"]
+        # Ask the GPU explicitly: mx.device_info() describes the DEFAULT device, which a process (a test child, a
+        # CPU-side tool) may set to the CPU ("arm64"), and the answer feeds the persisted-cache identity
+        # (jangt.switch.jangt_runtime_identity) as well as kernel routing.
+        arch = (mx.device_info(mx.gpu) if hasattr(mx, "device_info") else mx.metal.device_info())["architecture"]
         m = re.search(r"g(\d+)([a-z])", arch)
         gen, kind = int(m.group(1)), m.group(2)
         return ver >= (26, 2) and gen >= (18 if kind == "p" else 17)

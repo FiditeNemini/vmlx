@@ -92,12 +92,33 @@ def test_without_nax_every_batch_takes_the_decode_kernels(monkeypatch):
 
 
 def test_prefill_route_is_part_of_the_cache_identity(monkeypatch):
+    # Import BEFORE patching: prefix_cache computes the process fingerprint once at import, and a first import under
+    # the patch would freeze a "decode" fingerprint for every later test in this process.
+    from vmlx_engine import prefix_cache
+
     monkeypatch.setattr(JK, "nax_available", lambda: True)
     nax = SW.jangt_runtime_identity()
     monkeypatch.setattr(JK, "nax_available", lambda: False)
     decode = SW.jangt_runtime_identity()
     assert nax.endswith(";jangt_prefill=nax") and decode.endswith(";jangt_prefill=decode")
     assert nax.split(";")[0] == decode.split(";")[0] and nax != decode
-    from vmlx_engine import prefix_cache
-
     assert ";jangt_prefill=decode" in prefix_cache._resolve_runtime_cache_fingerprint()
+
+
+def test_route_and_identity_do_not_depend_on_the_default_device():
+    """A process whose default device is the CPU (test children, CPU-side tools) must compute the same NAX answer and
+    cache identity as the serving process: mx.device_info() describes the default device ("arm64" on CPU), and a
+    different identity there split the SSD namespace between processes (test_ssm_disk_candidate_index caught it)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[1])
+    script = (
+        f"import sys; sys.path.insert(0, {root!r})\n"
+        "import mlx.core as mx\nmx.set_default_device(mx.cpu)\n"
+        "from vmlx_engine.jangt import switch as SW\nprint(SW.jangt_runtime_identity())\n"
+    )
+    child = subprocess.run([sys.executable, "-I", "-B", "-c", script], capture_output=True, text=True, timeout=60)
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip().splitlines()[-1] == SW.jangt_runtime_identity()

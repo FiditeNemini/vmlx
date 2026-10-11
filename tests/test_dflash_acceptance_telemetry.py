@@ -18,11 +18,12 @@ def test_ar_bursts_do_not_count_as_accepted_drafts():
             break
         statements.append(node)
     code = compile(ast.Module(body=statements, type_ignores=[]), "accounting", "exec")
-    state = dict(token_count=0, emitted_per_cycle=[], drafted_total=0, width_cycles={})
+    state = dict(token_count=0, emitted_per_cycle=[], drafted_total=0, width_cycles={}, ar_tokens=0)
     for emitted, drafted in [(1, 0), (8, 0), (4, 4), (2, 4)]:
         state["chunk"] = SimpleNamespace(tokens=list(range(emitted)), accepted=emitted, drafted=drafted)
         exec(code, state)
     assert state["token_count"] == 15
+    assert state["ar_tokens"] == 9          # both AR bursts (GLM AdaptiveSpec / Qwen next_action) are logged as such
     assert state["emitted_per_cycle"] == [4, 2]
     assert state["drafted_total"] == 8
     assert state["width_cycles"] == {5: 2}

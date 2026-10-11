@@ -6996,6 +6996,7 @@ class MLXMultimodalLM:
             token_count = 0
             emitted_per_cycle: list[int] = []
             drafted_total = 0
+            ar_tokens = 0          # adaptive AR bursts (GLM AdaptiveSpec, Qwen _BlockChooser.next_action)
             width_cycles: dict[int, int] = {}
             last_chunk = None
             stats_logged = False
@@ -7030,6 +7031,8 @@ class MLXMultimodalLM:
                 # GLM adaptive AR bursts can emit multiple tokens with zero
                 # drafts. They contribute to throughput, not draft acceptance.
                 _drafted = int(getattr(chunk, "drafted", 4))
+                if getattr(chunk, "accepted", None) is not None and _drafted == 0:
+                    ar_tokens += emitted
                 if getattr(chunk, "accepted", None) is not None and _drafted > 0:
                     emitted_per_cycle.append(int(chunk.accepted))
                     # verify width is adaptive (dflash2_runtime._BlockChooser)
@@ -7049,7 +7052,7 @@ class MLXMultimodalLM:
                         "output_tokens=%d cycles=%d emitted_per_cycle=%.3f "
                         "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
                         "prompt_tps=%.1f peak_memory=%.2fGB block_widths=%s "
-                        "finish_reason=%s",
+                        "ar_tokens=%d finish_reason=%s",
                         int(getattr(chunk, "prompt_tokens", 0) or 0),
                         token_count,
                         cycles,
@@ -7059,6 +7062,7 @@ class MLXMultimodalLM:
                         float(getattr(chunk, "prompt_tps", 0.0) or 0.0),
                         float(getattr(chunk, "peak_memory", 0.0) or 0.0),
                         dict(sorted(width_cycles.items())),
+                        ar_tokens,
                         chunk.finish_reason,
                     )
                     stats_logged = True

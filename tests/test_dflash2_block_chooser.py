@@ -76,3 +76,119 @@ def test_three_widths_pick_sixteen_when_cheap_and_accepted():
             accepted += 1
         c.observe(w, accepted + 1, {5: 0.060, 8: 0.062, 16: 0.068}[w])
     assert seq.count(16) > 250 and 5 in seq and 8 in seq     # still re-times the others
+
+
+# --- AR fallback (next_action) -------------------------------------------------------------------------------------
+# Measured 2026-10-11, Qwen3.8-27B JANGH2, sampled defaults: AR 29.9 tok/s (33 ms/token) vs DFlash2 25.5-28.5 tok/s;
+# a 5/8/16-row cycle ~0.09-0.10 s for ~2.5 tokens. Greedy: ~4.8 tokens per 0.10 s cycle (48 tok/s).
+
+def _seeded(shared, p, cost=None):
+    """A chooser whose widths are timed (warm-up + one timed cycle each) at acceptance p."""
+    cost = cost or {5: 0.092, 8: 0.098, 16: 0.104}
+    c = _BlockChooser((5, 8, 16), cost=shared)
+    rng = random.Random(7)
+    for _ in range(12):
+        w = c.width
+        accepted = 0
+        while accepted < w - 1 and rng.random() < p:
+            accepted += 1
+        c.observe(w, accepted + 1, cost[w])
+    return c
+
+
+def _ar_burst(c, per_token=0.033, n=8):
+    c.observe_ar(per_token * n, n)
+
+
+def test_first_action_of_every_request_is_a_verify_cycle():
+    shared = {}
+    c = _seeded(shared, 0.25)
+    _ar_burst(c); _ar_burst(c)
+    c2 = _BlockChooser((5, 8, 16), cost=shared)            # next request: everything measured, AR faster
+    assert c2.next_action()[0] == "spec"                  # exit checkpoints need the drafter to have run
+
+
+def test_low_acceptance_sampled_text_falls_back_to_ar_and_keeps_probing():
+    shared = {}
+    c = _seeded(shared, 0.25)
+    assert c.next_action() == ("ar", 8)                   # AR not measured yet: one burst to measure it
+    _ar_burst(c)                                           # warm-up burst (1-row kernels compile): not timed
+    assert "ar" not in shared
+    _ar_burst(c)
+    assert abs(shared["ar"] - 0.033) < 1e-9
+    actions = []
+    for _ in range(12):
+        mode, n = c.next_action()
+        actions.append(mode)
+        if mode == "ar":
+            _ar_burst(c, n=n)
+        else:
+            c.observe(c.width, 2, 0.095, after_ar=True)
+    assert actions.count("ar") >= 8 and "spec" in actions  # mostly AR, a verify probe every 24 AR tokens
+
+
+def test_high_acceptance_greedy_text_stays_speculative():
+    shared = {}
+    c = _seeded(shared, 0.92)
+    _ar_burst(c); _ar_burst(c)
+    assert all(c.next_action()[0] == "spec" for _ in range(20))
+
+
+def test_near_tie_stays_speculative_by_the_margin():
+    shared = {}
+    c = _seeded(shared, 0.25)
+    _ar_burst(c)
+    best = max(c.widths, key=lambda w: c.expected_tokens(w) / c.cost[w])
+    spec_rate = c.expected_tokens(best) / c.cost[best]
+    _ar_burst(c, per_token=1.0 / (spec_rate * 1.03))        # AR only 3 % faster: inside the 5 % hysteresis
+    assert c.next_action()[0] == "spec"
+
+
+def test_cycle_after_an_ar_burst_counts_acceptance_not_time():
+    shared = {}
+    c = _seeded(shared, 0.5)
+    before = dict(shared)
+    trials = list(c.trials)
+    c.observe(c.width, 3, 5.0, after_ar=True)               # slow: the drafter also ingested the burst's rows
+    assert all(shared[w] == before[w] for w in (5, 8, 16))
+    assert c.trials != trials
+
+
+def test_ar_fallback_is_off_for_a_pinned_width_and_by_env(monkeypatch):
+    assert _BlockChooser((8,)).allow_ar is False
+    monkeypatch.setenv("VMLX_DFLASH2_AR_FALLBACK", "0")
+    assert _BlockChooser((5, 8, 16)).allow_ar is False
+
+
+def test_exit_checkpoint_rolls_back_a_step_launched_past_the_last_token():
+    from vmlx_engine.dflash2_runtime import _checkpoint_correction
+    assert _checkpoint_correction(1, 0) == (-1, 1)         # one 1-row forward past confirmed[:-1]
+    assert _checkpoint_correction(0, 0) is None             # a burst that ended on time is already exact
+
+
+def test_gdn_rollback_of_a_whole_one_row_forward_restores_its_start_state():
+    import mlx.core as mx
+
+    from vmlx_engine.dflash2_runtime import _VLMGDNStateCapture
+
+    class Attn:
+        def __init__(self):
+            self.trimmed = 0
+        def is_trimmable(self):
+            return True
+        def trim(self, n):
+            self.trimmed += n
+
+    class GDN(list):
+        def is_trimmable(self):
+            return False
+
+    initial = mx.ones((1, 2, 3, 3))
+    conv_input = mx.arange(4 * 5).reshape(1, 4, 5).astype(mx.float32)   # kernel 4: 3 old rows + 1 new
+    adapter = type("A", (), {"_target": object(), "gdn_states": [
+        (None, None, None, None, None, None, None, initial, None, conv_input, 4)]})()
+    attn, gdn = Attn(), GDN([mx.zeros((1, 3, 5)), mx.zeros((1, 2, 3, 3))])
+    _VLMGDNStateCapture(adapter).rollback([attn, gdn], -1, 1)
+    assert attn.trimmed == 1
+    assert bool(mx.array_equal(gdn[1], initial))
+    assert bool(mx.array_equal(gdn[0], conv_input[:, :3]))

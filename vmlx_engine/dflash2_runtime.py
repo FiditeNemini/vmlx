@@ -282,6 +282,13 @@ class _VLMGDNStateCapture:
                 kernel_size,
             ) = self.adapter.gdn_states[gdn_index]
             count = int(accepted) + 1
+            if count == 0:
+                # Undo the whole forward (an AR step launched past the last
+                # emitted token): the state and conv window it started from.
+                layer_cache[1] = initial_state
+                layer_cache[0] = mx.contiguous(conv_input[:, : int(kernel_size) - 1])
+                gdn_index += 1
+                continue
             _, state = gated_delta_update(
                 q[:, :count],
                 k[:, :count],
@@ -1074,7 +1081,104 @@ def _stream_generate_resumable(
         # the width with the best predicted tokens per measured second.
         widths = _dflash2_block_plan(block_size, _lane_flat(adapter))
         chooser = _BlockChooser(widths, cost=_width_costs(adapter, widths))
+        after_ar = False
+
+        def _ar_step(tok_arr, history):
+            # One plain target step on the DFlash2 adapter: the same forward as a
+            # verify row, so the drafter's tap rows (hidden) stay available.
+            # The GDN sink then holds only this forward, which is what an exit
+            # rollback of a step launched past the last emitted token needs.
+            if _capture is not None:
+                _capture.clear()
+            with mx.stream(runtime.generation_stream):
+                logits = adapter(tok_arr, target_cache)
+                h = mx.concatenate(adapter._hidden_states, axis=-1)
+                last = logits[:, -1:]
+                if sampling_controls is not None:
+                    last = sampling_controls.process(last, history)
+                if temperature > 0:
+                    probs = (
+                        sampling_controls.probabilities(runtime, last, temperature, top_p, top_k)
+                        if sampling_controls is not None
+                        else runtime._sampling_probs(last, temperature, top_p, top_k)
+                    )
+                    nxt = runtime._sample_probs(probs)
+                else:
+                    nxt = mx.argmax(last, axis=-1)
+            return nxt, h
+
         while n < max_tokens:
+            mode, burst = chooser.next_action()
+            if mode == "ar":
+                # AR burst (see _BlockChooser.next_action): plain target steps,
+                # pipelined like the AR lane when no history-dependent sampling
+                # control needs each token on the host first. Each emitted
+                # token is sampled from the target's own distribution, so the
+                # output law is the AR lane's; greedy emits the target argmax.
+                k = min(int(burst), max_tokens - n)
+                _ar_t0 = time.perf_counter()
+                pipelined = sampling_controls is None
+                emitted: list = []
+                rows: list = []
+                launched_past = False
+                terminal = False
+                nx, h = _ar_step(mx.array([[tokens[-1]]]), prompt_list + tokens)
+                mx.async_eval(nx, h)
+                for j in range(k):
+                    launched = None
+                    if pipelined and j + 1 < k:
+                        nx2, h2 = _ar_step(nx.reshape(1, 1), None)
+                        mx.async_eval(nx2, h2)
+                        launched = (nx2, h2)
+                    t = int(nx.item())
+                    emitted.append(t)
+                    rows.append(h)
+                    if stop_matcher is not None:
+                        detokenizer.add_token(t)
+                    if t in tokenizer.eos_token_ids or (
+                        stop_matcher is not None and stop_matcher.matched
+                    ):
+                        terminal = True
+                    if terminal or j + 1 >= k:
+                        launched_past = launched is not None
+                        break
+                    if launched is None:
+                        nx, h = _ar_step(nx.reshape(1, 1), prompt_list + tokens + emitted)
+                        mx.async_eval(nx, h)
+                    else:
+                        nx, h = launched
+                chooser.observe_ar(time.perf_counter() - _ar_t0, len(emitted))
+                after_ar = True
+                hidden = mx.concatenate([hidden] + rows, axis=1)
+                if stop_matcher is None:
+                    for t in emitted:
+                        detokenizer.add_token(t)
+                tokens.extend(emitted)
+                n += len(emitted)
+                # Exit-checkpoint bookkeeping: the cache holds confirmed[:-1]
+                # exactly, plus one position when a step was launched past the
+                # last emitted token (its 1-row forward is then rolled back).
+                cycle_committed = 1 if launched_past else 0
+                cycle_kept = 0
+                if terminal:
+                    detokenizer.finalize()
+                    _checkpoint()
+                    resp = _respond(
+                        detokenizer.last_segment, emitted, len(emitted),
+                        prompt_arr.size, prompt_tps, n, tic, "stop",
+                    )
+                    resp.drafted = 0           # AR tokens: throughput, not draft acceptance
+                    yield resp
+                    return
+                if n // 256 > (n - len(emitted)) // 256:
+                    mx.clear_cache()
+                resp = _respond(
+                    detokenizer.last_segment, emitted, len(emitted),
+                    prompt_arr.size, prompt_tps, n, tic,
+                )
+                resp.drafted = 0
+                yield resp
+                continue
             bs = min(chooser.width, max_tokens - n + 1)
             if bs <= 1:
                 break
@@ -1202,7 +1306,8 @@ def _stream_generate_resumable(
             # It also includes the consumer's handling of the yield above
             # (detokenized text -> SSE); that cost is per cycle too, so it
             # belongs in a tokens-per-second comparison of widths.
-            chooser.observe(bs, len(new_tokens), time.perf_counter() - _cycle_t0)
+            chooser.observe(bs, len(new_tokens), time.perf_counter() - _cycle_t0, after_ar=after_ar)
+            after_ar = False
             trim = bs - accepted - 1
             if trim > 0:
                 if _target_can_trim:
@@ -1265,12 +1370,28 @@ class _BlockChooser:
         context length and GPU clock, not with text).
     Exactness is unaffected: width only changes how many drafts are verified,
     never the acceptance rule.
+
+    AR fallback (``next_action``), as the GLM lane's AdaptiveSpec: a verify
+    cycle carries a fixed drafter + host-sync cost that only pays at high
+    acceptance. Measured 2026-10-11, Qwen3.8-27B JANGH2 at the bundle's sampled
+    defaults (temp 1.0, acceptance 25-28 %): AR lane 29.9 tok/s vs DFlash2
+    25.5 (auto), 26.5 (fixed 2), 27-28.5 (fixed 3); a 2-row cycle cost 64 ms
+    vs 33 ms per pipelined AR step. Greedy stays far ahead (48 tok/s). So when
+    plain target steps are estimated at least ``ar_margin`` faster than the
+    best width, run an AR burst of ``ar_burst`` tokens; every
+    ``ar_probe_every`` AR tokens one verify cycle runs so the acceptance
+    estimate keeps tracking the text. The first decode action of every request
+    is a verify cycle (exit checkpoints rely on the drafter having run).
     """
 
     decay = 0.85
     cost_alpha = 0.25
     probe_every = 32
     prior_p = 0.7
+    ar_margin = 0.05
+    ar_probe_every = 24
+    ar_burst = 8
+    ar_alpha = 0.3
 
     def __init__(self, low, high: Optional[int] = None, cost: Optional[dict] = None):
         # ``low`` may be the whole tuple of candidate widths (from
@@ -1294,6 +1415,15 @@ class _BlockChooser:
         # kept the chooser off width 8 (served JANGH2 code 59.5 vs 63 fixed-8).
         self.cost: dict = cost if cost is not None else {}
         self.cycles = 0
+        import os
+        # Off for a pinned width (VMLX_DFLASH2_BLOCK=<n> is an A/B tool) and by
+        # VMLX_DFLASH2_AR_FALLBACK=0 (A/B control for this policy).
+        self.allow_ar = (
+            len(self.widths) > 1
+            and os.environ.get("VMLX_DFLASH2_AR_FALLBACK", "1") != "0"
+        )
+        self.ar_since_probe = 0
+        self.ar_tokens = 0
 
     def _accept_probs(self, w: int) -> list[float]:
         out, prev = [], self.prior_p
@@ -1309,7 +1439,37 @@ class _BlockChooser:
             e += run
         return e
 
-    def observe(self, width: int, tokens: int, seconds: float) -> None:
+    def next_action(self) -> tuple:
+        """("spec", width) for a verify cycle at ``self.width``, or ("ar", n)."""
+        if not self.allow_ar or self.cycles == 0:
+            return ("spec", self.width)
+        if any(w not in self.cost for w in self.widths):
+            return ("spec", self.width)    # still seeding width costs
+        t_ar = self.cost.get("ar")
+        if t_ar is None:
+            return ("ar", self.ar_burst)   # one AR measurement before comparing
+        best = max(self.widths, key=lambda w: self.expected_tokens(w) / self.cost[w])
+        spec_rate = self.expected_tokens(best) / self.cost[best]
+        if spec_rate * (1.0 + self.ar_margin) >= 1.0 / t_ar or self.ar_since_probe >= self.ar_probe_every:
+            self.ar_since_probe = 0
+            return ("spec", self.width)
+        return ("ar", self.ar_burst)
+
+    def observe_ar(self, seconds: float, tokens: int) -> None:
+        """An AR burst: seconds per token, shared process-wide like the width costs."""
+        if seconds <= 0 or tokens <= 0:
+            return
+        self.ar_tokens += tokens
+        self.ar_since_probe += tokens
+        warm = self.cost.setdefault("warm", set())
+        if "ar" not in warm:
+            warm.add("ar")                 # first burst in this process: 1-row kernels compile
+            return
+        per = seconds / tokens
+        c = self.cost.get("ar")
+        self.cost["ar"] = per if c is None else c + self.ar_alpha * (per - c)
+
+    def observe(self, width: int, tokens: int, seconds: float, after_ar: bool = False) -> None:
         if seconds <= 0 or width not in self.widths:
             return                         # clipped final block: not a candidate width
         accepted = tokens - 1
@@ -1323,6 +1483,8 @@ class _BlockChooser:
         warm = self.cost.setdefault("warm", set())
         if width not in warm:
             warm.add(width)                # first cycle at a width in this process: compile/warm-up
+        elif after_ar:
+            pass                           # this cycle's drafter also ingested the AR burst's rows
         else:
             c = self.cost.get(width)
             self.cost[width] = seconds if c is None else c + self.cost_alpha * (seconds - c)

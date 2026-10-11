@@ -215,3 +215,53 @@ def test_restore_at_a_boundary_inside_the_image_prefills_the_rest_of_it(monkeypa
         assert got == cold
     finally:
         target.close()
+
+
+def test_prefill_compute_clock_excludes_restore_and_covers_the_vision_tower():
+    """usage.vmlx_prefill (chat footer pp/s) on the GLM DFlash2 lane: the compute clock starts after the prefix
+    lookup/restore and still covers the vision tower + suffix prefill."""
+    from vmlx_engine.glm_dflash2 import PrefixStore
+    model = _target(14)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        ids1, first, end = _prompt(range(5, 22), 9, range(30, 41))
+        ids2 = ids1 + list(range(60, 77))
+        store = PrefixStore(4)
+        _, cold = _gen(model, target, _plan(model, ids1, first, end, 101, [], key_base=2 ** 31 + 7), 8, store)
+        assert cold.vision_tower and 0 < cold.prefill_compute_s <= cold.prefill_s
+        _, warm = _gen(model, target, _plan(model, ids2, first, end, 101, [], key_base=2 ** 31 + 7), 8, store)
+        assert warm.cached_tokens == len(ids1) and not warm.vision_tower
+        assert 0 < warm.prefill_compute_s <= warm.prefill_s
+    finally:
+        target.close()
+
+
+def test_stream_chunks_carry_the_prefill_receipt(monkeypatch):
+    import mlx_lm.tokenizer_utils as tu
+    import vmlx_engine.glm_dflash2 as glm
+
+    class Detok:
+        last_segment = ""
+        def reset(self): pass
+        def add_token(self, t): self.last_segment = "x"
+        def finalize(self): pass
+
+    class FakeWrapper:
+        eos_token_ids = {99}
+        detokenizer = Detok()
+
+    def rounds(target, draft, prompt_ids, max_tokens, eos, *a, stats=None, **k):
+        stats.prompt_tokens, stats.cached_tokens, stats.prefill_compute_s = 40, 30, 0.5
+        stats.vision_tower = True
+        yield [7], 0
+        yield [8, 99], 3
+
+    monkeypatch.setattr(tu, "TokenizerWrapper", FakeWrapper)
+    monkeypatch.setattr(glm, "target_for", lambda model, ids: object())
+    monkeypatch.setattr(glm, "_dflash2_rounds", rounds)
+    monkeypatch.setenv("VMLX_GLM_DFLASH2_PREFIX_CACHE", "0")
+    draft = type("D", (), {"config": type("C", (), {"target_layer_ids": [1]})()})()
+    chunks = list(glm.stream_glm_dflash2(object(), FakeWrapper(), draft, "", max_tokens=8, temperature=0.0,
+                                         prompt_tokens=list(range(40))))
+    want = {"tokens": 10, "seconds": 0.5, "scope": "model_prefill_and_prompt_state", "path": "glm_dflash2_with_vision"}
+    assert [c.prefill_usage for c in chunks] == [want, want]

@@ -149,6 +149,7 @@ class SpecStats:
     cached_tokens: int = 0                  # prompt tokens restored from the lane's prefix store
     cache_source: str = ""                  # "ram" | "disk" for a restored prefix (usage cache_detail)
     vision_tower: bool = False              # an image plan's embeddings were materialized for this prefill
+    prefill_compute_s: float = 0.0          # suffix prefill + prompt state + first sample, after lookup/restore
     blocks: list = field(default_factory=list)   # block size used by each verify round
     output_token_ids: list = field(default_factory=list)
 
@@ -761,6 +762,9 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
         cache = _clone_caches(snap.cache)
     if cache is None:
         cache = target.make_cache()
+    # pp/s receipt clock: lookup and restore above are excluded (the panel contract), the vision tower, suffix
+    # prefill, boundary snapshots and the first sample below are included.
+    compute_t0 = time.perf_counter()
     if reused == prompt.size:                       # whole prompt already prefilled
         logits, hidden = snap.logits, snap.hidden
     else:
@@ -804,6 +808,7 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
         tok = sampler(first)
     mx.eval(tok, hidden)
     st.prompt_tokens, st.prefill_s = prompt.size, time.perf_counter() - t0
+    st.prefill_compute_s = time.perf_counter() - compute_t0
     t1 = time.perf_counter()
     tokens = [int(tok.item())]; n = 1
     # Reuse the generation's existing history; export a copy only at terminal.
@@ -1001,6 +1006,14 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
                                mx.get_peak_memory() / 1e9, reason)
         r.drafted = int(drafted)
         r.cached_tokens = int(st.cached_tokens)        # prompt tokens restored from the prefix store (usage)
+        # usage.vmlx_prefill: the chat footer's pp/s. Same contract as the Qwen lane (dflash2_runtime) and the batched
+        # engines: tokens the model computed for this prompt, model prefill + prompt state (+ vision) seconds.
+        r.prefill_usage = {
+            "tokens": int(st.prompt_tokens) - int(st.cached_tokens),
+            "seconds": float(st.prefill_compute_s),
+            "scope": "model_prefill_and_prompt_state",
+            "path": "glm_dflash2" + ("_with_vision" if st.vision_tower else ""),
+        }
         if finished:
             r.output_token_ids = list(st.output_token_ids)
         # usage prompt_tokens_details.cache_detail, like the batched lanes' "native-glm+disk" / "block-disk"

@@ -430,12 +430,22 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const bundlePath = String(modelIdentity || '').split(/\s+/).reverse().find(part => part.startsWith('/')) || ''
   const [dflash2Drafters, setDflash2Drafters] = useState<Array<{ name: string; path: string; bundled?: boolean }>>([])
   useEffect(() => {
+    setDflash2Drafters([])
     if (isImage || !bundlePath) return
     let alive = true
     const api = (window as any).api?.models
     if (typeof api?.dflash2Drafters !== 'function') return
-    api.dflash2Drafters(bundlePath, qwen38Dense27b)
-      .then((list: unknown) => { if (alive && Array.isArray(list)) setDflash2Drafters(list as Array<{ name: string; path: string; bundled?: boolean }>) })
+    // Bundled capability must not wait for a scan of unrelated model roots.
+    // Populate it first, then enrich the optional external-drafter picker.
+    api.dflash2Drafters(bundlePath, false)
+      .then(async (list: unknown) => {
+        if (!alive) return
+        if (Array.isArray(list)) setDflash2Drafters(list as Array<{ name: string; path: string; bundled?: boolean }>)
+        if (qwen38Dense27b) {
+          const available = await api.dflash2Drafters(bundlePath, true)
+          if (alive && Array.isArray(available)) setDflash2Drafters(available)
+        }
+      })
       .catch(() => { /* advisory only */ })
     return () => { alive = false }
   }, [bundlePath, qwen38Dense27b, isImage])

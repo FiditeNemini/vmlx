@@ -18,7 +18,7 @@ import { spawn, ChildProcess } from "child_process";
 import { db } from "../database";
 import { detectModelConfigFromDir } from "../model-config-registry";
 import { configDeclaresDflash2 } from "../../shared/dflash2Drafter";
-import { findBundledDflash2Drafter } from "../dflash2Bundle";
+import { findBundledDflash2Drafter, isDflash2DrafterSelection } from "../dflash2Bundle";
 import { getBundledPythonPath, getDevelopmentProjectVenv } from "../engine-manager";
 import {
   getImageModelEncoderType,
@@ -1148,6 +1148,7 @@ async function findDflash2Drafters(): Promise<Array<{ name: string; path: string
 }
 
 export function registerModelHandlers(): void {
+  ipcMain.handle("models:classifyDflash2", (_e, path?: string) => isDflash2DrafterSelection(path));
   // Scan for available models in all configured directories
   ipcMain.handle("models:dflash2Drafters", async (_e, bundlePath?: string, scanLibrary: boolean = true) => {
     // The library walk only runs where a drafter is relevant (Qwen3.8 27B);

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { configDeclaresDflash2 } from '../shared/dflash2Drafter'
+import { configDeclaresDflash2, looksLikeDflash2Drafter } from '../shared/dflash2Drafter'
 
 /**
  * A DFlash2 drafter shipped INSIDE the model bundle: any immediate subfolder
@@ -29,4 +29,17 @@ export function findBundledDflash2Drafter(modelPath: string | undefined | null):
     }
   }
   return null
+}
+
+/** DFlash2 drafter by its config.json architecture (local path), else by name. */
+export function isDflash2DrafterSelection(path: string | undefined | null): boolean {
+  const value = String(path || '').trim()
+  if (!value) return false
+  try {
+    const cfg = join(value, 'config.json')
+    if (existsSync(cfg)) return configDeclaresDflash2(JSON.parse(readFileSync(cfg, 'utf8')))
+  } catch {
+    /* fall back to the name test */
+  }
+  return looksLikeDflash2Drafter(value)
 }

@@ -1,3 +1,4 @@
+import { useDflash2Selection } from '../../hooks/useDflash2Selection'
 import { useState, useEffect, useRef } from 'react'
 import { resolveSlowFamilyTimeoutSeconds } from '../../../../shared/slowFamilyTimeouts'
 import { ArrowLeft, ChevronRight } from 'lucide-react'
@@ -291,6 +292,7 @@ export function buildCommandPreview(
   detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null,
   detectedDflash2Path = '',
   hasBundledDrafter = false,
+  explicitDflash2?: boolean,
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -363,7 +365,7 @@ export function buildCommandPreview(
   parts.push('--port', config.port.toString())
   parts.push('--timeout', effectiveSessionTimeoutSeconds(config, detectedFamily).toString())
 
-  if (config.apiKey) parts.push('# VLLM_API_KEY=*** (env var)')
+  // API credentials are never embedded in the command preview.
   const rateLimit = finitePositiveInteger(config.rateLimit)
   if (rateLimit != null) parts.push('--rate-limit', rateLimit.toString())
 
@@ -386,7 +388,9 @@ export function buildCommandPreview(
     parts.push('--text-only')
   }
   const effectiveSpeculativeModel = config.speculativeModel || detectedDflash2Path
-  const dflash2Speculative = !dsv4Active && (!!detectedDflash2Path || /dflash2/i.test(effectiveSpeculativeModel))
+  const dflash2Speculative = !dsv4Active && (config.speculativeModel
+    ? (explicitDflash2 ?? /dflash2/i.test(config.speculativeModel))
+    : !!detectedDflash2Path)
   const cacheStackActive = dsv4Active
     ? true
     : dflash2Speculative
@@ -564,10 +568,13 @@ export function buildCommandPreview(
       config.additionalArgs,
       dsv4Active ? DSV4_ADDITIONAL_ARG_BLOCKLIST : TEXT_ADDITIONAL_ARG_BLOCKLIST,
     )
-    if (filtered.length) parts.push(filtered.join(' '))
+    if (filtered.length) parts.push(...filtered)
   }
 
-  return parts.join(' \\\n  ')
+  const quote = (value: string) => /^[A-Za-z0-9_./:=@,+%-]+$/.test(value)
+    ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'"
+  const command = parts.map((part, index) => index === 0 ? part : quote(part)).join(' \\\n  ')
+  return (config.apiKey ? '# Set VLLM_API_KEY in the environment before running.\n' : '') + command
 }
 
 export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
@@ -582,6 +589,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [previewMetadataState, setPreviewMetadataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
   const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null>(null)
   const [previewDrafters, setPreviewDrafters] = useState<Array<{ path: string; bundled?: boolean }>>([])
+  const explicitDflash2 = useDflash2Selection(config.speculativeModel || '')
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
   sessionIdRef.current = sessionId
@@ -886,7 +894,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
                     <p role="status" className="mb-2 text-xs text-muted-foreground">{t('sessions.settings.cliMetadataUnavailable')}</p>
                   )}
                   <pre className="p-3 bg-background/80 text-primary text-xs font-mono rounded-lg overflow-x-auto whitespace-pre-wrap">
-                    {buildCommandPreview(session.modelPath, config, detectedConfig, previewDrafters.find(d => config.speculativeModel ? d.path === config.speculativeModel : d.bundled && config.useBundledDflash2 !== false)?.path || '', previewDrafters.some(d => d.bundled))}
+                    {buildCommandPreview(session.modelPath, config, detectedConfig, previewDrafters.find(d => config.speculativeModel ? d.path === config.speculativeModel : d.bundled && config.useBundledDflash2 !== false)?.path || '', previewDrafters.some(d => d.bundled), explicitDflash2)}
                   </pre>
                 </>
               )}

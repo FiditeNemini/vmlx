@@ -62,3 +62,25 @@ describe('bundled DFlash2 drafter detection', () => {
     expect(findBundledDflash2Drafter('')).toBeNull()
   })
 })
+
+
+describe('explicit config-first selection shared by launch and settings', () => {
+  it('recognizes renamed local drafters and rejects misleading folder names', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+    const { isDflash2DrafterSelection } = await import('../src/main/dflash2Bundle')
+    const root = mkdtempSync(join(tmpdir(), 'vmlx-selection-'))
+    try {
+      const renamed = join(root, 'Custom Drafter')
+      const misleading = join(root, 'dflash2-not-a-drafter')
+      for (const dir of [renamed, misleading]) mkdirSync(dir)
+      writeFileSync(join(renamed, 'config.json'), JSON.stringify({ architectures: ['DFlash2DraftModel'] }))
+      writeFileSync(join(misleading, 'config.json'), JSON.stringify({ architectures: ['Qwen3ForCausalLM'] }))
+      expect(isDflash2DrafterSelection(renamed)).toBe(true)
+      expect(isDflash2DrafterSelection(misleading)).toBe(false)
+      expect(isDflash2DrafterSelection('z-lab/Qwen3.8-27B-DFlash2')).toBe(true)
+      expect(isDflash2DrafterSelection('')).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})

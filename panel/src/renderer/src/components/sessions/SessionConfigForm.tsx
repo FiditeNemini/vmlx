@@ -1,8 +1,9 @@
+import { useDflash2Selection } from '../../hooks/useDflash2Selection'
 import { PowerModeStatus } from './PowerModeStatus'
 import { DEFAULT_BLOCK_DISK_CACHE_PERCENT } from '../../../../shared/cacheDefaults'
 import { resolveNativeMtpMode } from '../../../../shared/nativeMtpLaunchArgs'
 import { useEffect, useState, useRef } from 'react'
-import { QWEN38_27B_DFLASH2_REPO, isQwen38Dense27b, looksLikeDflash2Drafter } from '../../../../shared/dflash2Drafter'
+import { QWEN38_27B_DFLASH2_REPO, isQwen38Dense27b } from '../../../../shared/dflash2Drafter'
 import { Modal } from '../ui/Modal'
 import { useTranslation } from '../../i18n'
 import {
@@ -454,8 +455,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const bundledDflash2 = dflash2Drafters.find(d => d.bundled) || null
   const bundledDflash2Active = !!bundledDflash2 && config.useBundledDflash2 !== false && !config.speculativeModel
   const effectiveDraftModel = config.speculativeModel || (bundledDflash2Active ? bundledDflash2!.path : '')
-  const dflash2Speculative = looksLikeDflash2Drafter(effectiveDraftModel) ||
-    dflash2Drafters.some(d => d.path === effectiveDraftModel)
+  const selectedDflash2 = useDflash2Selection(effectiveDraftModel)
+  const dflash2Speculative = selectedDflash2 || (!config.speculativeModel && bundledDflash2Active)
   const hybridCacheActive =
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||

@@ -116,21 +116,8 @@ import {
 } from '../shared/launchArgValues'
 import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../shared/nativeMtpLaunchArgs'
 import { planSessionConfigSave } from '../shared/sessionConfigLifecycle'
-import { configDeclaresDflash2, looksLikeDflash2Drafter } from '../shared/dflash2Drafter'
-import { findBundledDflash2Drafter } from './dflash2Bundle'
+import { findBundledDflash2Drafter, isDflash2DrafterSelection } from './dflash2Bundle'
 
-/** DFlash2 drafter by its config.json architecture (local path), else by name. */
-function isDflash2DrafterSelection(path: string | undefined | null): boolean {
-  const value = String(path || '').trim()
-  if (!value) return false
-  try {
-    const cfg = join(value, 'config.json')
-    if (existsSync(cfg)) return configDeclaresDflash2(JSON.parse(readFileSync(cfg, 'utf8')))
-  } catch {
-    /* fall back to the name test */
-  }
-  return looksLikeDflash2Drafter(value)
-}
 
 
 function hasNativeDflashCache(config: Partial<ServerConfig>, modelPath?: string): boolean {

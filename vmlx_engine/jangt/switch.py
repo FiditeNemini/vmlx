@@ -28,6 +28,37 @@ SORT_THRESHOLD = 72      # > 64 so an 8-token speculative verify block (8 x top-
 PREFILL_EXPERT_GROUP = 64
 
 
+def nax_prefill() -> bool:
+    """True when the sorted JANGT prefill (_prefill: jangt/prefill.py tiles) may run on this GPU.
+
+    Those kernels are NAX-only (jangh.kernels.nax_available: macOS >= 26.2 and an M5-class GPU). Without NAX they do not
+    fail, they compute garbage: user report 2026-10-11, M4 Max, 24 tokens x 4 experts vs an FP32 reference from the
+    same trellis weights, decode rel-L2 0.25 % vs NAX prefill 133.6 %; Naive JANGHT answered "2 + 2" with gibberish and
+    GLM JANGHT lost a two-turn state update. The decode kernels are correct on every GPU, so every batch uses them
+    there (slower long prefill, correct output). JANGTQ2_PREFILL=steel forces this route on M5 for A/B and tests. The
+    effective route is part of the persisted-cache identity (jangt_runtime_identity) so a prefix computed on one route
+    is never restored into the other."""
+    from vmlx_engine.jangh import kernels as JK
+    return bool(JK.nax_available())
+
+
+def jangt_runtime_identity() -> str:
+    """Persisted-state identity for the JANGT routed-expert runtime: its source and the effective prefill route."""
+    import hashlib
+    from pathlib import Path
+
+    digest = hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    try:
+        route = "nax" if nax_prefill() else "decode"
+    except Exception:
+        route = "unknown"
+    return "jangt=" + digest.hexdigest() + ";jangt_prefill=" + route
+
+
 class JTSwitchLinear(nn.Module):
     def __init__(self, input_dims: int, output_dims: int, num_experts: int, kbits, n_out: int, col_scales: bool,
                  state_bits: int = 12):
@@ -205,7 +236,7 @@ class JTMixedSwitchGLU(nn.Module):
     def routed(self, x, indices, scores):
         lead, kk = x.shape[:-1], indices.shape[-1]
         x2 = x.reshape(-1, self.D); idx2 = indices.reshape(-1, kk).astype(mx.int32); w2 = scores.reshape(-1, kk).astype(mx.float32)
-        if idx2.size < SORT_THRESHOLD:
+        if idx2.size < SORT_THRESHOLD or not nax_prefill():
             # JANGT gate/up feeding a JANGH down: rotate the activations in the gate/up epilogue (one dispatch less)
             ro = (self.gu_fmt == "jangt" and self.dn_fmt != "jangt" and self.I % 32 == 0
                   and os.environ.get("JANGT_ROT_OUT_DECODE", "0") == "1")   # measured neutral (-0.6%), off

@@ -195,6 +195,12 @@ def _resolve_runtime_cache_fingerprint() -> str:
     from .jangh.runtime_identity import runtime_identity as jangtq2_identity
 
     parts.append(jangtq2_identity())
+    # JANGT trellis experts (GLM-5.3 / Naive JANGHT): their kernels live outside jangh/ and their prefill route
+    # depends on the GPU (NAX tiles vs decode kernels, jangt.switch.nax_prefill). Bind both, so a prefix computed by
+    # one route (or by an older, wrong kernel) is never restored into another.
+    from .jangt.switch import jangt_runtime_identity
+
+    parts.append(jangt_runtime_identity())
     from .qwen4_rope_policy import exact_rope_attn_cache_identity
 
     rope_identity = exact_rope_attn_cache_identity()

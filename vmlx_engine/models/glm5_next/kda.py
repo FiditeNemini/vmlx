@@ -333,6 +333,23 @@ def short_conv_with_states(
     return y.astype(x.dtype), states[-1], states
 
 
+def _substitution_sliced(A):
+    """kda_substitution on at most 32 chunks per launch (2026-10-10). The kernel solves every 64x64 matrix in its own
+    threadgroup and is qualified (bit-identical to the 63-step loop) for 1..32 chunks; a prefill chunk above 2048 tokens
+    (NT > 32) used to fall back to the stock Python loop for the WHOLE call: 14.4 vs 2.6 ms per layer per 2048 tokens,
+    the KDA half of the GLM 4096-step prefill slowdown. Slicing keeps every launch inside the qualified shape."""
+    NT = A.shape[2]
+    if NT <= 32:
+        return kda_substitution(A)
+    parts = []
+    for lo in range(0, NT, 32):
+        part = kda_substitution(A[:, :, lo:lo + 32])
+        if part is None:
+            return None
+        parts.append(part)
+    return mx.concatenate(parts, axis=2)
+
+
 def kda_chunked(
     q: mx.array,
     k: mx.array,
@@ -394,7 +411,7 @@ def kda_chunked(
     A = mx.where(lower, -(Akk * bc[..., None]), mx.zeros_like(Akk))
 
     # forward substitution: (I - lower(A))^{-1}-style accumulation
-    solved = kda_substitution(A) if BT == 64 else None
+    solved = _substitution_sliced(A) if BT == 64 else None
     if solved is not None:
         A = solved
     else:

@@ -2114,7 +2114,12 @@
       "ok": "OK",
       "selectWorkingDir": "作業ディレクトリを選択",
       "attachImagesTitle": "画像を添付",
-      "attachImagesFilterImages": "画像"
+      "attachImagesFilterImages": "画像",
+      "slowStopTitle": "サーバーを停止しています",
+      "slowStopMessage": "{model} の停止を待っています",
+      "slowStopDetail": "サーバーはリクエストの処理やSSDキャッシュの保存を続けている可能性があります。完了まで待つことを推奨します。強制停止すると、未完了のキャッシュ書き込みが失われる場合があります。",
+      "slowStopWait": "待機を続ける",
+      "slowStopForce": "強制停止"
     },
     "window": {
       "downloads": "ダウンロード"

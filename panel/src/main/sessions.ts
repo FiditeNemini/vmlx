@@ -8,7 +8,9 @@ import {
 } from '../shared/enginePatienceWindows'
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
-import { clipboard, powerSaveBlocker } from 'electron'
+import { clipboard, powerSaveBlocker, dialog, BrowserWindow } from 'electron'
+import { t as tMain } from './i18n'
+import { stopProcessGracefully } from './gracefulProcessStop'
 import { EventEmitter } from 'events'
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { createServer } from 'net'
@@ -2837,22 +2839,31 @@ export class SessionManager extends EventEmitter {
         this.pushLog(owner.id, `[WARNING] Image job cancel before Stop failed; terminating the server: ${error}`)
       }
     }
-    this.killPid(proc.pid)
-    await new Promise(r => setTimeout(r, 1500))
-    try {
-      process.kill(proc.pid, 0)
-      this.killPid(proc.pid, 'SIGKILL')
-    } catch (_) { }
-
     if (owner) {
-      this.processes.delete(owner.id)
-      db.updateSession(owner.id, {
-        status: 'stopped',
-        pid: undefined,
-        lastStoppedAt: Date.now(),
-        standbyDepth: null,
-      })
-      this.emit('session:stopped', { sessionId: owner.id })
+      this.intentionalStops.set(owner.id, (this.intentionalStops.get(owner.id) || 0) + 1)
+      this.lifecycleEpochs.set(owner.id, (this.lifecycleEpochs.get(owner.id) ?? 0) + 1)
+      const managed = this.processes.get(owner.id)
+      if (managed) managed.intentionalStop = true
+    }
+    try {
+      await this.stopAdoptedProcess(proc.pid, proc.modelPath)
+
+      if (owner) {
+        this.processes.delete(owner.id)
+        db.updateSession(owner.id, {
+          status: 'stopped',
+          pid: undefined,
+          lastStoppedAt: Date.now(),
+          standbyDepth: null,
+        })
+        this.emit('session:stopped', { sessionId: owner.id })
+      }
+    } finally {
+      if (owner) {
+        const remaining = (this.intentionalStops.get(owner.id) || 1) - 1
+        if (remaining > 0) this.intentionalStops.set(owner.id, remaining)
+        else this.intentionalStops.delete(owner.id)
+      }
     }
   }
 
@@ -3786,18 +3797,14 @@ export class SessionManager extends EventEmitter {
       }
 
       if (managed?.process) {
-        await this.killChildProcess(managed.process)
+        await this.killChildProcess(managed.process, session.modelName || session.modelPath)
         this.processes.delete(sessionId)
       } else if (managed?.adoptedPid) {
-        this.killPid(managed.adoptedPid)
-        await new Promise(r => setTimeout(r, 1500))
-        try { process.kill(managed.adoptedPid, 0); this.killPid(managed.adoptedPid, 'SIGKILL') } catch (_) { }
+        await this.stopAdoptedProcess(managed.adoptedPid, session.modelName || session.modelPath)
         this.processes.delete(sessionId)
       } else if (session.pid) {
         // Fallback: kill by stored PID
-        this.killPid(session.pid)
-        await new Promise(r => setTimeout(r, 1500))
-        try { process.kill(session.pid, 0); this.killPid(session.pid, 'SIGKILL') } catch (_) { }
+        await this.stopAdoptedProcess(session.pid, session.modelName || session.modelPath)
       } else {
         // Ownership-scoped fallback. Never kill an unrelated app merely
         // because it happens to use this session's saved port.
@@ -5057,39 +5064,39 @@ export class SessionManager extends EventEmitter {
     // engine since our startup adoption; quitting this app must not kill it.
     // Explicitly adopted engines are already represented in this map.
     const owned = [...this.processes.entries()]
-    for (const [, managed] of owned) {
-      if (managed.process) {
-        try { managed.process.kill('SIGTERM') } catch (_) { }
-      } else if (managed.adoptedPid) {
-        this.killPid(managed.adoptedPid, 'SIGTERM')
-      }
+    for (const [id, managed] of owned) {
+      managed.intentionalStop = true
+      this.intentionalStops.set(id, (this.intentionalStops.get(id) || 0) + 1)
+      this.lifecycleEpochs.set(id, (this.lifecycleEpochs.get(id) ?? 0) + 1)
     }
-
-    // Wait for graceful shutdown, then SIGKILL any survivors
-    if (owned.length > 0) {
-      await new Promise(r => setTimeout(r, 3000))
+    try {
       for (const [id, managed] of owned) {
         const current = this.processes.get(id)
-        if (managed.process && current?.process === managed.process &&
-            managed.process.exitCode == null && managed.process.signalCode == null) {
-          try { managed.process.kill('SIGKILL') } catch (_) { }
-        } else if (managed.adoptedPid && current?.adoptedPid === managed.adoptedPid) {
-          this.killPid(managed.adoptedPid, 'SIGKILL')
+        if (current !== managed) continue
+        const session = db.getSessions().find(s => s.id === id)
+        const label = session?.modelName || session?.modelPath || id
+        if (managed.process) await this.killChildProcess(managed.process, label)
+        else if (managed.adoptedPid) await this.stopAdoptedProcess(managed.adoptedPid, label)
+      }
+
+      // Do not claim an unowned or remote session stopped. Exit callbacks can
+      // replace an owned entry with its terminal record while we await grace.
+      const sessions = db.getSessions()
+      for (const [id, managed] of owned) {
+        const current = this.processes.get(id)
+        if (current && current !== managed && (current.process || current.adoptedPid)) continue
+        this.processes.delete(id)
+        const s = sessions.find(session => session.id === id)
+        if (s && s.type !== 'remote' &&
+            (s.status === 'running' || s.status === 'loading' || s.status === 'standby')) {
+          db.updateSession(s.id, { status: 'stopped', pid: undefined, lastStoppedAt: Date.now(), standbyDepth: null })
         }
       }
-    }
-
-    // Do not claim an unowned or remote session stopped. Exit callbacks can
-    // replace an owned entry with its terminal record while we await grace.
-    const sessions = db.getSessions()
-    for (const [id, managed] of owned) {
-      const current = this.processes.get(id)
-      if (current && current !== managed && (current.process || current.adoptedPid)) continue
-      this.processes.delete(id)
-      const s = sessions.find(session => session.id === id)
-      if (s && s.type !== 'remote' &&
-          (s.status === 'running' || s.status === 'loading' || s.status === 'standby')) {
-        db.updateSession(s.id, { status: 'stopped', pid: undefined, lastStoppedAt: Date.now(), standbyDepth: null })
+    } finally {
+      for (const [id] of owned) {
+        const remaining = (this.intentionalStops.get(id) || 1) - 1
+        if (remaining > 0) this.intentionalStops.set(id, remaining)
+        else this.intentionalStops.delete(id)
       }
     }
   }
@@ -5810,35 +5817,72 @@ export class SessionManager extends EventEmitter {
     )
   }
 
-  private async killChildProcess(proc: ChildProcess): Promise<void> {
-    const pid = proc.pid
-    return new Promise((resolve) => {
-      // Escalate to SIGKILL after 10s if SIGTERM doesn't work
-      const killTimeout = setTimeout(() => {
-        // Kill entire process group (detached spawn)
-        if (pid) { try { process.kill(-pid, 'SIGKILL') } catch (_) { } }
-        try { proc.kill('SIGKILL') } catch (_) { }
-      }, 10000)
-
-      // B4: Final safety — resolve after 15s even if process never exits
-      const hardTimeout = setTimeout(() => {
-        clearTimeout(killTimeout)
-        resolve()
-      }, 15000)
-
-      proc.once('exit', () => {
-        clearTimeout(killTimeout)
-        clearTimeout(hardTimeout)
-        resolve()
+  private async confirmSlowStop(label: string, signal: AbortSignal): Promise<'wait' | 'force'> {
+    // macOS cannot abort an unparented message box: it blocks the event loop.
+    const existing = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
+    const parent = existing || new BrowserWindow({ width: 480, height: 180, show: false, title: tMain('main.dialog.slowStopTitle') })
+    if (!existing) parent.show()
+    try {
+      const result = await dialog.showMessageBox(parent, {
+        type: 'warning',
+        title: tMain('main.dialog.slowStopTitle'),
+        message: tMain('main.dialog.slowStopMessage', { model: label }),
+        detail: tMain('main.dialog.slowStopDetail'),
+        buttons: [tMain('main.dialog.slowStopWait'), tMain('main.dialog.slowStopForce')],
+        defaultId: 0, cancelId: 0, noLink: true, signal,
       })
+      return result.response === 1 ? 'force' : 'wait'
+    } finally {
+      if (!existing && !parent.isDestroyed()) parent.destroy()
+    }
+  }
 
-      // Send SIGTERM to process group first, then to the process directly
-      if (pid) { try { process.kill(-pid, 'SIGTERM') } catch (_) { } }
-      try { proc.kill('SIGTERM') } catch (_) {
-        clearTimeout(killTimeout)
-        clearTimeout(hardTimeout)
-        resolve()
+  private async stopAdoptedProcess(pid: number, label: string): Promise<void> {
+    // Pin the process start time: a PID reused during a long wait is not ours.
+    const identity = (): string | null | undefined => {
+      try {
+        const row = execFileSync('ps', ['-o', 'stat=', '-o', 'lstart=', '-p', String(pid)], { timeout: 1000 }).toString().trim()
+        if (!row || row.startsWith('Z')) return null
+        return row.replace(/^\S+\s+/, '')
+      } catch {
+        try { process.kill(pid, 0) } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') return null
+        }
+        // A failed inspection is not evidence that a live process exited.
+        return undefined
       }
+    }
+    const started = identity()
+    if (started === null) return
+    if (started === undefined) throw new Error(`Cannot verify server process ${pid} before stopping it`)
+    const isAlive = () => {
+      const current = identity()
+      return current === undefined || current === started
+    }
+    const signalOwned = (signal: NodeJS.Signals) => {
+      if (identity() === started) this.killPid(pid, signal)
+    }
+    await stopProcessGracefully({
+      isAlive,
+      terminate: () => signalOwned('SIGTERM'),
+      forceKill: () => signalOwned('SIGKILL'),
+      onSlow: signal => this.confirmSlowStop(label, signal),
+      pollMs: 250,
+    })
+  }
+
+  private async killChildProcess(proc: ChildProcess, label = 'vMLX'): Promise<void> {
+    const alive = () => proc.exitCode == null && proc.signalCode == null
+    const send = (signal: NodeJS.Signals) => {
+      if (!alive()) return
+      if (proc.pid) { try { process.kill(-proc.pid, signal); return } catch { } }
+      try { proc.kill(signal) } catch { }
+    }
+    await stopProcessGracefully({
+      isAlive: alive,
+      terminate: () => send('SIGTERM'),
+      forceKill: () => send('SIGKILL'),
+      onSlow: signal => this.confirmSlowStop(label, signal),
     })
   }
 

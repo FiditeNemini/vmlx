@@ -2114,7 +2114,12 @@
       "ok": "OK",
       "selectWorkingDir": "Select Working Directory",
       "attachImagesTitle": "Attach Images",
-      "attachImagesFilterImages": "Images"
+      "attachImagesFilterImages": "Images",
+      "slowStopTitle": "Server is still stopping",
+      "slowStopMessage": "Waiting for {model} to stop",
+      "slowStopDetail": "The server may still be finishing requests or saving its SSD cache. Keep waiting to let it finish. Force Stop can discard pending cache writes.",
+      "slowStopWait": "Keep Waiting",
+      "slowStopForce": "Force Stop"
     },
     "window": {
       "downloads": "Downloads"

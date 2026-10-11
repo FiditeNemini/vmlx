@@ -584,9 +584,9 @@ app.whenReady().then(async () => {
   })
 })
 
-// Kill all vmlx-engine processes on quit — with timeout to prevent hanging
+// Stop owned engines on quit; slow persistence offers an explicit force choice.
 app.on('before-quit', async (e) => {
-  if (isQuitting) return
+  if (isQuitting) { e.preventDefault(); return }
   isQuitting = true
   e.preventDefault()
   // mlxstudio#84 part 2: snapshot zoom factor now so Cmd+/- changes (which
@@ -607,14 +607,16 @@ app.on('before-quit', async (e) => {
     sessionManager.stopGlobalMonitor()
     killActiveDownload()  // Kill any active download subprocess
     killActiveOperation()  // Kill any active developer tool subprocess
-    // B15: Timeout stopAll to prevent app from hanging on quit
-    await Promise.race([
-      Promise.all([sessionManager.stopAll(), processManager.killAll()]),
-      new Promise(resolve => setTimeout(resolve, 15000))
-    ])
+    // The session manager offers an explicit force-stop choice for a slow
+    // shutdown. Do not bypass that choice while SSD persistence is draining.
+    await Promise.all([sessionManager.stopAll(), processManager.killAll()])
     console.log('[QUIT] All vmlx-engine processes stopped')
   } catch (err) {
     console.error('[QUIT] Error stopping processes:', err)
+    isQuitting = false
+    sessionManager.startGlobalMonitor()
+    dialog.showErrorBox(tMain('main.dialog.slowStopTitle'), String(err))
+    return
   }
   try {
     db.close()

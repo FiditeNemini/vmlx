@@ -2114,7 +2114,12 @@
       "ok": "确定",
       "selectWorkingDir": "选择工作目录",
       "attachImagesTitle": "附加图片",
-      "attachImagesFilterImages": "图片"
+      "attachImagesFilterImages": "图片",
+      "slowStopTitle": "服务器仍在停止中",
+      "slowStopMessage": "正在等待 {model} 停止",
+      "slowStopDetail": "服务器可能仍在完成请求或保存 SSD 缓存。请继续等待其完成。强制停止可能会丢失尚未完成的缓存写入。",
+      "slowStopWait": "继续等待",
+      "slowStopForce": "强制停止"
     },
     "window": {
       "downloads": "下载"

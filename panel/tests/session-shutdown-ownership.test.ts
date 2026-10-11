@@ -15,8 +15,11 @@ const { db, state } = vi.hoisted(() => {
 vi.mock('../src/main/database', () => ({ db }))
 vi.mock('electron', () => ({
   app: { getAppPath: () => process.cwd(), getPath: () => '/tmp', isPackaged: false },
+  BrowserWindow: { getFocusedWindow: () => ({}), getAllWindows: () => [] },
+  dialog: { showMessageBox: vi.fn(async () => ({ response: 1 })) },
   powerSaveBlocker: { isStarted: () => false, start: () => 1, stop: () => undefined },
 }))
+import { dialog } from 'electron'
 import { SessionManager } from '../src/main/sessions'
 
 afterEach(() => {
@@ -60,9 +63,10 @@ describe('app shutdown engine ownership', () => {
     const detect = vi.spyOn(manager, 'detect').mockResolvedValue([
       { pid: 902, port: 8002, modelPath: '/foreign/image', healthy: true },
     ])
-    const kill = vi.spyOn(process, 'kill').mockReturnValue(true)
-    const ownedKill = vi.fn()
-    ;(manager as any).processes.set('owned', { process: { pid: 901, kill: ownedKill }, adoptedPid: null })
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('No process group'), { code: 'ESRCH' }) })
+    const child = { pid: 901, exitCode: null as number | null, signalCode: null, kill: vi.fn() }
+    const ownedKill = child.kill.mockImplementation((signal: string) => { if (signal === 'SIGKILL') child.exitCode = 0 })
+    ;(manager as any).processes.set('owned', { process: child, adoptedPid: null })
     state.sessions = [
       { id: 'owned', status: 'running', type: 'local', pid: 901 },
       { id: 'foreign', status: 'standby', type: 'local', pid: 902 },
@@ -75,32 +79,48 @@ describe('app shutdown engine ownership', () => {
     expect(kill.mock.calls.some(([pid]) => Math.abs(Number(pid)) === 902)).toBe(false)
     expect(ownedKill).toHaveBeenCalledWith('SIGTERM')
     expect(ownedKill).toHaveBeenCalledWith('SIGKILL')
+    expect(dialog.showMessageBox).toHaveBeenCalledOnce()
     expect(state.sessions[0].status).toBe('stopped')
     expect(state.sessions[1].status).toBe('standby')
     expect(state.sessions[2].status).toBe('running')
   })
 
-  it('still stops explicitly adopted engines, including deep standby', async () => {
-    vi.useFakeTimers()
+  it('still stops a real explicitly adopted engine in deep standby', async () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+    await once(child, 'spawn')
+    try {
+      const manager = new SessionManager()
+      ;(manager as any).processes.set('adopted', { process: null, adoptedPid: child.pid })
+      state.sessions = [{ id: 'adopted', status: 'standby', type: 'local', pid: child.pid }]
+      await manager.stopAll()
+      expect(state.sessions[0]).toMatchObject({ status: 'stopped', pid: undefined, standbyDepth: null })
+      expect((manager as any).processes.size).toBe(0)
+      expect(dialog.showMessageBox).not.toHaveBeenCalled()
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = once(child, 'exit')
+        child.kill('SIGKILL')
+        await closed
+      }
+    }
+  })
+
+  it('signals an owned process group only once when group delivery succeeds', async () => {
     const manager = new SessionManager()
-    vi.spyOn(manager, 'detect').mockResolvedValue([])
-    const kill = vi.spyOn(process, 'kill').mockReturnValue(true)
-    ;(manager as any).processes.set('adopted', { process: null, adoptedPid: 903 })
-    state.sessions = [{ id: 'adopted', status: 'standby', type: 'local', pid: 903 }]
-    const stopping = manager.stopAll()
-    await vi.runAllTimersAsync()
-    await stopping
-    expect(kill).toHaveBeenCalledWith(-903, 'SIGTERM')
-    expect(kill.mock.calls.some(([pid, sig]) => Math.abs(Number(pid)) === 903 && sig === 'SIGKILL')).toBe(true)
-    expect(state.sessions[0]).toMatchObject({ status: 'stopped', pid: undefined, standbyDepth: null })
-    expect((manager as any).processes.size).toBe(0)
+    const child = { pid: 905, exitCode: null as number | null, signalCode: null, kill: vi.fn() }
+    const groupKill = vi.spyOn(process, 'kill').mockImplementation(() => { child.exitCode = 0; return true })
+    ;(manager as any).processes.set('owned', { process: child, adoptedPid: null })
+    state.sessions = [{ id: 'owned', status: 'running', type: 'local', pid: 905 }]
+    await manager.stopAll()
+    expect(groupKill).toHaveBeenCalledExactlyOnceWith(-905, 'SIGTERM')
+    expect(child.kill).not.toHaveBeenCalled()
   })
 
   it('does not force-kill a child that exited during graceful shutdown', async () => {
     vi.useFakeTimers()
     const manager = new SessionManager()
     vi.spyOn(manager, 'detect').mockResolvedValue([])
-    vi.spyOn(process, 'kill').mockReturnValue(true)
+    vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('No process group'), { code: 'ESRCH' }) })
     const child = { pid: 904, exitCode: null as number | null, signalCode: null, kill: vi.fn() }
     child.kill.mockImplementation((signal: string) => { if (signal === 'SIGTERM') child.exitCode = 0 })
     ;(manager as any).processes.set('owned', { process: child, adoptedPid: null })

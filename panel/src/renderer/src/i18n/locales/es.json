@@ -2114,7 +2114,12 @@
       "ok": "OK",
       "selectWorkingDir": "Seleccionar directorio de trabajo",
       "attachImagesTitle": "Adjuntar imágenes",
-      "attachImagesFilterImages": "Imágenes"
+      "attachImagesFilterImages": "Imágenes",
+      "slowStopTitle": "El servidor aún se está deteniendo",
+      "slowStopMessage": "Esperando a que {model} se detenga",
+      "slowStopDetail": "El servidor puede estar terminando solicitudes o guardando su caché SSD. Espera para que termine. Forzar la detención puede descartar escrituras pendientes de caché.",
+      "slowStopWait": "Seguir esperando",
+      "slowStopForce": "Forzar detención"
     },
     "window": {
       "downloads": "Descargas"

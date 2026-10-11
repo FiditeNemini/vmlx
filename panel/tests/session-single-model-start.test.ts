@@ -27,8 +27,8 @@ describe('manual session single-model enforcement', () => {
     // not re-run global detection to find (and kill) other apps' engines.
     expect(stopBlock).toContain('const owned = [...this.processes.entries()]')
     expect(stopBlock).not.toContain('this.detect()')
-    expect(stopBlock).toContain("managed.process.kill('SIGTERM')")
-    expect(stopBlock).toContain("managed.process.kill('SIGKILL')")
+    expect(stopBlock).toContain("await this.killChildProcess(managed.process, label)")
+    expect(stopBlock).toContain("await this.stopAdoptedProcess(managed.adoptedPid, label)")
   })
 
   it('serializes UI starts and unloads every other local engine before launch', () => {
@@ -109,8 +109,7 @@ describe('manual session single-model enforcement', () => {
     const block = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(block).toContain('this.killPid(proc.pid)')
-    expect(block).toContain("this.killPid(proc.pid, 'SIGKILL')")
+    expect(block).toContain('await this.stopAdoptedProcess(proc.pid, proc.modelPath)')
     expect(block).toContain("status: 'stopped'")
     expect(block).toContain("pid: undefined")
   })

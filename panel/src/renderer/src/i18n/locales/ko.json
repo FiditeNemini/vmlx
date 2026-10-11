@@ -2114,7 +2114,12 @@
       "ok": "확인",
       "selectWorkingDir": "작업 디렉토리 선택",
       "attachImagesTitle": "이미지 첨부",
-      "attachImagesFilterImages": "이미지"
+      "attachImagesFilterImages": "이미지",
+      "slowStopTitle": "서버가 아직 종료 중입니다",
+      "slowStopMessage": "{model} 종료를 기다리는 중",
+      "slowStopDetail": "서버가 요청을 마무리하거나 SSD 캐시를 저장하고 있을 수 있습니다. 완료될 때까지 기다려 주세요. 강제 종료하면 저장 중인 캐시가 손실될 수 있습니다.",
+      "slowStopWait": "계속 기다리기",
+      "slowStopForce": "강제 종료"
     },
     "window": {
       "downloads": "다운로드"

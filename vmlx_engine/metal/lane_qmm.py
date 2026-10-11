@@ -38,6 +38,8 @@ import hashlib
 import mlx.core as mx
 
 MAX_ROWS = 128
+# Output width from which a projection is a vocabulary head (lm_head / tied embedding) and stays on MLX (install).
+VOCAB_HEAD_MIN_N = 65536
 ROW_BLOCK = 32
 NT = 32
 BITS = (2, 3, 4, 5, 6, 8)
@@ -437,8 +439,16 @@ def install(model, *, tile: bool = True) -> dict:
         return {"lane": 0, "tiled": 0, "skipped": {"no Metal 4 tensor ops": 1}}
     counts = {"lane": 0, "tiled": 0, "skipped": {}}
     built, pending = [], 0
+    import os
+    keep_vocab = os.environ.get("VMLX_LANE_VOCAB_HEAD", "0") == "1"
     for _name, module in model.named_modules():
         if not isinstance(module, _nn.QuantizedLinear) or isinstance(module, LaneQuantizedLinear):
+            continue
+        if not keep_vocab and int(module["weight"].shape[0]) >= VOCAB_HEAD_MIN_N:
+            # Vocabulary-sized heads stay on MLX: measured 2026-10-11 (M5 Max, N=248,320 K=5,120 8-bit g64), the lane
+            # kernel is slower at every row count the DFlash2 lane uses: 1 row 3.46 vs 2.54 ms (AR step), 5 rows 3.95
+            # vs 2.62, 8 rows 3.95 vs 3.98, 16 rows 3.95 vs 3.57. VMLX_LANE_VOCAB_HEAD=1 restores the lane (A/B).
+            counts["skipped"]["vocab-sized head"] = counts["skipped"].get("vocab-sized head", 0) + 1
             continue
         if not _takes(module):
             kind = f"{type(module).__name__} {module.bits}-bit g{module.group_size} {module['scales'].dtype}"

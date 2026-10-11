@@ -62,3 +62,23 @@ def test_install_routes_only_plain_affine_layers_and_wide_calls_stay_mlx_exact()
     y = m.a(x)
     assert y.shape == (1, 6, 128)
     assert L.install(m)["lane"] == 0                           # idempotent
+
+
+def test_install_keeps_vocabulary_heads_on_mlx(monkeypatch):
+    """lm_head-sized projections (N >= VOCAB_HEAD_MIN_N) stay on MLX: the lane kernel measured slower at 1/5/16 rows
+    (N=248,320 K=5,120 8-bit: 3.46 vs 2.54 ms at 1 row). VMLX_LANE_VOCAB_HEAD=1 restores the lane for A/B."""
+    def model():
+        m = nn.Sequential(nn.Linear(256, 256, bias=False), nn.Linear(256, L.VOCAB_HEAD_MIN_N, bias=False))
+        nn.quantize(m, group_size=64, bits=8)
+        for layer in m.layers:
+            layer.scales = layer.scales.astype(mx.bfloat16)
+            layer.biases = layer.biases.astype(mx.bfloat16)
+        return m
+
+    m = model()
+    counts = L.install(m)
+    assert counts["lane"] == 1 and counts["skipped"].get("vocab-sized head") == 1
+    assert type(m.layers[1]) is nn.QuantizedLinear and isinstance(m.layers[0], L.LaneQuantizedLinear)
+    monkeypatch.setenv("VMLX_LANE_VOCAB_HEAD", "1")
+    m2 = model()
+    assert L.install(m2)["lane"] == 2

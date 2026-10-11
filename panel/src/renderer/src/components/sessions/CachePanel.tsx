@@ -259,6 +259,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   }
 
   const dflash2Cache = stats?.dflash2_cache
+  const dflash2Budget = dflash2Cache?.ssd?.bundle_budget ?? dflash2Cache?.ssd?.global_budget
   const schedulerCache = dflash2Cache ? null : stats?.scheduler_cache
   const schedulerStats = stats?.scheduler_stats
   const visionMemoryCache =
@@ -416,15 +417,18 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {dflash2Cache && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">DFlash2</h4>
+          {dflash2Cache.ssd?.budget_scope === 'bundle' && (
+            <p className="text-xs text-muted-foreground mb-2">{t('sessions.cache.dflash2BundleBudgetNote')}</p>
+          )}
           <div className="grid grid-cols-2 gap-2 text-sm">
             <StatCard label={`RAM · ${t('sessions.cache.entries')}`} value={`${dflash2Cache.ram.entries} / ${dflash2Cache.ram.max_entries}`} />
             {dflash2Cache.ssd && <>
               <StatCard label={`SSD · ${t('sessions.cache.thisEngineReads')}`} value={`${dflash2Cache.ssd.hits} / ${dflash2Cache.ssd.misses}`} />
               <StatCard label={`SSD · ${t('sessions.cache.thisEngineWrites')}`} value={String(dflash2Cache.ssd.writes)} />
               <StatCard label={t('sessions.cache.pendingWrites')} value={String(dflash2Cache.ssd.pending_writes)} />
-              <StatCard label={t('sessions.cache.managedRootSize')} value={dflash2Cache.ssd.global_budget.accounted && !dflash2Cache.ssd.global_budget.telemetry_stale ? formatCacheStorageBytes(dflash2Cache.ssd.global_budget.bytes_after) : t('sessions.cache.reconciliationPending')} />
-              <StatCard label={t('sessions.cache.managedRootLimit')} value={dflash2Cache.ssd.global_budget.max_size_bytes > 0 ? formatCacheStorageBytes(dflash2Cache.ssd.global_budget.max_size_bytes) : t('sessions.cache.unlimited')} />
-              <StatCard label={t('sessions.cache.managedRootStatus')} value={!dflash2Cache.ssd.global_budget.accounted || dflash2Cache.ssd.global_budget.telemetry_stale ? t('sessions.cache.reconciliationPending') : dflash2Cache.ssd.global_budget.compliant ? t('sessions.cache.withinLimit') : t('sessions.cache.overLimit')} />
+              <StatCard label={t('sessions.cache.managedRootSize')} value={dflash2Budget?.accounted && !dflash2Budget?.telemetry_stale ? formatCacheStorageBytes(dflash2Budget?.bytes_after) : t('sessions.cache.reconciliationPending')} />
+              <StatCard label={t('sessions.cache.managedRootLimit')} value={dflash2Budget?.max_size_bytes > 0 ? formatCacheStorageBytes(dflash2Budget?.max_size_bytes) : t('sessions.cache.unlimited')} />
+              <StatCard label={t('sessions.cache.managedRootStatus')} value={!dflash2Budget?.accounted || dflash2Budget?.telemetry_stale ? t('sessions.cache.reconciliationPending') : dflash2Budget?.compliant ? t('sessions.cache.withinLimit') : t('sessions.cache.overLimit')} />
             </>}
           </div>
         </div>

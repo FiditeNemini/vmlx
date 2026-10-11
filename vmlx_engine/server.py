@@ -14133,8 +14133,7 @@ async def health():
     if _engine is not None:
         from .speculative import is_dflash2_enabled as _df2_cache_enabled
         if _df2_cache_enabled():
-            from .dflash2_runtime import session_cache_stats
-            result.setdefault("cache", {})["dflash2_cache"] = session_cache_stats()
+            result.setdefault("cache", {})["dflash2_cache"] = _active_dflash2_cache_runtime().session_cache_stats()
         result["request_lifecycle"] = _request_lifecycle_health_snapshot(
             engine_stats,
             # Batched LLM and MLLM engines publish their scheduler IDs in the
@@ -14728,6 +14727,28 @@ async def admin_wake():
         return await _wake_with_lock_held()
 
 
+def _active_dflash2_cache_runtime():
+    """Choose cache ownership from the loaded bundle, never a request alias."""
+    config = _current_model_config()
+    if getattr(config, "family_name", None) in {"glm5_next", "glm5_next_text"}:
+        from . import glm_dflash2
+        return glm_dflash2
+    from . import dflash2_runtime
+    return dflash2_runtime
+
+
+async def _clear_glm_dflash2_cache(include_ssd: bool) -> bool:
+    """Exclude new generation while the native writer drains and clears."""
+    lock = getattr(_engine, "_generation_lock", None)
+    worker = getattr(_engine, "_run_model_call", None)
+    if lock is None or not callable(worker) or lock.locked():
+        return False
+    from . import glm_dflash2
+    async with lock:
+        await worker(lambda: glm_dflash2.clear_sessions(include_ssd=include_ssd))
+    return True
+
+
 @app.get("/v1/cache/stats", dependencies=[Depends(verify_api_key)])
 async def cache_stats():
     """Get cache statistics for debugging and monitoring."""
@@ -14740,8 +14761,7 @@ async def cache_stats():
             result["scheduler_cache"] = scheduler_cache
         from .speculative import is_dflash2_enabled as _df2_cache_enabled
         if _df2_cache_enabled():
-            from .dflash2_runtime import session_cache_stats
-            result["dflash2_cache"] = session_cache_stats()
+            result["dflash2_cache"] = _active_dflash2_cache_runtime().session_cache_stats()
             result["engine_stats"] = {
                 "last_durability": _engine.get_stats().get("last_durability")
             }
@@ -16498,13 +16518,21 @@ async def clear_cache(
         # DFlash2 lane (SimpleEngine): its own RAM session store and SSD tier.
         # Reported only when a DFlash2 drafter is loaded, so other sessions'
         # cleared/clear_failed status is unchanged.
-        from . import dflash2_runtime as _df2
+        _df2 = _active_dflash2_cache_runtime()
 
         try:
-            _df2.clear_sessions(include_ssd=clear_prefix_l2)
-            cleared.append("dflash2_sessions")
-            if clear_prefix_l2 and _df2._SESSION_SSD is not None:
-                cleared.append("dflash2_session_disk")
+            if _df2.__name__.endswith(".glm_dflash2"):
+                if await _clear_glm_dflash2_cache(clear_prefix_l2):
+                    cleared.append("glm_dflash2_prefix")
+                    if clear_prefix_l2 and _df2._PREFIX_DISK["root"]:
+                        cleared.append("glm_dflash2_prefix_disk")
+                else:
+                    skipped.append("glm_dflash2_prefix:requests_in_use")
+            else:
+                _df2.clear_sessions(include_ssd=clear_prefix_l2)
+                cleared.append("dflash2_sessions")
+                if clear_prefix_l2 and _df2._SESSION_SSD is not None:
+                    cleared.append("dflash2_session_disk")
         except Exception:
             logger.exception("DFlash2 session clear did not finish")
             skipped.append("dflash2_sessions:clear_failed")

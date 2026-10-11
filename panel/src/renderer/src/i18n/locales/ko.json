@@ -1440,6 +1440,7 @@
       "blockDiskExplainer": "네임스페이스 값은 이 모델/구성을 나타냅니다. 관리 루트 값에는 동일한 SSD 루트 아래의 모든 블록 캐시 네임스페이스와 형식화된 컴패니언이 포함됩니다. 네임스페이스 점유량과 블록 읽기 수는 재시작 후에도 유지되며, 이 엔진의 읽기·쓰기·축출은 모델 서버가 시작될 때 초기화됩니다.",
       "namespaceBlocks": "네임스페이스 블록",
       "namespaceSize": "네임스페이스 크기",
+      "dflash2BundleBudgetNote": "이 모델의 DFlash2 캐시에는 공유 SSD 캐시 용량과 별도의 저장 한도가 적용됩니다.",
       "managedRootSize": "관리 루트 크기",
       "reconciliationPending": "조정 대기 중",
       "managedRootLimit": "관리 루트 한도",

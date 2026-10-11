@@ -1440,6 +1440,7 @@
       "blockDiskExplainer": "命名空间数值描述当前模型/配置。受管根数值包含同一 SSD 根目录下的所有块缓存命名空间和类型化伴随缓存。命名空间占用量和块读取计数在重启后保留；本引擎的读取、写入和逐出会在模型服务器启动时重置。",
       "namespaceBlocks": "命名空间块",
       "namespaceSize": "命名空间大小",
+      "dflash2BundleBudgetNote": "此模型的 DFlash2 缓存使用独立的存储限额，不计入共享 SSD 缓存预算。",
       "managedRootSize": "受管根大小",
       "reconciliationPending": "等待对账",
       "managedRootLimit": "受管根上限",

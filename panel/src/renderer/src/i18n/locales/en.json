@@ -1440,6 +1440,7 @@
       "blockDiskExplainer": "Namespace values describe this model/configuration. Managed-root values include every block-cache namespace and typed companion under the same SSD root. Namespace occupancy and block-read counts persist across restarts; this-engine reads, writes, and evictions reset when the model server starts.",
       "namespaceBlocks": "Namespace Blocks",
       "namespaceSize": "Namespace Size",
+      "dflash2BundleBudgetNote": "This model’s DFlash2 cache has its own storage limit, separate from the shared SSD cache budget.",
       "managedRootSize": "Managed Root Size",
       "reconciliationPending": "Reconciliation pending",
       "managedRootLimit": "Managed Root Limit",

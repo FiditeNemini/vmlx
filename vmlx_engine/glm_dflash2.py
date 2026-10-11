@@ -380,6 +380,17 @@ class PrefixDiskTier:
     def flush(self) -> None:
         self._queue.join()
 
+    def clear(self) -> int:
+        """Clear this bundle's indexed snapshots while serving is excluded."""
+        self.flush()  # A queued write must not recreate an entry after Clear.
+        with self._lock:
+            names = list(self.index)
+            for name in names:
+                (self.dir / f"{name}.safetensors").unlink(missing_ok=True)
+                self.index.pop(name, None)
+            self._save_index()
+        return len(names)
+
     def close(self) -> None:
         """Drain queued snapshots and release the writer at model teardown.
 
@@ -487,6 +498,53 @@ class PrefixDiskTier:
 _PREFIX_STORES: dict = {}
 PREFIX_SNAPSHOT_EVERY = int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_EVERY", "2048"))
 _PREFIX_DISK = {"root": None, "max_bytes": 0.0}
+
+
+def session_cache_stats() -> dict:
+    """Metadata-only view of the native store; never query the Qwen store.
+
+    The native disk quota is per bundle, not the generic shared SSD pool.
+    Keep that scope explicit until the stores share a budget coordinator.
+    """
+    stores = list(_PREFIX_STORES.values())
+    keys = [key for store in stores for key in list(store.entries)]
+    result = {"runtime": "glm-dflash2", "ram": {
+        "entries": len(keys),
+        "max_entries": sum(store.max_entries for store in stores),
+        "tokens": sum(len(key) for key in keys),
+        "tokens_note": "sum_across_entries; prefixes_may_overlap",
+    }, "ssd": None}
+    disks = list({id(store.disk): store.disk for store in stores if store.disk is not None}.values())
+    if not _PREFIX_DISK["root"] and not disks:
+        return result
+    size = sum(disk.nbytes() for disk in disks)
+    cap = _PREFIX_DISK["max_bytes"]
+    import math
+    limit = int(cap) if math.isfinite(cap) else 0
+    result["ssd"] = {
+        "hits": sum(d.hits for d in disks), "misses": sum(d.misses for d in disks),
+        "writes": sum(d.writes for d in disks), "write_errors": sum(d.errors for d in disks),
+        "pending_writes": sum(d._queue.unfinished_tasks for d in disks),
+        "budget_scope": "bundle", "shared_pool": False,
+        "bundle_budget": {
+            "root": _PREFIX_DISK["root"], "scope": "bundle",
+            "bytes_after": size, "max_size_bytes": limit,
+            "accounted": bool(disks), "telemetry_stale": False,
+            "compliant": bool(disks) and (not limit or size <= limit),
+            "evicted_entries_total": sum(d.evictions for d in disks),
+        },
+    }
+    return result
+
+
+def clear_sessions(include_ssd: bool) -> int:
+    """Called on the model worker with the engine generation lock held."""
+    removed = 0
+    for store in list(_PREFIX_STORES.values()):
+        if include_ssd and store.disk is not None:
+            removed += store.disk.clear()
+        store.entries.clear()
+    return removed
 
 
 def _bundle_fingerprint(model_path) -> str:

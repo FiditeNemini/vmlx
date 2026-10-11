@@ -1440,6 +1440,7 @@
       "blockDiskExplainer": "名前空間の値はこのモデル/構成を表します。管理ルートの値には、同じ SSD ルート配下のすべてのブロックキャッシュ名前空間と型付きコンパニオンが含まれます。名前空間の占有量とブロック読み取り数は再起動後も保持されます。このエンジンの読み取り・書き込み・追い出しはモデルサーバーの起動時にリセットされます。",
       "namespaceBlocks": "名前空間ブロック",
       "namespaceSize": "名前空間サイズ",
+      "dflash2BundleBudgetNote": "このモデルのDFlash2キャッシュには、共有SSDキャッシュ容量とは別の保存容量制限があります。",
       "managedRootSize": "管理ルートサイズ",
       "reconciliationPending": "整合待ち",
       "managedRootLimit": "管理ルート上限",

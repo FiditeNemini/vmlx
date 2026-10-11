@@ -1440,6 +1440,7 @@
       "blockDiskExplainer": "Los valores de espacio de nombres describen este modelo/configuración. Los valores de la raíz gestionada incluyen cada espacio de nombres de caché de bloques y companion tipado bajo la misma raíz SSD. La ocupación del espacio de nombres y los recuentos de lecturas de bloques persisten entre reinicios; las lecturas, escrituras y desalojos de este motor se restablecen cuando arranca el servidor del modelo.",
       "namespaceBlocks": "Bloques del espacio de nombres",
       "namespaceSize": "Tamaño del espacio de nombres",
+      "dflash2BundleBudgetNote": "La caché DFlash2 de este modelo tiene su propio límite de almacenamiento, separado del presupuesto compartido de caché SSD.",
       "managedRootSize": "Tamaño de la raíz gestionada",
       "reconciliationPending": "Conciliación pendiente",
       "managedRootLimit": "Límite de la raíz gestionada",

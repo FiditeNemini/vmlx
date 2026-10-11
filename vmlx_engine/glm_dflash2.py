@@ -373,10 +373,23 @@ class PrefixDiskTier:
     def flush(self) -> None:
         self._queue.join()
 
+    def close(self) -> None:
+        """Drain queued snapshots and release the writer at model teardown.
+
+        The serving lifecycle has already stopped generation before calling
+        this method. Normal generation continues to enqueue without waiting.
+        """
+        if self._thread.is_alive():
+            self._queue.put(None)
+            self._thread.join()
+
     def _writer(self):
         while True:
-            name, key, snap = self._queue.get()
+            item = self._queue.get()
             try:
+                if item is None:
+                    return
+                name, key, snap = item
                 self._write(name, key, snap)
             except Exception as e:                         # never fail a generation over the SSD tier
                 self.errors += 1
@@ -500,7 +513,23 @@ def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path) ->
         root = root / _bundle_fingerprint(model_path)
     _PREFIX_DISK.update(root=str(root) if root is not None else None,
                         max_bytes=gb * 2 ** 30 if gb > 0 else float("inf"))
+    close_prefix_stores()
+
+
+def close_prefix_stores() -> None:
+    """Called only between model lifetimes, never on a generation path."""
+    for store in list(_PREFIX_STORES.values()):
+        if store.disk is not None:
+            store.disk.close()
     _PREFIX_STORES.clear()
+
+
+def shutdown_runtime() -> None:
+    """Finish SSD writes and remove adapters retaining an unloaded model."""
+    close_prefix_stores()
+    for target in list(_TARGETS.values()):
+        target.close()
+    _TARGETS.clear()
 
 
 def prefix_store_for(target) -> "PrefixStore":

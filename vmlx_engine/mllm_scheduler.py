@@ -5642,15 +5642,10 @@ class MLLMScheduler:
         # cancelling here used to lose the just-finished mediaSalt/TQ/L2 state.
         if self._processing_task and not self._terminal_cleanup_complete.is_set():
             logger.info("Waiting for terminal MLLM cache cleanup before stop")
-            try:
-                await asyncio.wait_for(
-                    self._terminal_cleanup_complete.wait(), timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Terminal MLLM cache cleanup did not finish within 5s; "
-                    "continuing scheduler shutdown"
-                )
+            # The worker can still be writing after five seconds. Closing its
+            # stores underneath it races publication; drain this owned operation
+            # before teardown. An external forced process kill remains distinct.
+            await self._terminal_cleanup_complete.wait()
         self._running = False
         if self._processing_task:
             self._processing_task.cancel()

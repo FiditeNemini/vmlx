@@ -462,7 +462,8 @@ async def test_llm_stop_waits_for_terminal_cache_cleanup_before_cancelling() -> 
     await asyncio.sleep(0)
 
     stopping = asyncio.create_task(engine.stop())
-    await asyncio.sleep(0)
+    # A realistic slow save must outlive the former five-second cutoff.
+    await asyncio.sleep(5.1)
     assert not stopping.done()
     assert order == []
 
@@ -492,7 +493,8 @@ async def test_mllm_stop_waits_for_terminal_cache_cleanup_before_cancelling() ->
     await asyncio.sleep(0)
 
     stopping = asyncio.create_task(scheduler.stop())
-    await asyncio.sleep(0)
+    # A realistic slow save must outlive the former five-second cutoff.
+    await asyncio.sleep(5.1)
     assert not stopping.done()
     assert order == []
 

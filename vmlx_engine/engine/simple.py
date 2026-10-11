@@ -572,7 +572,14 @@ class SimpleEngine(BaseEngine):
         """Stop the engine and cleanup resources."""
         # A published terminal's SSD write must land before teardown so a
         # restart can restore it.
-        await self._await_prior_terminal_persistence(timeout=5.0)
+        await self._await_prior_terminal_persistence()
+        # GLM's native speculative prefix store has its own background writer
+        # and tap adapters. It does not use the generic persistence future.
+        # Avoid importing a model runtime for engines that never used it.
+        import sys
+        glm_runtime = sys.modules.get("vmlx_engine.glm_dflash2")
+        if glm_runtime is not None:
+            await self._run_model_call(glm_runtime.shutdown_runtime)
         self._model = None
         self._loaded = False
         try:

@@ -113,3 +113,24 @@ def test_published_terminal_write_survives_reader_close_and_stop_waits_for_it():
         await asyncio.wait_for(stopping, timeout=1.0)
         assert engine.get_stats()["last_durability"]["durable"]
     asyncio.run(run())
+
+
+def test_stop_does_not_discard_a_terminal_write_after_five_seconds():
+    async def run():
+        receipt = Future()
+        chunk = SimpleNamespace(text="final", finish_reason="stop", prompt_tokens=10,
+                                completion_tokens=2, cached_tokens=0, cache_detail="",
+                                persistence_future=receipt)
+        engine = _engine_with_chunks([[chunk]])
+        stream = engine.stream_chat([], request_id="slow-save")
+        await anext(stream)
+        await stream.aclose()
+        stopping = asyncio.create_task(engine.stop())
+        try:
+            await asyncio.sleep(5.1)
+            assert not stopping.done(), "Stop returned before the published terminal became durable"
+            assert engine._model is not None
+        finally:
+            receipt.set_result({"outcome": "stored", "durable": True})
+            await asyncio.wait_for(stopping, 1.0)
+    asyncio.run(run())

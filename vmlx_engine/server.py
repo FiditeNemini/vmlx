@@ -6480,7 +6480,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown: Close MCP connections, stop engine, and kill caffeinate
-    # Wrap each in timeout to prevent hanging on quit
+    # Auxiliary cleanup is bounded. Engine stop owns the persistence drain;
+    # cancelling it on a wall-clock deadline can discard queued SSD snapshots.
     if _mcp_manager is not None:
         try:
             await asyncio.wait_for(_mcp_manager.stop(), timeout=10)
@@ -6489,7 +6490,7 @@ async def lifespan(app: FastAPI):
             logger.warning(f"MCP shutdown error (continuing): {e}")
     if _engine is not None:
         try:
-            await asyncio.wait_for(_engine.stop(), timeout=10)
+            await _engine.stop()
             logger.info("Engine stopped")
         except Exception as e:
             logger.warning(f"Engine shutdown error (continuing): {e}")

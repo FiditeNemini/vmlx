@@ -6985,10 +6985,13 @@ class MLXMultimodalLM:
             ):
                 emitted = len(getattr(chunk, "tokens", []) or [])
                 token_count += emitted
-                if getattr(chunk, "accepted", None) is not None:
+                # GLM adaptive AR bursts can emit multiple tokens with zero
+                # drafts. They contribute to throughput, not draft acceptance.
+                _drafted = int(getattr(chunk, "drafted", 4))
+                if getattr(chunk, "accepted", None) is not None and _drafted > 0:
                     emitted_per_cycle.append(int(chunk.accepted))
                     # verify width is adaptive (dflash2_runtime._BlockChooser)
-                    _w = int(getattr(chunk, "drafted", 4)) + 1
+                    _w = _drafted + 1
                     drafted_total += _w - 1
                     width_cycles[_w] = width_cycles.get(_w, 0) + 1
                 last_chunk = chunk

@@ -39,15 +39,21 @@ describe('actual DFlash2 command preview', () => {
     const drafter = '/models/Custom Drafter; echo nope'
     const command = buildCommandPreview(model, { ...DEFAULT_CONFIG,
       speculativeModel: drafter, apiKey: 'private-test-key',
-      blockDiskCacheDir: '/cache/space dir', additionalArgs: '--custom-flag literal' }, detected, '', false, true)
+      blockDiskCacheDir: '/cache/space dir', additionalArgs: '--custom-flag "friendly model"' }, detected, '', false, true)
     const parsed = JSON.parse(execFileSync('/usr/bin/python3', ['-c',
       'import json,shlex,sys; print(json.dumps(shlex.split(sys.stdin.read().replace(chr(92)+chr(10),""),comments=True)))'], { input: command, encoding: 'utf8' }))
     expect(parsed.slice(0, 3)).toEqual(['vmlx-engine', 'serve', model])
     expect(parsed[parsed.indexOf('--speculative-model') + 1]).toBe(drafter)
     expect(parsed[parsed.indexOf('--block-disk-cache-dir') + 1]).toBe('/cache/space dir')
-    expect(parsed[parsed.indexOf('--custom-flag') + 1]).toBe('literal')
+    expect(parsed[parsed.indexOf('--custom-flag') + 1]).toBe('friendly model')
     expect(command).not.toContain('private-test-key')
     expect(parsed).not.toContain('#')
+  })
+
+  it('keeps the settings renderer usable while a quote is unfinished', () => {
+    const preview = buildCommandPreview('/models/target', { ...DEFAULT_CONFIG, additionalArgs: '--custom "unfinished' }, detected)
+    expect(preview).toBe('# Additional Arguments has an unclosed quote')
+    expect(preview).not.toContain('vmlx-engine serve')
   })
 
 })

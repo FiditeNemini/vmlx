@@ -104,6 +104,50 @@ export function finitePositiveInteger(value: unknown): number | undefined {
   return number == null ? undefined : Math.max(1, Math.floor(number))
 }
 
+/** Shell-style quoting only: never expand variables, commands or globs. */
+export function splitAdditionalArgs(raw: string): string[] {
+  const tokens: string[] = []
+  let token = ''
+  let active = false
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw[i]
+    if (quote === "'") {
+      if (char === "'") quote = null
+      else token += char
+      continue
+    }
+    if (char === '\\') {
+      if (i + 1 === raw.length) throw new Error('Additional Arguments ends with an incomplete escape')
+      const next = raw[++i]
+      if (next === '\n') continue
+      if (quote === '"' && !['$', '`', '"', '\\'].includes(next)) token += '\\'
+      token += next
+      active = true
+      continue
+    }
+    if (quote === '"') {
+      if (char === '"') quote = null
+      else token += char
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      active = true
+    } else if (/\s/.test(char)) {
+      if (active) tokens.push(token)
+      token = ''
+      active = false
+    } else {
+      token += char
+      active = true
+    }
+  }
+  if (quote) throw new Error('Additional Arguments has an unclosed quote')
+  if (active) tokens.push(token)
+  return tokens
+}
+
 /**
  * Split a user-supplied "additional arguments" string into argv tokens, dropping
  * any flag the caller already emits itself. A blocked flag written as
@@ -111,7 +155,7 @@ export function finitePositiveInteger(value: unknown): number | undefined {
  */
 export function filterAdditionalArgs(raw: string | undefined, blockedFlags: Set<string>): string[] {
   if (!raw?.trim()) return []
-  const extra = raw.trim().split(/\s+/).filter(Boolean)
+  const extra = splitAdditionalArgs(raw)
   const filtered: string[] = []
   for (let i = 0; i < extra.length; i++) {
     const flag = extra[i]

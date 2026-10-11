@@ -564,11 +564,15 @@ export function buildCommandPreview(
   }
 
   if (config.additionalArgs && config.additionalArgs.trim()) {
-    const filtered = filterAdditionalArgs(
-      config.additionalArgs,
-      dsv4Active ? DSV4_ADDITIONAL_ARG_BLOCKLIST : TEXT_ADDITIONAL_ARG_BLOCKLIST,
-    )
-    if (filtered.length) parts.push(...filtered)
+    try {
+      const filtered = filterAdditionalArgs(
+        config.additionalArgs,
+        dsv4Active ? DSV4_ADDITIONAL_ARG_BLOCKLIST : TEXT_ADDITIONAL_ARG_BLOCKLIST,
+      )
+      if (filtered.length) parts.push(...filtered)
+    } catch (error) {
+      return '# ' + (error instanceof Error ? error.message : 'Invalid Additional Arguments')
+    }
   }
 
   const quote = (value: string) => /^[A-Za-z0-9_./:=@,+%-]+$/.test(value)

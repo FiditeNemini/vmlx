@@ -9384,6 +9384,7 @@ def load_model(
     flash_moe_slot_bank: int = 64,
     flash_moe_prefetch: str = "none",
     flash_moe_io_split: int = 4,
+    defer_start: bool = False,
 ):
     """
     Load a model (auto-detects MLLM vs LLM).
@@ -9397,6 +9398,7 @@ def load_model(
         max_prompt_tokens: Explicit prompt/context token cap before prefill.
             If unset, vMLX uses the memory-safe estimate.
         force_mllm: Force loading as MLLM even if not auto-detected
+        defer_start: Create a direct engine without loading weights, for ordered wake.
         distributed: Enable distributed inference (coordinator mode)
         distributed_mode: 'pipeline' or 'tensor'
         cluster_secret: Shared secret for worker authentication
@@ -9660,10 +9662,11 @@ def load_model(
         # (e.g., when called from admin_wake during deep sleep recovery).
         # Detect and skip; the engine's lazy start will handle it on first request.
         try:
-            asyncio.get_running_loop()
+            if not defer_start:
+                asyncio.get_running_loop()
             # Inside running loop — can't use asyncio.run(). Mark for deferred async start.
             _engine._needs_async_start = True
-            logger.info("SimpleEngine created (deferred start — inside event loop)")
+            logger.info("SimpleEngine created (deferred start)")
         except RuntimeError:
             # No running loop (CLI startup) — safe to use asyncio.run
             asyncio.run(_engine.start())
@@ -14599,6 +14602,7 @@ async def _admin_wake_impl():
                 # Reload text model — run in thread to avoid blocking event loop
                 # (loading large models takes 10-60s; _wake_lock prevents concurrent
                 # access to the globals that load_model modifies)
+                wake_args = dict(_cli_args)
                 await asyncio.to_thread(
                     load_model,
                     _model_path or _model_name,
@@ -14620,7 +14624,30 @@ async def _admin_wake_impl():
                     distributed_mode=_cli_args.get("distributed_mode", "pipeline"),
                     cluster_secret=_cli_args.get("cluster_secret", ""),
                     worker_nodes=_cli_args.get("worker_nodes"),
+                    defer_start=True,
                 )
+                # load_model replaces _cli_args; retain CLI-only drafter settings
+                # for this wake AND subsequent deep-sleep cycles. Load the draft
+                # on the new engine worker before target loader dispatch.
+                for key in ("speculative_model", "num_draft_tokens"):
+                    if key in wake_args:
+                        _cli_args[key] = wake_args[key]
+                # Reload speculative draft model if configured
+                _spec_model = _cli_args.get("speculative_model")
+                if _spec_model:
+                    try:
+                        from .speculative import SpeculativeConfig, load_draft_model
+
+                        _spec_cfg = SpeculativeConfig(
+                            model=_spec_model,
+                            num_tokens=_cli_args.get("num_draft_tokens", 3),
+                        )
+                        # issue #200: reload draft model on the model worker
+                        # thread to avoid a Metal eval race with generation.
+                        await _run_on_model_executor(load_draft_model, _spec_cfg)
+                        logger.info(f"Draft model reloaded: {_spec_model}")
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to reload configured draft model on wake: {e}") from e
                 # Start engine after wake. Both SimpleEngine and BatchedEngine
                 # expose `_loaded` — start() is idempotent for SimpleEngine and
                 # required for BatchedEngine (lifespan usually handles this,
@@ -14645,22 +14672,6 @@ async def _admin_wake_impl():
                 # because _engine._loaded is False at check time inside event loop)
                 if _enable_jit and _engine is not None:
                     await _run_on_model_executor(_apply_jit_compilation)
-                # Reload speculative draft model if configured
-                _spec_model = _cli_args.get("speculative_model")
-                if _spec_model:
-                    try:
-                        from .speculative import SpeculativeConfig, load_draft_model
-
-                        _spec_cfg = SpeculativeConfig(
-                            model=_spec_model,
-                            num_tokens=_cli_args.get("num_draft_tokens", 3),
-                        )
-                        # issue #200: reload draft model on the model worker
-                        # thread to avoid a Metal eval race with generation.
-                        await _run_on_model_executor(load_draft_model, _spec_cfg)
-                        logger.info(f"Draft model reloaded: {_spec_model}")
-                    except Exception as e:
-                        logger.warning(f"Failed to reload draft model on wake: {e}")
                 # Measure after the optional speculative draft is resident so
                 # deep-wake prompt limits use the same total memory ownership
                 # as initial startup.

@@ -370,12 +370,18 @@ def test_prefix_disk_tier_budget_keeps_newest(tmp_path):
         disk = PrefixDiskTier(tmp_path, 2 ** 30)
         store = PrefixStore(4, disk=disk)
         _run(model, target, list(range(5, 30)), 4, store); disk.flush()
+        assert store.last_persistence.result()["durable"] is True
         one = disk.nbytes()
         disk.max_bytes = one * 1.5                                          # room for one snapshot, not two
         _run(model, target, list(range(40, 70)), 4, store); disk.flush()
         assert len(disk.index) == 1 and disk.evictions == 1
         assert next(iter(disk.index.values()))["n"] == 30
         assert len(list(tmp_path.glob("*.safetensors"))) == 1
+        disk.max_bytes = 1
+        _run(model, target, list(range(80, 110)), 4, store)
+        outcome = store.last_persistence.result(timeout=5)
+        assert outcome["outcome"] == "refused" and outcome["durable"] is False
+        assert outcome["retained_tokens"] == 0
     finally:
         target.close()
 

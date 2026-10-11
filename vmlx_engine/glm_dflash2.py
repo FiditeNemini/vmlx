@@ -257,6 +257,7 @@ class PrefixStore:
         self.entries = OrderedDict()
         self.hits = self.misses = self.evictions = 0
         self.disk = disk
+        self.last_persistence = None
         self.last_source = ""                   # "ram" | "disk" | "" (miss) for the latest lookup
 
     def lookup(self, ids):
@@ -294,7 +295,7 @@ class PrefixStore:
         self.entries.move_to_end(key)
         self._evict()
         if self.disk is not None:
-            self.disk.put(key, snap)
+            self.last_persistence = self.disk.put(key, snap)
 
     def _evict(self):
         while len(self.entries) > self.max_entries or (len(self.entries) > 1 and self.nbytes() > self.max_bytes):
@@ -362,13 +363,19 @@ class PrefixDiskTier:
         with self._lock:
             return sum(e["bytes"] for e in self.index.values())
 
-    def put(self, key: tuple, snap: "_PrefixSnapshot") -> None:
+    def put(self, key: tuple, snap: "_PrefixSnapshot"):
+        from concurrent.futures import Future
+
+        receipt = Future()
         name = self.digest(key)
         with self._lock:
             if name in self.index:
                 self.index[name]["used"] = time.time()
-                return
-        self._queue.put((name, key, snap))
+                receipt.set_result({"outcome": "already_durable", "durable": True,
+                                    "retained_tokens": len(key), "detail": "glm-dflash2-prefix-disk"})
+                return receipt
+        self._queue.put((name, key, snap, receipt))
+        return receipt
 
     def flush(self) -> None:
         self._queue.join()
@@ -389,12 +396,15 @@ class PrefixDiskTier:
             try:
                 if item is None:
                     return
-                name, key, snap = item
-                self._write(name, key, snap)
+                name, key, snap, receipt = item
+                receipt.set_result(self._write(name, key, snap))
             except Exception as e:                         # never fail a generation over the SSD tier
                 self.errors += 1
                 import logging
                 logging.getLogger(__name__).warning("glm dflash2 prefix disk write failed: %s", e)
+                if not receipt.done():
+                    receipt.set_result({"outcome": "failed", "durable": False,
+                                        "retained_tokens": 0, "detail": str(e)[:200]})
             finally:
                 self._queue.task_done()
 
@@ -425,6 +435,10 @@ class PrefixDiskTier:
                 (self.dir / f"{name}.safetensors").unlink(missing_ok=True)
                 self.evictions += 1
             self._save_index()
+            retained = name in self.index
+            return {"outcome": "stored" if retained else "refused", "durable": retained,
+                    "retained_tokens": len(key) if retained else 0,
+                    "detail": "glm-dflash2-prefix-disk" if retained else "snapshot exceeds disk budget"}
 
     def lookup(self, ids, min_len: int = 0):
         with self._lock:
@@ -869,12 +883,12 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
         detok = _StopDetokenizer(detok, [stop] if isinstance(stop, str) else list(stop))
     target = target_for(model, draft.config.target_layer_ids)
     st = SpecStats(); tic = time.perf_counter(); n = 0
+    store = (prefix_store_for(target)
+             if os.environ.get("VMLX_GLM_DFLASH2_PREFIX_CACHE", "1") != "0" else None)
     for new, drafted in _dflash2_rounds(target, draft, list(prompt_tokens), int(max_tokens), eos, float(temperature),
                                         float(top_p), int(top_k), stats=st, controls=sampling_controls,
                                         adaptive=os.environ.get("VMLX_GLM_DFLASH2_ADAPTIVE", "1") != "0",
-                                        prefix_store=(prefix_store_for(target)
-                                                      if os.environ.get("VMLX_GLM_DFLASH2_PREFIX_CACHE", "1") != "0"
-                                                      else None)):
+                                        prefix_store=store):
         if n == 0:
             tic = time.perf_counter()
         for t in new:
@@ -892,6 +906,10 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
         r.cached_tokens = int(st.cached_tokens)        # prompt tokens restored from the prefix store (usage)
         # usage prompt_tokens_details.cache_detail, like the batched lanes' "native-glm+disk" / "block-disk"
         r.cache_detail = {"ram": "glm-dflash2-prefix", "disk": "glm-dflash2-prefix+disk"}.get(st.cache_source, "")
+        if finished and store is not None:
+            # Publish the terminal immediately; SimpleEngine waits for this
+            # request's SSD receipt only at the next admission or teardown.
+            r.persistence_future = store.last_persistence
         yield r
         if finished:
             return

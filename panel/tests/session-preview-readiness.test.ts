@@ -13,7 +13,10 @@ function loadFixture(config: string, detectConfig: () => Promise<unknown>) {
     active: true, sessionId: 'test-session',
     window: { api: { sessions: { get: async () => ({ id: 'test-session', modelPath: '/fixture', config }) }, models: {
       getGenerationDefaults: async () => null, detectConfig,
+      // ffc5bcc6/5408e8e1: the loader also lists the bundle's DFlash2 drafters for the preview.
+      dflash2Drafters: async () => [],
     } } },
+    setPreviewDrafters: () => {},
     DEFAULT_CONFIG: { port: 8000 }, setConfig,
     setSession: (value: any) => { state.session = value },
     setDirty: (value: boolean) => { state.dirty = value },

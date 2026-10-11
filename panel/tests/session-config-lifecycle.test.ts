@@ -71,7 +71,8 @@ describe('saved next-start configuration is not a live endpoint', () => {
   })
   it('does not advertise LLM SSD caching or a hardcoded host for image servers', () => {
     const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
-    expect(form).toContain("{!isImage && <InfoNote text={t('sessions.config.ramCacheTradeoffNotice')} />}")
+    // ffc5bcc6: DFlash2 sessions show their native-cache note instead of the RAM trade-off note.
+    expect(form).toContain("{!isImage && <InfoNote text={t(dflash2Speculative ? 'sessions.config.nativeDflashCacheNote' : 'sessions.config.ramCacheTradeoffNotice')} />}")
     const image = readFileSync('src/renderer/src/components/image/ImageSettings.tsx', 'utf8')
     expect(image).not.toContain("t('image.settings.hostLocalhost')")
     expect(image).not.toContain("t('image.settings.portAutoAssigned')")

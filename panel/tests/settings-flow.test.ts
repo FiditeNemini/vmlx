@@ -1214,7 +1214,7 @@ describe('Disk Cache', () => {
         expect(source).not.toContain('cacheControlUpdatesForPagedToggle')
         expect(source).toContain('cacheControlUpdatesForBlockDiskToggle')
         expect(source).not.toContain("label={t('sessions.config.pagedKVCache')}")
-        expect(source).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}')
+        expect(source).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || (exactTypedPromptDiskCache && !dflash2Speculative)}')
         expect(source).toContain('disabled={dsv4Active || cachePolicy.legacyDiskCacheDisabled}')
         expect(source).toContain('checked={cachePolicy.legacyDiskCacheChecked}')
         expect(source).not.toContain('disabled={batchingOff || prefixOff || zayaTypedCacheRequiresPaged || dsv4CompositeRequiresPaged}')
@@ -2965,7 +2965,8 @@ describe('Default IP and New Settings', () => {
         expect(familyBlock).toContain('config.noMemoryAwareCache = false')
         expect(familyBlock).toContain("config.kvCacheQuantization = 'auto'")
         expect(launchBlock).toContain('exactTypedPromptDiskCache ? false')
-        expect(launchBlock).toContain('enableDiskCache: !!diskControls.enableDiskCache')
+        // ffc5bcc6: a DFlash2 speculative session owns its native SSD tier, so the prompt L2 is off there only.
+        expect(launchBlock).toContain('enableDiskCache: !dflash2Speculative && !!diskControls.enableDiskCache')
 
         for (const file of [
             'src/renderer/src/components/sessions/CreateSession.tsx',
@@ -2992,7 +2993,8 @@ describe('Default IP and New Settings', () => {
         expect(form).toContain('disabled={exactTypedPromptDiskCache}')
         expect(form).toContain("t('sessions.config.openPanguMemoryAwareNote')")
         expect(enLocale).toContain("Memory-aware mode is required for openPangu's non-aliasing typed cache clone")
-        expect(form).toContain('cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache')
+        // ffc5bcc6: the typed-prompt lock does not apply to a DFlash2 speculative session's native SSD tier.
+        expect(form).toContain('cachePolicy.blockDiskCacheDisabled || (exactTypedPromptDiskCache && !dflash2Speculative)')
     })
 
     it('GLM-5.3 preserves the text-only typed prompt L2 route across startup, reset, adoption, and launch', () => {
@@ -3001,10 +3003,10 @@ describe('Default IP and New Settings', () => {
         expect(usesExactTypedPromptDiskCache('glm5-next')).toBe(true)
 
         const source = readFileSync('src/main/sessions.ts', 'utf8')
-        const familyStart = source.indexOf("} else if (detectedFamily === 'glm5-next' && !usesGlmNativeSsdPool(detected, config))")
+        const familyStart = source.indexOf("} else if (detectedFamily === 'glm5-next' && !usesGlmNativeSsdPool(detected, config) && !hasNativeDflashCache(config, modelPath))")
         expect(familyStart).toBeGreaterThanOrEqual(0)
         const familyBlock = source.slice(familyStart, source.indexOf("} else if (detectedFamily === 'openpangu_v2')", familyStart))
-        const freshStart = source.indexOf("} else if (freshFamily === 'glm5-next' && !usesGlmNativeSsdPool(freshConfig, config))")
+        const freshStart = source.indexOf("} else if (freshFamily === 'glm5-next' && !usesGlmNativeSsdPool(freshConfig, config) && !hasNativeDflashCache(config, config.modelPath))")
         expect(freshStart).toBeGreaterThanOrEqual(0)
         const freshBlock = source.slice(freshStart, source.indexOf("} else if (freshFamily === 'openpangu_v2')", freshStart))
 
@@ -3019,7 +3021,8 @@ describe('Default IP and New Settings', () => {
 
         expect(source).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily, usesGlmNativeSsdPool(detected))')
         expect(source).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily, usesGlmNativeSsdPool(detected))')
-        expect(source).toContain('enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache')
+        // ffc5bcc6: DFlash2 speculative sessions keep the user's SSD choice for the native session tier.
+        expect(source).toContain('enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache')
 
         for (const file of [
             'src/renderer/src/components/sessions/CreateSession.tsx',
@@ -3938,7 +3941,7 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain("dsv4Active ? applyDsv4CompositeCacheToggle(v) : applyCacheControlUpdates(cacheControlUpdatesForPagedToggle")
         expect(form).not.toContain("dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle")
         expect(form).not.toContain("label={t('sessions.config.pagedKVCache')}")
-        expect(form).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}')
+        expect(form).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || (exactTypedPromptDiskCache && !dflash2Speculative)}')
         expect(form).toContain("t('sessions.config.blockSizeTooltipDsv4')")
         expect(
             fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
@@ -4081,7 +4084,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain('architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !nativeOmniStage1 && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked')
         expect(enLocale).toContain('Enable Block Disk Cache for persistent typed MSA prefix reuse')
         expect(form).not.toContain('LOCKED OFF')
-        expect(form).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}')
+        expect(form).toContain('disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || (exactTypedPromptDiskCache && !dflash2Speculative)}')
     })
 
     it('settings form keeps legacy prompt disk unavailable while exposing DSV4 Block Disk L2', () => {

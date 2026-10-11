@@ -102,9 +102,15 @@ describe('explicit Stop cancels a queued start', () => {
       expect(wasImageGenerationCancelled(controller)).toBe(true)
     })
     vi.spyOn(process, 'kill').mockImplementation(() => true)
+    // c0b41b94: an adopted process is stopped gracefully (identity-pinned SIGTERM, then SIGKILL) through
+    // stopAdoptedProcess, which reads the PID's start time with ps. A fixture PID has no ps row, so stand in for the
+    // graceful stop's first signal; what this test guards is the ORDER (request marked before any signal).
+    vi.spyOn(manager as any, 'stopAdoptedProcess').mockImplementation(async (...args: unknown[]) => {
+      ;(manager as any).killPid(args[0] as number, 'SIGTERM')
+    })
     const stop = (manager as any).terminateDetectedLocalEngine({ modelPath, port: 8013, pid: 987654321 })
     await vi.advanceTimersByTimeAsync(0)
-    expect(kill).toHaveBeenCalledWith(987654321)
+    expect(kill).toHaveBeenCalledWith(987654321, 'SIGTERM')
     await vi.advanceTimersByTimeAsync(1500)
     await stop
     expect(getImageGenerationStatus()).toMatchObject({ generating: true, cancelling: true })

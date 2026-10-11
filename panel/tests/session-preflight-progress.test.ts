@@ -29,6 +29,8 @@ function fixture() {
     bundlePreflightCounts: new Map(), bundlePreflightProgress: new Map(), lastLoadProgressEvents: new Map(),
     pendingBundlePreflightLogs: new Map(), logBuffers: new Map(),
     findEnginePath: () => ({ type: 'development' }), validateLocalSessionTarget: vi.fn(),
+    // 8a4618ff: launch-argument syntax is validated before any lifecycle change.
+    validateAdditionalArgumentSyntax: vi.fn(),
     pushLog: (id: string, line: string) => state.logBuffers.set(id, [...(state.logBuffers.get(id) || []), line]),
     emit: (name: string, value: any) => events.push({ name, ...value }),
     emitLoadProgress: (value: any) => { state.lastLoadProgressEvents.set(value.sessionId, value); events.push({ name: 'session:loadProgress', ...value }) },

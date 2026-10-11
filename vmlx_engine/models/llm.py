@@ -470,6 +470,8 @@ class MLXLanguageModel:
         except ImportError:
             pass
 
+        from ..utils.prefill_step import prefill_step_size
+
         for response in stream_generate(
             self.model,
             self.tokenizer,
@@ -477,6 +479,7 @@ class MLXLanguageModel:
             max_tokens=max_tokens,
             sampler=sampler,
             logits_processors=logits_processors,
+            prefill_step_size=prefill_step_size(),
             **spec_kwargs,
         ):
             token_count += 1

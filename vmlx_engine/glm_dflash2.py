@@ -985,8 +985,10 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
     st = SpecStats(); tic = time.perf_counter(); n = 0
     store = (prefix_store_for(target)
              if os.environ.get("VMLX_GLM_DFLASH2_PREFIX_CACHE", "1") != "0" else None)
+    from vmlx_engine.utils.prefill_step import prefill_step_size
     for new, drafted in _dflash2_rounds(target, draft, list(prompt_tokens), int(max_tokens), eos, float(temperature),
-                                        float(top_p), int(top_k), stats=st, controls=sampling_controls,
+                                        float(top_p), int(top_k), prefill_step=prefill_step_size(),
+                                        stats=st, controls=sampling_controls,
                                         adaptive=os.environ.get("VMLX_GLM_DFLASH2_ADAPTIVE", "1") != "0",
                                         prefix_store=store,
                                         key_ids=media.get("key_tokens") if media is not None else None,

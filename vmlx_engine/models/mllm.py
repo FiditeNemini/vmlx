@@ -6277,6 +6277,9 @@ class MLXMultimodalLM:
         )
 
         last_prompt_tokens = 0
+        from ..utils.prefill_step import prefill_step_size
+
+        kwargs.setdefault("prefill_step_size", prefill_step_size())
         with _MaybeVLMStream():
             for chunk in stream_generate(
                 self.model,
@@ -7196,6 +7199,9 @@ class MLXMultimodalLM:
             resize_shape=kwargs.get("resize_shape"),
         )
 
+        from ..utils.prefill_step import prefill_step_size
+
+        kwargs.setdefault("prefill_step_size", prefill_step_size())
         try:
             with _MaybeVLMStream():
                 for chunk in stream_generate(

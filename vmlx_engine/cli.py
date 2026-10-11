@@ -3035,6 +3035,10 @@ def serve_command(args):
                 args.model,
                 getattr(args, "speculative_model", None),
             )
+        from .utils.prefill_step import set_prefill_step_size
+
+        # SimpleEngine lanes (DFlash2, non-batched) read it from here; batched ones from SchedulerConfig.
+        set_prefill_step_size(getattr(args, "prefill_step_size", 2048))
         load_model(
             args.model,
             use_batching=args.continuous_batching,
@@ -3797,7 +3801,7 @@ Examples:
         help="Maximum tokens per prefill chunk. Smaller values reduce peak Metal memory "
              "during prefill — required for very large MoE models (e.g. 128-expert Qwen3.5-397B) "
              "that hit Metal single-buffer OOM at long contexts. Try 512 or 256 if prefill "
-             "crashes. Requires --continuous-batching. (default: 2048)",
+             "crashes. Applies to every lane, including DFlash2 and --no-continuous-batching. (default: 2048)",
     )
     serve_parser.add_argument(
         "--completion-batch-size", type=int, default=512,

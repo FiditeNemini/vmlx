@@ -1440,6 +1440,7 @@ def stream_dflash2_generate(
     import dflash.model_mlx as runtime
 
     from .glm_dflash2 import is_glm5_next, stream_glm_dflash2
+    from .utils.prefill_step import prefill_step_size
 
     if is_glm5_next(model):
         # GLM-5.3-Flash: mHC taps (mean over streams) + KDA per-position rollback (vmlx_engine/glm_dflash2.py).
@@ -1486,4 +1487,5 @@ def stream_dflash2_generate(
             prompt_tokens=prompt_tokens,
             media=media,
             stop=stop,
+            prefill_step_size=prefill_step_size(),
         )

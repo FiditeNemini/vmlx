@@ -1346,6 +1346,12 @@ class MLLMScheduler:
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         self._cache_hit_requests = 0
+        # TTFT EWMA, as the text Scheduler (Perf/Cache panels read
+        # ewma_ttft_seconds; without it the TTFT card was hidden on every VLM
+        # session). Clock: scheduled -> first sampled token.
+        self._ewma_ttft: float = 0.0
+        self._ttft_sample_count: int = 0
+        self._ttft_alpha: float = 0.1
         self._cache_hit_tokens = 0
         self._cache_hit_tokens_by_detail: Dict[str, int] = {}
 
@@ -3319,6 +3325,7 @@ class MLLMScheduler:
 
             request.status = RequestStatus.RUNNING
             self.running[request.request_id] = request
+            request._schedule_time = time.perf_counter()
             # NOTE: prompt token count is NOT known yet at scheduling time
             # (it comes from batch generator's first response).
             # Tracking is done at request finish time instead.
@@ -3596,6 +3603,8 @@ class MLLMScheduler:
             # not count or detokenize it, including errors after real output.
             # Token id 0 remains valid on ordinary generation responses.
             is_error = response.finish_reason == "error"
+            if not is_error and not request.output_tokens:
+                self._note_first_token(request)
             if not is_error:
                 request.output_tokens.append(response.token)
             request.num_output_tokens = len(request.output_tokens)
@@ -6139,6 +6148,23 @@ class MLLMScheduler:
                 "terminal_cleanup_pending": bool(cancelling) or not self._terminal_cleanup_complete.is_set(),
             }
 
+    def _note_first_token(self, request) -> None:
+        """First sampled token of a scheduling: one TTFT sample (scheduled -> now)."""
+        scheduled = getattr(request, "_schedule_time", None)
+        if isinstance(scheduled, float):
+            self._record_ttft_sample(time.perf_counter() - scheduled)
+
+    def _record_ttft_sample(self, ttft_seconds: float) -> None:
+        """Seed the TTFT EWMA from its first observation, then smooth it (text Scheduler parity)."""
+        sample = float(ttft_seconds)
+        count = int(getattr(self, "_ttft_sample_count", 0) or 0)
+        if count == 0:
+            self._ewma_ttft = sample
+        else:
+            alpha = float(getattr(self, "_ttft_alpha", 0.1))
+            self._ewma_ttft = alpha * sample + (1 - alpha) * float(getattr(self, "_ewma_ttft", sample))
+        self._ttft_sample_count = count + 1
+
     def get_stats(self) -> Dict[str, Any]:
         """Get scheduler statistics including all cache mode metrics.
 
@@ -6157,6 +6183,10 @@ class MLLMScheduler:
                 "cache_hit_requests": self._cache_hit_requests,
                 "cache_hit_tokens": self._cache_hit_tokens,
                 "cache_hit_tokens_by_detail": dict(self._cache_hit_tokens_by_detail),
+                "ewma_ttft_seconds": (
+                    round(float(getattr(self, "_ewma_ttft", 0.0)), 3)
+                    if getattr(self, "_ttft_sample_count", 0) else None
+                ),
                 # Schema parity with the text scheduler: the reuse-skip / partial-
                 # downgrade / last-selection telemetry is not tracked on the MLLM
                 # path yet, so these report as 0/None. Exposing them here keeps the

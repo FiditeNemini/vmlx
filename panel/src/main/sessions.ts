@@ -112,6 +112,7 @@ import {
 import { cacheTypeRequiresPaged } from '../shared/cacheTypeCapabilities'
 import {
   filterAdditionalArgs,
+  splitAdditionalArgs,
   finitePositiveInteger,
 } from '../shared/launchArgValues'
 import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../shared/nativeMtpLaunchArgs'
@@ -2454,10 +2455,17 @@ export class SessionManager extends EventEmitter {
     )
   }
 
+  private validateAdditionalArgumentSyntax(session: Session): void {
+    if (session.type === 'remote') return
+    const config: ServerConfig = JSON.parse(session.config)
+    splitAdditionalArgs(config.additionalArgs || '')
+  }
+
   async preflightSessionStart(sessionId: string): Promise<void> {
     const session = db.getSession(sessionId)
     if (!session) throw new Error(`Session ${sessionId} not found`)
     if (session.type === 'remote') return
+    this.validateAdditionalArgumentSyntax(session)
 
     const config: ServerConfig = JSON.parse(session.config)
     config.modelPath = session.modelPath
@@ -2688,6 +2696,10 @@ export class SessionManager extends EventEmitter {
       return this._connectRemoteSession(session)
     }
 
+    if (!session) throw new Error(`Session ${sessionId} not found`)
+    // Reject invalid argv before replacement/adoption changes a healthy session.
+    this.validateAdditionalArgumentSyntax(session)
+
     const startLocalSession = async () => {
       // Before ANY side effect: single-model detection stops other engines and
       // adoption can mark this session running and return without ever
@@ -2767,6 +2779,7 @@ export class SessionManager extends EventEmitter {
   async restartSession(sessionId: string): Promise<void> {
     const session = db.getSession(sessionId)
     if (!session) throw new Error(`Session ${sessionId} not found`)
+    this.validateAdditionalArgumentSyntax(session)
     const preStopEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
     await this.stopSession(sessionId)
     // Remote stop paths do not advance the epoch (no process to spawn), so

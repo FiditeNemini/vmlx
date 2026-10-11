@@ -1,0 +1,41 @@
+{
+  "aborted": false,
+  "cache_detail": "dflash2-session",
+  "cached_prompt_tps": 14950.0,
+  "cached_tokens": 4436,
+  "completion_tokens": 381,
+  "decode": {
+    "seconds": 10.0,
+    "tokens": 380,
+    "tps": 38.0
+  },
+  "engine_type": "simple",
+  "finish_reason": "stop",
+  "method": "stream_chat",
+  "model_type": "llm",
+  "prefill": {
+    "path": "dflash2",
+    "scope": "model_prefill_and_prompt_state",
+    "seconds": 0.12,
+    "tokens": 49,
+    "tps": 408.3
+  },
+  "prompt_tokens": 4485,
+  "speculative": {
+    "acceptance": 0.23,
+    "accepted": 138,
+    "ar_tokens": 192,
+    "cycles": 60,
+    "drafted": 600,
+    "emitted_per_cycle": 3.293,
+    "generation_tps": 28.27,
+    "kind": "dflash2",
+    "lane": "qwen",
+    "widths": {
+      "16": 10,
+      "5": 11,
+      "8": 37
+    }
+  },
+  "ttft_s": 0.3
+}

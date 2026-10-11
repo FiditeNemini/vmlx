@@ -13,6 +13,7 @@ interface PerformancePanelProps {
 interface HealthData {
   status: string
   model_loaded: boolean
+  last_request?: LastRequest | null
   model_name?: string
   model_type?: string
   engine_type?: string
@@ -278,6 +279,28 @@ interface HealthData {
   }
 }
 
+/** /health.last_request (vmlx_engine/request_telemetry.py): the newest finished or aborted request, every lane.
+ *  Shared per-lane fixtures: tests/fixtures/last_request/*.json (Python producer test + panel renderer test). */
+export type LastRequest = {
+  method?: string
+  engine_type?: string
+  model_type?: string
+  finish_reason?: string | null
+  aborted?: boolean
+  prompt_tokens?: number
+  cached_tokens?: number
+  cache_detail?: string
+  completion_tokens?: number
+  ttft_s?: number | null
+  prefill?: { tokens?: number; seconds?: number; tps?: number | null; scope?: string | null; path?: string | null } | null
+  cached_prompt_tps?: number | null
+  decode?: { tokens?: number; seconds?: number; tps?: number | null } | null
+  speculative?: {
+    kind?: string; lane?: string; cycles?: number; emitted_per_cycle?: number; drafted?: number; accepted?: number
+    acceptance?: number | null; widths?: Record<string, number>; ar_tokens?: number; generation_tps?: number
+  } | null
+}
+
 type NativeStorageQuantization = {
   enabled?: boolean
   mode?: string
@@ -356,6 +379,22 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
     <div className="space-y-4">
       {error && (
         <div className="text-xs text-destructive bg-destructive/10 px-3 py-2 rounded">{error}</div>
+      )}
+
+      {/* Last request: one producer for every lane (vmlx_engine/request_telemetry.py) */}
+      {health && (
+        <div data-vmlx-control="perf-last-request">
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.perf.lastRequest')}</h4>
+          {health.last_request ? (
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {lastRequestItems(health.last_request, t).map(item => (
+                <InfoCard key={item.key} label={item.label} value={item.value} />
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">{t('sessions.perf.lrNone')}</div>
+          )}
+        </div>
       )}
 
       {/* Engine Info */}
@@ -913,6 +952,52 @@ export function formatWeightQuant(
 // A missing MTP measurement is UNKNOWN, never zero: a sparse family payload
 // must not read as "0 accepted / 0 drafted" (Cache/Perf display audit,
 // 2026-09-07). An explicit 0 from the engine still renders as 0.
+type Translate = (key: string, params?: Record<string, string | number>) => string
+
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+/**
+ * The "Last request" cards. Every card always renders; an absent figure reads "not reported" (never hidden, never
+ * a fake 0), so a lane that stops emitting a field is visible in the app and fails the fixture test
+ * (tests/last-request-panel.test.ts renders tests/fixtures/last_request/*.json, written by the Python producer test).
+ */
+export function lastRequestItems(lr: LastRequest, t: Translate): Array<{ key: string; label: string; value: string }> {
+  const nr = t('sessions.performance.notReported')
+  const decode = lr.decode && finite(lr.decode.tps)
+    ? `${lr.decode.tps.toFixed(1)} t/s (${lr.decode.tokens ?? '—'} tok / ${finite(lr.decode.seconds) ? lr.decode.seconds.toFixed(2) : '—'} s)`
+    : nr
+  const prefill = lr.prefill && finite(lr.prefill.tps)
+    ? `${lr.prefill.tps.toFixed(1)} pp/s (${lr.prefill.tokens ?? '—'} tok${lr.prefill.path ? ` · ${lr.prefill.path}` : ''})`
+    : nr
+  const hit = finite(lr.cached_tokens) && lr.cached_tokens > 0
+  const cached = finite(lr.cached_prompt_tps) ? `${lr.cached_prompt_tps.toFixed(1)} cached pp/s`
+    : hit ? nr : t('sessions.perf.lrNoCacheHit')
+  const prompt = `${lr.prompt_tokens ?? '—'}${hit ? ` (${[String(lr.cached_tokens), lr.cache_detail, t('sessions.perf.lrCached')].filter(Boolean).join(' ')})` : ''}`
+  const s = lr.speculative
+  const spec = s && s.kind
+    ? [
+        `${s.kind}${s.lane ? ` (${s.lane})` : ''}`,
+        finite(s.acceptance) ? t('sessions.perf.lrAcceptance', { pct: (s.acceptance * 100).toFixed(1) }) : null,
+        finite(s.emitted_per_cycle) ? t('sessions.perf.lrPerCycle', { n: s.emitted_per_cycle.toFixed(2) }) : null,
+        finite(s.ar_tokens) && s.ar_tokens > 0 ? t('sessions.perf.lrArTokens', { n: s.ar_tokens }) : null,
+        s.widths && Object.keys(s.widths).length
+          ? t('sessions.perf.lrWidths', { w: Object.entries(s.widths).map(([w, c]) => `${w}:${c}`).join(' ') })
+          : null,
+      ].filter(Boolean).join(' · ')
+    : t('sessions.perf.lrSpecNone')
+  const finish = lr.finish_reason || (lr.aborted ? t('sessions.perf.lrAborted') : '—')
+  return [
+    { key: 'decode', label: t('sessions.perf.lrDecode'), value: decode },
+    { key: 'prefill', label: t('sessions.perf.lrPrefill'), value: prefill },
+    { key: 'cachedPrefill', label: t('sessions.perf.lrCachedPrefill'), value: cached },
+    { key: 'ttft', label: t('sessions.perf.lrTtft'), value: finite(lr.ttft_s) ? `${lr.ttft_s.toFixed(2)} s` : nr },
+    { key: 'prompt', label: t('sessions.perf.lrPrompt'), value: prompt },
+    { key: 'speculative', label: t('sessions.perf.lrSpeculative'), value: spec },
+    { key: 'request', label: t('sessions.perf.lrRequest'),
+      value: [lr.engine_type, lr.model_type, lr.method, finish].filter(Boolean).join(' · ') },
+  ]
+}
+
 export function reportedCount(v: number | null | undefined): string {
   return typeof v === 'number' && Number.isFinite(v) ? String(v) : '—'
 }

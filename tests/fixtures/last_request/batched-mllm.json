@@ -1,0 +1,26 @@
+{
+  "aborted": false,
+  "cache_detail": "",
+  "cached_prompt_tps": null,
+  "cached_tokens": 0,
+  "completion_tokens": 81,
+  "decode": {
+    "seconds": 2.0,
+    "tokens": 80,
+    "tps": 40.0
+  },
+  "engine_type": "batched",
+  "finish_reason": "stop",
+  "method": "stream_chat",
+  "model_type": "mllm",
+  "prefill": {
+    "path": "mllm",
+    "scope": "model_prefill_and_prompt_state",
+    "seconds": 2.0,
+    "tokens": 4096,
+    "tps": 2048.0
+  },
+  "prompt_tokens": 4096,
+  "speculative": null,
+  "ttft_s": 2.0
+}

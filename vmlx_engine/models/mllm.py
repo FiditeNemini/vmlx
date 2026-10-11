@@ -3721,6 +3721,9 @@ class MLLMOutput:
     # Engine-measured prefill {tokens, seconds, scope} -> usage.vmlx_prefill
     # (the UI's pp/s). SimpleEngine paths previously never set it.
     prefill_usage: Any = None
+    # Speculative-decoding stats of the finished request (DFlash2 lanes):
+    # surfaced as /health.last_request.speculative for the Perf panel.
+    spec_stats: Any = None
     # Cumulative generated IDs, supplied only by qualified terminal paths.
     # Empty means unavailable; never infer them from decoded text.
     tokens: list[int] = field(default_factory=list)
@@ -7000,6 +7003,11 @@ class MLXMultimodalLM:
             width_cycles: dict[int, int] = {}
             last_chunk = None
             stats_logged = False
+            try:
+                from ..glm_dflash2 import is_glm5_next as _is_glm5_next
+                _is_glm_dflash2 = bool(_is_glm5_next(self.model))
+            except Exception:
+                _is_glm_dflash2 = False
             logger.info(
                 "DFlash2 %s chat active for %s",
                 "media (VLM prefill, %d image(s)/frame(s))" % len(all_images) if _df2_media else "text",
@@ -7066,6 +7074,20 @@ class MLXMultimodalLM:
                         chunk.finish_reason,
                     )
                     stats_logged = True
+                    _spec_stats = {
+                        "kind": "dflash2",
+                        "lane": "glm" if _is_glm_dflash2 else "qwen",
+                        "cycles": cycles,
+                        "emitted_per_cycle": round(mean_emitted, 3),
+                        "drafted": proposed_draft,
+                        "accepted": accepted_draft,
+                        "acceptance": round(accepted_draft / proposed_draft, 4) if proposed_draft else None,
+                        "widths": {str(k): v for k, v in sorted(width_cycles.items())},
+                        "ar_tokens": ar_tokens,
+                        "generation_tps": round(float(getattr(chunk, "generation_tps", 0.0) or 0.0), 2),
+                    }
+                else:
+                    _spec_stats = None
                 yield MLLMOutput(
                     text=getattr(chunk, "text", ""),
                     finish_reason=getattr(chunk, "finish_reason", None),
@@ -7076,6 +7098,7 @@ class MLXMultimodalLM:
                     cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
                     persistence_future=getattr(chunk, "persistence_future", None),
                     prefill_usage=getattr(chunk, "prefill_usage", None),
+                    spec_stats=_spec_stats,
                 )
 
             if not stats_logged:

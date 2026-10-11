@@ -9614,6 +9614,8 @@ def load_model(
                 except RuntimeError:
                     asyncio.run(_engine.start())
                 logger.info("Distributed inference active: %d nodes, skipping local engine", num_nodes)
+                from . import request_telemetry as _request_telemetry
+                _request_telemetry.instrument(_engine)
                 return  # Skip local SimpleEngine/BatchedEngine creation
             else:
                 # Fall through to local engine. Clear the distributed globals
@@ -9674,6 +9676,11 @@ def load_model(
             _record_metal_ws_model_baseline("simple_engine_start")
         model_type = "MLLM" if _engine.is_mllm else "LLM"
         logger.info(f"{model_type} model loaded (simple mode): {model_name}")
+
+    # One producer for /health.last_request (Perf panel: t/s, pp/s, cached pp/s,
+    # TTFT, speculative stats) on every lane and every API route.
+    from . import request_telemetry as _request_telemetry
+    _request_telemetry.instrument(_engine)
 
     # SimpleEngine has its weights at this point; BatchedEngine defers the
     # load to lifespan()/wake, which report these phases themselves.
@@ -13964,6 +13971,8 @@ async def health():
                 _companion_block.pop("last_prefix_lookup", None)
         if _live_lifecycle is not None:
             result["request_lifecycle"] = _live_lifecycle
+        from . import request_telemetry as _request_telemetry
+        result["last_request"] = _request_telemetry.last()
         result["health_gauges_cached"] = True
         result["wake_in_progress"] = _wake_in_progress
         result["load_progress"] = _lifecycle_progress.snapshot()
@@ -14135,6 +14144,8 @@ async def health():
         from .speculative import is_dflash2_enabled as _df2_cache_enabled
         if _df2_cache_enabled():
             result.setdefault("cache", {})["dflash2_cache"] = _active_dflash2_cache_runtime().session_cache_stats()
+        from . import request_telemetry as _request_telemetry
+        result["last_request"] = _request_telemetry.last()
         result["request_lifecycle"] = _request_lifecycle_health_snapshot(
             engine_stats,
             # Batched LLM and MLLM engines publish their scheduler IDs in the
@@ -14830,6 +14841,8 @@ async def cache_stats():
             "engine_type": _engine_stats.get("engine_type"),
             "last_durability": _engine_stats.get("last_durability"),
         }
+        from . import request_telemetry as _request_telemetry
+        result["last_request"] = _request_telemetry.last()
 
     # Scheduler-level overall stats (includes cache stats + request stats)
     scheduler = _get_scheduler()

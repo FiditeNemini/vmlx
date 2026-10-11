@@ -1,0 +1,20 @@
+{
+  "aborted": false,
+  "cache_detail": "",
+  "cached_prompt_tps": null,
+  "cached_tokens": 0,
+  "completion_tokens": 31,
+  "decode": {
+    "seconds": 1.0,
+    "tokens": 30,
+    "tps": 30.0
+  },
+  "engine_type": "simple",
+  "finish_reason": "stop",
+  "method": "stream_chat",
+  "model_type": "llm",
+  "prefill": null,
+  "prompt_tokens": 1000,
+  "speculative": null,
+  "ttft_s": 1.0
+}

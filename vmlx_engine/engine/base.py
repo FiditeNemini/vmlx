@@ -43,6 +43,9 @@ class GenerationOutput:
     # Optional scheduler production timestamp; preserve across terminal fences.
     generated_at: float | None = None
     prefill_usage: dict | None = None
+    # Speculative-decoding stats of the finished request (DFlash2 lanes):
+    # /health.last_request.speculative (vmlx_engine.request_telemetry).
+    spec_stats: dict | None = None
     reasoning_tokens: int | None = None
 
 

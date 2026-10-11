@@ -934,6 +934,7 @@ class SimpleEngine(BaseEngine):
                 cached_tokens=final.cached_tokens if final is not None else 0,
                 cache_detail=final.cache_detail if final is not None else "",
                 prefill_usage=final.prefill_usage if final is not None else None,
+                spec_stats=getattr(final, "spec_stats", None) if final is not None else None,
             )
 
         # SimpleEngine has no prefix cache — eat the bypass kwarg so it
@@ -1302,6 +1303,7 @@ class SimpleEngine(BaseEngine):
                             prefill_usage=with_admission_wait(
                                 last_prefill_usage, _admission_wait
                             ),
+                            spec_stats=getattr(chunk, "spec_stats", None) if finished else None,
                         )
 
                         receipt = getattr(chunk, "persistence_future", None)

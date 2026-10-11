@@ -72,7 +72,7 @@ export function buildCacheLaunchArgs(input: CacheLaunchArgsInput): CacheLaunchAr
 
   if (policy.prefixCacheOff) {
     args.push('--disable-prefix-cache')
-    return { args, policy, blockDiskOnly }
+    if (!input.nativeSpeculativeCache) return { args, policy, blockDiskOnly }
   }
 
   if (policy.enableLegacyDiskCache) {
@@ -80,13 +80,13 @@ export function buildCacheLaunchArgs(input: CacheLaunchArgsInput): CacheLaunchAr
     // completed payloads belong on SSD just like native block records. Zero
     // explicitly disables its retained L1; omitting it enables the RAM default.
     args.push('--cache-memory-mb', '0')
-  } else if (input.noMemoryAwareCache && !input.forceMemoryAwareCache) {
+  } else if (!input.nativeSpeculativeCache && input.noMemoryAwareCache && !input.forceMemoryAwareCache) {
     args.push('--no-memory-aware-cache')
     const prefixCacheSize = finitePositiveInteger(input.prefixCacheSize)
     if (prefixCacheSize != null) args.push('--prefix-cache-size', prefixCacheSize.toString())
     const prefixCacheMaxBytes = finitePositiveInteger(input.prefixCacheMaxBytes)
     if (prefixCacheMaxBytes != null) args.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
-  } else if (!blockDiskOnly) {
+  } else if (!input.nativeSpeculativeCache && !blockDiskOnly) {
     // RAM-budget controls apply only when neither SSD backend is selected.
     const cacheMemoryMb = finitePositiveInteger(input.cacheMemoryMb)
     if (cacheMemoryMb != null) args.push('--cache-memory-mb', cacheMemoryMb.toString())
@@ -98,7 +98,7 @@ export function buildCacheLaunchArgs(input: CacheLaunchArgsInput): CacheLaunchAr
     if (cacheTtlMinutes != null) args.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
   }
 
-  if (policy.enableBlockDiskCache) {
+  if (policy.enableBlockDiskCache && !input.nativeSpeculativeCache) {
     const blockSize = finitePositiveInteger(input.effectivePagedCacheBlockSize)
     if (blockSize != null) args.push('--paged-cache-block-size', blockSize.toString())
     const maxCacheBlocks = finitePositiveInteger(input.maxCacheBlocks)

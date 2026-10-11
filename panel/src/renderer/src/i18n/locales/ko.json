@@ -1077,6 +1077,8 @@
       "pagedCacheCapacity": "실효 메모리 내 캐시 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
       "pagedCacheMemoryIgnored": "메모리 내 페이지 캐시가 켜져 있는 동안에는 캐시 TTL이 적용되지 않습니다. 캐시 메모리 제한 / 캐시 메모리 %는 Apple 통합 메모리의 L1 사용량을 제한하고, 최대 캐시 블록 수와 블록 크기가 토큰 용량을 제한합니다.",
       "blockDiskCapacity": "실효 SSD 블록 인덱스 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
+      "nativeDflashCacheNote": "DFlash2는 연속 배치 처리와 독립적인 네이티브 프롬프트 캐시를 사용합니다. 아래 SSD 설정은 해당 디스크 계층에 적용되며 배치용 Prefix Cache 스위치로 제어되지 않습니다. 재사용 상태가 메모리에 유지될 수도 있습니다.",
+      "glmDflashCacheBudgetNote": "현재 GLM DFlash2는 공유 블록 캐시 풀과 별개인 전용 SSD 영역에 이 용량 제한을 적용합니다.",
       "ramCacheTradeoffNotice": "SSD 전용 캐시 정책: 메모리 내 페이지 캐시와 미디어 전처리 RAM 캐시는 모든 모델에서 비활성 상태로 잠겨 있습니다. 재사용 가능한 프롬프트는 SSD에 저장되고 캐시 페이로드는 일시적으로만 복원되며 이미지, 비디오, 오디오 처리 텐서는 각 요청 후 해제됩니다.",
       "blockCacheMaxPercent": "SSD 캐시 크기 (디스크의 %)",
       "blockCacheSavedGbOverride": "저장된 명시적 한도: {gb} GB. 비율을 변경하기 전까지 이 한도가 우선 적용됩니다. 비율을 변경하면 저장된 GB 한도를 대체합니다.",
@@ -1463,7 +1465,7 @@
       "clearRamTitle": "디스크 기반 L2는 유지한 채 상주/인덱싱된 캐시 상태를 지웁니다",
       "clearPrefixTitle": "RAM과 디스크 기반 L2에서 프리픽스 캐시를 지웁니다",
       "requestId": "요청",
-      "durabilityWait": "펜스 대기",
+      "durabilityWait": "영속화 소요 시간",
       "durabilityAlreadyDurable": "이미 영속화됨",
       "durabilityOutcome": "저장 결과",
       "durabilityRetained": "커밋된 토큰",
@@ -1603,7 +1605,7 @@
       "clearAll": "모두 지우기",
       "reuseExplainer": "재사용은 토큰 0부터 이어지는 가장 긴 연속 인과 접두사와 일치합니다. 일치하지 않는 꼬리만 프리필되며, 임의의 접미사나 중간 구간은 재사용되지 않습니다. 경로 의존 계열(DeepSeek V4, ZAYA CCA, 그리고 Gemma 4·Muse 같은 회전 KV 모델)에서는 캐시된 체인보다 짧은 프롬프트가 전혀 재사용되지 않고 전체를 프리필할 수 있습니다.",
       "clearSkipped": "일부 캐시 계층이 지워지지 않았습니다: {{skipped}}. 실행 중인 요청이 사용 중입니다. 세션이 유휴 상태가 되면 다시 시도하세요.",
-      "lastDurability": "마지막 생성 영속성 (터미널 펜스)"
+      "lastDurability": "마지막 생성의 캐시 영속화"
     },
     "embeddings": {
       "sessionMustBeRunning": "임베딩을 생성하려면 세션이 실행 중이어야 합니다.",

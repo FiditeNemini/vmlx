@@ -285,10 +285,12 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
  * This MUST mirror the logic in sessions.ts buildArgs() exactly.
  * When editing buildArgs(), update this function too (and vice versa).
  */
-function buildCommandPreview(
+export function buildCommandPreview(
   modelPath: string,
   config: SessionConfig,
-  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null
+  detected?: { toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; cacheType?: string; cacheSubtype?: string; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null,
+  detectedDflash2Path = '',
+  hasBundledDrafter = false,
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -383,7 +385,8 @@ function buildCommandPreview(
     // is_mllm_model->False so the engine doesn't re-autodetect VL from config.json.
     parts.push('--text-only')
   }
-  const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
+  const effectiveSpeculativeModel = config.speculativeModel || detectedDflash2Path
+  const dflash2Speculative = !dsv4Active && (!!detectedDflash2Path || /dflash2/i.test(effectiveSpeculativeModel))
   const cacheStackActive = dsv4Active
     ? true
     : dflash2Speculative
@@ -413,11 +416,12 @@ function buildCommandPreview(
   // One shared builder owns every cache-tier and SSD-budget token shown here
   // and spawned by sessions.ts. Do not rebuild this fragment in the renderer.
   const cacheLaunch = buildCacheLaunchArgs({
+    nativeSpeculativeCache: dflash2Speculative,
     continuousBatching: cacheStackActive,
     enablePrefixCache: config.enablePrefixCache !== false,
     usePagedCache: false,
-    enableDiskCache: !!diskControls.enableDiskCache,
-    enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
+    enableDiskCache: !dflash2Speculative && !!diskControls.enableDiskCache,
+    enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
     noMemoryAwareCache: !!config.noMemoryAwareCache,
     forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
     prefixCacheSize: config.prefixCacheSize,
@@ -503,13 +507,16 @@ function buildCommandPreview(
 
   // Speculative decoding
   const loopedNanbeige = detected?.family === 'nanbeige' || detected?.architectureHints?.cacheSchema === 'looped_kv_v1'
-  const compatibleExternalSpeculative = !!config.speculativeModel && (
+  const compatibleExternalSpeculative = !!effectiveSpeculativeModel && (
     dflash2Speculative
       ? !dsv4Active && isVLM
       : !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige
   )
+  if (!config.speculativeModel && config.useBundledDflash2 === false && hasBundledDrafter) {
+    parts.push('--no-bundled-dflash2')
+  }
   if (compatibleExternalSpeculative) {
-    parts.push('--speculative-model', config.speculativeModel)
+    parts.push('--speculative-model', effectiveSpeculativeModel)
     const numDraftTokens = finitePositiveInteger(config.numDraftTokens)
     if (numDraftTokens != null && numDraftTokens !== 3) {
       parts.push('--num-draft-tokens', numDraftTokens.toString())
@@ -574,6 +581,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [showPreview, setShowPreview] = useState(false)
   const [previewMetadataState, setPreviewMetadataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
   const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null>(null)
+  const [previewDrafters, setPreviewDrafters] = useState<Array<{ path: string; bundled?: boolean }>>([])
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
   sessionIdRef.current = sessionId
@@ -582,6 +590,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
     let active = true
     resetRequestRef.current += 1
     setDetectedConfig(null)
+    setPreviewDrafters([])
     setPreviewMetadataState('loading')
     const load = async () => {
       const s = await window.api.sessions.get(sessionId)
@@ -610,9 +619,13 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         }
         // Load auto-detected config for preview resolution
         try {
-          const det = await window.api.models.detectConfig(s.modelPath)
+          const [det, drafters] = await Promise.all([
+            window.api.models.detectConfig(s.modelPath),
+            window.api.models.dflash2Drafters(s.modelPath, false).catch(() => []),
+          ])
           if (active) {
             setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
+            setPreviewDrafters(drafters)
             setDetectedConfig(det && det.family !== 'unknown' ? det : null)
             setPreviewMetadataState(det && det.family !== 'unknown' ? 'ready' : 'unavailable')
           }
@@ -873,7 +886,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
                     <p role="status" className="mb-2 text-xs text-muted-foreground">{t('sessions.settings.cliMetadataUnavailable')}</p>
                   )}
                   <pre className="p-3 bg-background/80 text-primary text-xs font-mono rounded-lg overflow-x-auto whitespace-pre-wrap">
-                    {buildCommandPreview(session.modelPath, config, detectedConfig)}
+                    {buildCommandPreview(session.modelPath, config, detectedConfig, previewDrafters.find(d => config.speculativeModel ? d.path === config.speculativeModel : d.bundled && config.useBundledDflash2 !== false)?.path || '', previewDrafters.some(d => d.bundled))}
                   </pre>
                 </>
               )}

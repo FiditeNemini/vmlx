@@ -1077,6 +1077,8 @@
       "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
       "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
+      "nativeDflashCacheNote": "DFlash2 uses a native prompt cache independently of continuous batching. The SSD controls below configure its disk tier; the batched Prefix Cache switch does not control this tier. Native in-memory reuse may also be retained.",
+      "glmDflashCacheBudgetNote": "GLM DFlash2 currently applies this budget to its own SSD namespace, separately from the shared block-cache pool.",
       "ramCacheTradeoffNotice": "SSD-only cache policy: In-Memory Paged Cache and Media Preprocess RAM Cache are locked OFF for every model. Reusable prompts persist on SSD and cache payloads are restored only transiently; image, video, and audio processor tensors are released after every request.",
       "blockCacheMaxPercent": "SSD Cache Size (% of disk)",
       "blockCacheSavedGbOverride": "Saved explicit limit: {gb} GB. This overrides the percentage above until you change it. Changing the percentage replaces this saved GB limit.",
@@ -1463,7 +1465,7 @@
       "clearRamTitle": "Clear resident/indexed cache state while preserving disk-backed L2",
       "clearPrefixTitle": "Clear prefix cache from RAM and disk-backed L2",
       "requestId": "Request",
-      "durabilityWait": "Fence wait",
+      "durabilityWait": "Persistence duration",
       "durabilityAlreadyDurable": "already durable",
       "durabilityOutcome": "Save outcome",
       "durabilityRetained": "Committed tokens",
@@ -1603,7 +1605,7 @@
       "clearAll": "Clear All",
       "reuseExplainer": "Reuse matches the longest continuous causal token prefix from token 0. Only the unmatched tail is prefilled; arbitrary suffix or interior sequences are never reused. On path-dependent families (DeepSeek V4, ZAYA CCA, and rotating-KV models such as Gemma 4 and Muse) a prompt SHORTER than the cached chain may reuse nothing and prefill in full.",
       "clearSkipped": "Some cache tiers were not cleared: {{skipped}}. They are still in use by a running request — try again once the session is idle.",
-      "lastDurability": "Last Generation Durability (terminal fence)"
+      "lastDurability": "Last Generation Cache Persistence"
     },
     "embeddings": {
       "sessionMustBeRunning": "Session must be running to generate embeddings.",

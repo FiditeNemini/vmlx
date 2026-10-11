@@ -24,6 +24,7 @@ declare global {
           modelType?: string,
         ) => Promise<{ success: boolean }>;
         browseDirectory: () => Promise<{ canceled: boolean; path?: string }>;
+        dflash2Drafters: (bundlePath?: string, scanLibrary?: boolean) => Promise<Array<{ name: string; path: string; bundled?: boolean }>>
         detectConfig: (modelPath: string) => Promise<{
           nativeGlmSsd?: boolean
           family?: string;

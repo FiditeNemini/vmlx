@@ -1077,6 +1077,8 @@
       "pagedCacheCapacity": "実効インメモリキャッシュ容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン",
       "pagedCacheMemoryIgnored": "インメモリページドキャッシュが有効な間、キャッシュ TTL は適用されません。キャッシュメモリ上限／キャッシュメモリ % は Apple ユニファイドメモリの L1 使用量を制限し、最大キャッシュブロック数とブロックサイズがトークン容量を制限します。",
       "blockDiskCapacity": "実効 SSD ブロックインデックス容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン",
+      "nativeDflashCacheNote": "DFlash2 は連続バッチ処理とは独立したネイティブのプロンプトキャッシュを使います。以下の SSD 設定はそのディスク層に適用され、バッチ処理用の Prefix Cache スイッチでは制御されません。再利用用の状態がメモリに保持される場合もあります。",
+      "glmDflashCacheBudgetNote": "現在、GLM DFlash2 は共有ブロックキャッシュとは別の専用 SSD 領域にこの容量制限を適用します。",
       "ramCacheTradeoffNotice": "SSD 専用キャッシュポリシー: メモリ内ページキャッシュとメディア前処理 RAM キャッシュは全モデルで無効固定です。再利用可能なプロンプトは SSD に保存され、キャッシュペイロードは一時的にのみ復元されます。画像・動画・音声の処理テンソルはリクエストごとに解放されます。",
       "blockCacheMaxPercent": "SSD キャッシュサイズ（ディスクの%）",
       "blockCacheSavedGbOverride": "保存済みの明示的な上限: {gb} GB。割合を変更するまでは、この上限が優先されます。割合を変更すると、保存済みの GB 上限が置き換わります。",
@@ -1463,7 +1465,7 @@
       "clearRamTitle": "ディスク上の L2 を保持したまま、常駐/インデックス済みキャッシュ状態をクリアします",
       "clearPrefixTitle": "RAM とディスク上の L2 からプレフィックスキャッシュをクリアします",
       "requestId": "リクエスト",
-      "durabilityWait": "フェンス待機",
+      "durabilityWait": "永続化時間",
       "durabilityAlreadyDurable": "既に永続化済み",
       "durabilityOutcome": "保存結果",
       "durabilityRetained": "確定トークン",
@@ -1603,7 +1605,7 @@
       "clearAll": "すべてクリア",
       "reuseExplainer": "再利用はトークン0から連続する最長の因果プレフィックスに一致します。一致しない末尾のみがプリフィルされ、任意の後方部分や中間の並びが再利用されることはありません。経路依存の系列（DeepSeek V4、ZAYA CCA、および Gemma 4 や Muse などの回転KVモデル）では、キャッシュ済みの連鎖より短いプロンプトは何も再利用されず、全体がプリフィルされる場合があります。",
       "clearSkipped": "一部のキャッシュ層は消去されませんでした: {{skipped}}。実行中のリクエストが使用中です。セッションがアイドルになってから再試行してください。",
-      "lastDurability": "最後の生成の永続性（終端フェンス）"
+      "lastDurability": "直前の生成のキャッシュ永続化"
     },
     "embeddings": {
       "sessionMustBeRunning": "埋め込みを生成するにはセッションが実行中である必要があります。",

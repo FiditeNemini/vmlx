@@ -103,3 +103,27 @@ describe('authoritative cache launch arguments', () => {
     expect(launcher).not.toContain("args.push('--use-paged-cache')")
   })
 })
+
+
+describe('native DFlash2 SSD settings', () => {
+  it('passes the saved SSD location and budget despite the disabled batched prefix stack', () => {
+    const result = buildCacheLaunchArgs({ ...SSD_ONLY, continuousBatching: false,
+      nativeSpeculativeCache: true, blockDiskCacheDir: '/private/test-cache',
+      blockDiskCacheMaxPercent: 7 })
+    expect(result.args).toContain('--disable-prefix-cache')
+    expect(result.args).toContain('--enable-block-disk-cache')
+    expect(result.args[result.args.indexOf('--block-disk-cache-dir') + 1]).toBe('/private/test-cache')
+    expect(result.args[result.args.indexOf('--block-disk-cache-max-percent') + 1]).toBe('7')
+    expect(result.args).not.toContain('--cache-memory-mb')
+    expect(result.args).not.toContain('--paged-cache-block-size')
+  })
+
+  it('honors the SSD opt-out without activating a RAM fallback', () => {
+    const result = buildCacheLaunchArgs({ ...SSD_ONLY, continuousBatching: false,
+      nativeSpeculativeCache: true, enableBlockDiskCache: false })
+    expect(result.args).toContain('--disable-block-disk-cache')
+    expect(result.args).not.toContain('--enable-block-disk-cache')
+    expect(result.args).not.toContain('--cache-memory-mb')
+    expect(result.args).not.toContain('--cache-memory-percent')
+  })
+})

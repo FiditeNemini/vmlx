@@ -8,6 +8,8 @@ export type CacheControlUpdate = [CacheControlKey, boolean]
 
 export interface CacheControlState {
   continuousBatching: boolean
+  /** DFlash2 owns an SSD store independently of the batched prefix stack. */
+  nativeSpeculativeCache?: boolean
   enablePrefixCache: boolean
   usePagedCache: boolean
   enableDiskCache: boolean
@@ -59,11 +61,11 @@ export function resolveCacheControlPolicy(state: CacheControlState): CacheContro
   const architectureForcedPagedActive = false
   const userPagedCacheActive = false
   const effectiveUsePagedCache = false
-  const blockDiskCacheActive = !batchingOff && !prefixOff && !!state.enableBlockDiskCache
+  const blockDiskCacheActive = (state.nativeSpeculativeCache || (!batchingOff && !prefixOff)) && !!state.enableBlockDiskCache
   const pagedCacheDisabled = true
   const legacyDiskCacheDisabled = batchingOff || blockDiskCacheActive
-  const blockDiskCacheVisible = !batchingOff
-  const blockDiskCacheDisabled = batchingOff
+  const blockDiskCacheVisible = !!state.nativeSpeculativeCache || !batchingOff
+  const blockDiskCacheDisabled = batchingOff && !state.nativeSpeculativeCache
   const legacyDiskCacheChecked = !!state.enableDiskCache && !legacyDiskCacheDisabled && !prefixOff
   const blockDiskCacheChecked = blockDiskCacheActive
   const legacyDiskCacheUnavailableReason = batchingOff
@@ -100,7 +102,7 @@ export function resolveCacheLaunchPolicy(state: CacheControlState): CacheLaunchP
   // reintroduce a RAM tier here -- both previously did, which is how 18
   // families ended up launching with --use-paged-cache.
   const effectiveUsePagedCache = false
-  const enableBlockDiskCache = !!state.enableBlockDiskCache && prefixEnabled
+  const enableBlockDiskCache = !!state.enableBlockDiskCache && (prefixEnabled || !!state.nativeSpeculativeCache)
 
   return {
     prefixCacheOff: !prefixEnabled,

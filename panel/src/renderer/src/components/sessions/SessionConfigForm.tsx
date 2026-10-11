@@ -448,7 +448,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'rotating_kv'
-  const effectiveContinuousBatching = dsv4Active ? true : config.continuousBatching
+  const effectiveContinuousBatching = dsv4Active ? true : dflash2Speculative ? false : config.continuousBatching
   const batchingOff = !effectiveContinuousBatching
   const effectivelyNoBatching = batchingOff
   const effectivePrefixCacheEnabled = config.enablePrefixCache
@@ -516,11 +516,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const architectureRequiresPagedCache = false
   const zayaSsdReuseUnavailable = zayaCcaActive && !batchingOff && !prefixOff
   const cacheControlState = {
+    nativeSpeculativeCache: dflash2Speculative,
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
     usePagedCache: exactTypedPromptDiskCache ? false : config.usePagedCache,
-    enableDiskCache: dsv4Active ? false : !!diskControls.enableDiskCache,
-    enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
+    enableDiskCache: dsv4Active || dflash2Speculative ? false : !!diskControls.enableDiskCache,
+    enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }
@@ -765,7 +766,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {/* Product-wide cache contract: the retained paged-RAM tier is locked off
           and SSD is authoritative. Keep this visible outside the collapsed
           section so users can confirm the launched memory policy at a glance. */}
-      {!isImage && <InfoNote text={t('sessions.config.ramCacheTradeoffNotice')} />}
+      {!isImage && <InfoNote text={t(dflash2Speculative ? 'sessions.config.nativeDflashCacheNote' : 'sessions.config.ramCacheTradeoffNotice')} />}
 
       {/* Server Settings */}
       <Section title={t('sessions.config.serverSettings')} sectionKey="server" expanded={expandedSections.server} onToggle={() => toggleSection('server')}>
@@ -982,14 +983,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             : t('sessions.config.continuousBatchingTooltip')}
           checked={effectiveContinuousBatching}
           onChange={v => onChange('continuousBatching', v)}
-          disabled={dsv4Active}
+          disabled={dsv4Active || dflash2Speculative}
         />
         {!singleActiveControls && <PerformanceHint text={t('sessions.config.continuousBatchingHint')} />}
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4BatchPathNote')} />}
-        {!effectiveContinuousBatching && effectivePrefixCacheEnabled && (
+        {!effectiveContinuousBatching && !dflash2Speculative && effectivePrefixCacheEnabled && (
           <InfoNote text={t('sessions.config.cacheFlagsOmittedNote')} />
         )}
-        {!effectiveContinuousBatching && (
+        {!effectiveContinuousBatching && !dflash2Speculative && (
           <InfoNote text={t('sessions.config.batchingOffDisablesNote')} />
         )}
         <InfoNote text={t('sessions.config.metalWiredLimitHelp')} />
@@ -1015,8 +1016,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.prefixCacheHint')} />}
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguTypedCacheNote')} />}
-        {nativeGlmSsdActive && <div data-vmlx-section="nativeGlmSsd"><InfoNote text={t('sessions.config.glmNativeSsdNote')} /></div>}
-        {batchingOff && <IncompatWarning text={t('sessions.config.prefixCacheRequiresBatching')} />}
+        {nativeGlmSsdActive && !dflash2Speculative && <div data-vmlx-section="nativeGlmSsd"><InfoNote text={t('sessions.config.glmNativeSsdNote')} /></div>}
+        {batchingOff && !dflash2Speculative && <IncompatWarning text={t('sessions.config.prefixCacheRequiresBatching')} />}
         <CheckField label={t('sessions.config.enablePrefixCache')} tooltip={t('sessions.config.enablePrefixCacheTooltip')} checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
         {!nativeGlmSsdActive && !dsv4Active && !blockDiskOnly && !cachePolicy.legacyDiskCacheChecked && effectivePrefixCacheEnabled && (
           <>
@@ -1159,7 +1160,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           tooltip={t('sessions.config.blockDiskCacheTooltip')}
           checked={cachePolicy.blockDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(cacheControlUpdatesForBlockDiskToggle(v, cacheControlState))}
-          disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}
+          disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || (exactTypedPromptDiskCache && !dflash2Speculative)}
         />
         {cachePolicy.blockDiskCacheChecked && (
           <>
@@ -1192,13 +1193,13 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 here keeps the control honest: two sessions set to different
                 percentages would otherwise look independent while contending
                 over the same pool. */}
-            <InfoNote text={t('sessions.config.blockCacheSharedBudgetNote')} />
+            <InfoNote text={t(dflash2Speculative && normalizedDetectedFamily === 'glm5-next' ? 'sessions.config.glmDflashCacheBudgetNote' : 'sessions.config.blockCacheSharedBudgetNote')} />
             {/* The pool spans cache ARCHITECTURES, not just sessions: typed SSM
                 companions, DSV4 composite records, rotating-SWA state and
                 multimodal blocks are all trimmed out of the same root. Someone
                 reading only the per-session note would reasonably assume their
                 DSV4 session had its own budget. */}
-            <InfoNote text={t('sessions.config.blockCacheArchitecturePoolNote')} />
+            {!(dflash2Speculative && normalizedDetectedFamily === 'glm5-next') && <InfoNote text={t('sessions.config.blockCacheArchitecturePoolNote')} />}
             <div className="flex items-center gap-2 mt-1">
               <button
                 type="button"
@@ -1230,7 +1231,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             </div>
           </>
         )}
-        {batchingOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
+        {batchingOff && !dflash2Speculative && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
         {!batchingOff && prefixOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresPrefix')} />}
         {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text={t('sessions.config.mixedSwaAutoHint')} />}
         {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text={t('sessions.config.hy3AutoHint')} />}

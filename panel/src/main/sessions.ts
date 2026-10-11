@@ -131,6 +131,11 @@ function isDflash2DrafterSelection(path: string | undefined | null): boolean {
 }
 
 
+function hasNativeDflashCache(config: Partial<ServerConfig>, modelPath?: string): boolean {
+  const draft = config.speculativeModel || ((config as any).useBundledDflash2 === false
+    ? null : findBundledDflash2Drafter(modelPath))
+  return isDflash2DrafterSelection(draft)
+}
 
 /** Result of findEnginePath: packaged Python, a source-bound dev venv, or a system binary. */
 type EnginePath =
@@ -441,7 +446,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.enableJit = false
         changed = true
       }
-    } else if (detectedFamily === 'glm5-next' && !usesGlmNativeSsdPool(detected, config)) {
+    } else if (detectedFamily === 'glm5-next' && !usesGlmNativeSsdPool(detected, config) && !hasNativeDflashCache(config, modelPath)) {
       // GLM-5.3's KDA recurrent/conv state plus MLA/DSA indexer state is
       // persisted as one exact typed N-1 snapshot. The generic block store
       // cannot represent that boundary. Migrate the old generic default pair
@@ -3077,7 +3082,7 @@ export class SessionManager extends EventEmitter {
                   ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
                   : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
             }
-          } else if (freshFamily === 'glm5-next' && !usesGlmNativeSsdPool(freshConfig, config)) {
+          } else if (freshFamily === 'glm5-next' && !usesGlmNativeSsdPool(freshConfig, config) && !hasNativeDflashCache(config, config.modelPath)) {
             const staleGenericDiskPair =
               config.enableDiskCache !== true && config.enableBlockDiskCache === true
             const glmChanged =
@@ -5333,13 +5338,14 @@ export class SessionManager extends EventEmitter {
       console.log(`[SESSION] DSV4-Flash detected: overriding pagedCacheBlockSize ${config.pagedCacheBlockSize} -> ${DSV4_PAGED_CACHE_BLOCK_SIZE} (native SWA+CSA/HCA composite cache)`)
     }
     const cacheLaunch = buildCacheLaunchArgs({
+      nativeSpeculativeCache: dflash2Speculative,
       continuousBatching: cacheStackActive,
       enablePrefixCache: config.enablePrefixCache !== false,
       // Accepted for migration compatibility only. The shared builder always
       // emits --no-paged-cache and never its positive counterpart.
       usePagedCache: false,
-      enableDiskCache: !!diskControls.enableDiskCache,
-      enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
+      enableDiskCache: !dflash2Speculative && !!diskControls.enableDiskCache,
+      enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
       noMemoryAwareCache: !!config.noMemoryAwareCache,
       forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
       prefixCacheSize: config.prefixCacheSize,

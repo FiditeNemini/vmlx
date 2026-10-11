@@ -329,18 +329,22 @@ def test_prefix_disk_tier_restores_after_restart(tmp_path):
         first = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
         _run(model, target, p1, 20, first)
         first.disk.flush()
-        assert first.disk.writes == 1 and len(list(tmp_path.glob("*.safetensors"))) == 1
+        assert first.disk.writes == 1 and len(list(first.disk.dir.glob("*.safetensors"))) == 1
+        first.disk.close()
         second = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))      # restart: empty RAM, same directory
         got, st = _run(model, target, p2, 20, second)
         assert st.cached_tokens == len(p1) and second.disk.hits == 1 and st.cache_source == "disk"
         _, st_ram = _run(model, target, p2, 20, second)                       # now held in RAM
         assert st_ram.cached_tokens == len(p2) and st_ram.cache_source == "ram"
         assert got == cold
+        second.disk.close()
         third = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
         again, st3 = _run(model, target, p2, 20, third)                      # the p2 snapshot written by `second`
-        second.disk.flush()
         assert again == cold
     finally:
+        for name in ("first", "second", "third"):
+            if name in locals():
+                locals()[name].disk.close()
         target.close()
 
 
@@ -353,12 +357,16 @@ def test_prefix_disk_tier_corrupt_file_is_a_miss(tmp_path):
         cold, _ = _run(model, target, p2, 12, None)
         first = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
         _run(model, target, p1, 12, first); first.disk.flush()
-        f = next(tmp_path.glob("*.safetensors"))
+        f = next(first.disk.dir.glob("*.safetensors"))
+        first.disk.close()
         f.write_bytes(f.read_bytes()[: f.stat().st_size // 2])              # truncated file
         second = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))
         got, st = _run(model, target, p2, 12, second)
         assert st.cached_tokens == 0 and got == cold and not f.exists() and second.disk.errors == 1
     finally:
+        for name in ("first", "second"):
+            if name in locals():
+                locals()[name].disk.close()
         target.close()
 
 
@@ -372,17 +380,24 @@ def test_prefix_disk_tier_budget_keeps_newest(tmp_path):
         _run(model, target, list(range(5, 30)), 4, store); disk.flush()
         assert store.last_persistence.result()["durable"] is True
         one = disk.nbytes()
-        disk.max_bytes = one * 1.5                                          # room for one snapshot, not two
+        disk.close()
+        disk = PrefixDiskTier(tmp_path, one * 1.5)  # New serving owner with a smaller shared cap.
+        store.disk = disk
         _run(model, target, list(range(40, 70)), 4, store); disk.flush()
-        assert len(disk.index) == 1 and disk.evictions == 1
+        assert len(disk.index) == 1
+        assert disk._catalog.budget.refresh_health().capacity_evicted_entries_total >= 1
         assert next(iter(disk.index.values()))["n"] == 30
-        assert len(list(tmp_path.glob("*.safetensors"))) == 1
-        disk.max_bytes = 1
+        assert len(list(disk.dir.glob("*.safetensors"))) == 1
+        disk.close()
+        disk = PrefixDiskTier(tmp_path, 1)
+        store.disk = disk
         _run(model, target, list(range(80, 110)), 4, store)
         outcome = store.last_persistence.result(timeout=5)
-        assert outcome["outcome"] == "refused" and outcome["durable"] is False
+        assert outcome["outcome"] == "failed" and outcome["durable"] is False
         assert outcome["retained_tokens"] == 0
     finally:
+        if "disk" in locals():
+            disk.close()
         target.close()
 
 
@@ -393,11 +408,11 @@ def test_prefix_disk_fingerprint_tracks_bundle_metadata(tmp_path, monkeypatch):
     b = tmp_path / "bundle"; b.mkdir()
     (b / "config.json").write_text('{"model_type": "glm5_next"}')
     GD.configure_prefix_disk(True, tmp_path / "blocks", 0, b)
-    r1 = GD._PREFIX_DISK["root"]
-    assert r1.startswith(str(tmp_path / "blocks") + "-glm-dflash2") and GD._PREFIX_DISK["max_bytes"] == float("inf")
+    r1 = GD._PREFIX_DISK["model_key"]
+    assert GD._PREFIX_DISK["root"] == str(tmp_path / "blocks") and GD._PREFIX_DISK["max_bytes"] == float("inf")
     (b / "config.json").write_text('{"model_type": "glm5_next", "x": 1}')
     GD.configure_prefix_disk(True, tmp_path / "blocks", 5, b)
-    assert GD._PREFIX_DISK["root"] != r1 and GD._PREFIX_DISK["max_bytes"] == 5 * 2 ** 30
+    assert GD._PREFIX_DISK["model_key"] != r1 and GD._PREFIX_DISK["max_bytes"] == 5 * 2 ** 30
     GD.configure_prefix_disk(False, tmp_path / "blocks", 5, b)
     assert GD._PREFIX_DISK["root"] is None
 
@@ -420,12 +435,16 @@ def test_prefix_disk_identity_tracks_selected_drafter_and_runtime(tmp_path, monk
 
     def root():
         GD.configure_prefix_disk(True, tmp_path / "blocks", 5, target, draft)
-        return GD._PREFIX_DISK["root"]
+        disk = GD.PrefixDiskTier(GD._PREFIX_DISK["root"], GD._PREFIX_DISK["max_bytes"], GD._PREFIX_DISK["model_key"])
+        try:
+            return disk.dir
+        finally:
+            disk.close()
 
     first = root()
     assert root() == first  # Same bundles/runtime remain restart-compatible.
     old = Path(first)
-    old.mkdir(parents=True)
+    old.mkdir(parents=True, exist_ok=True)
     sentinel = old / "retained-old-entry"
     sentinel.write_text("preserve")
     config.write_text('{"target_layer_ids":[6,15,25,34,43],"revision":2}')

@@ -312,18 +312,22 @@ class PrefixDiskTier:
     `root` by a background thread (one safetensors file per snapshot: each layer's native cache state + typed
     meta_state, the drafter context rows, the last logits and the prompt ids), so a restarted server restores long
     histories instead of re-prefilling them. A RAM miss looks here for the longest stored prefix; the file's ids are
-    compared token by token before use. `root` is per bundle (see configure_prefix_disk). LRU by last use over
-    `max_bytes`; a file that fails to load is deleted and treated as a miss."""
+    compared token by token before use. Each bundle has a namespace within the shared pool;
+    aggregate LRU and process-safe publication are owned by its budget coordinator."""
 
     FORMAT = "glm-dflash2-prefix-v1"
 
-    def __init__(self, root, max_bytes: float):
+    def __init__(self, root, max_bytes: float, model_key: str = "glm-prefix"):
+        import math
         import queue
         import threading
-        from pathlib import Path
-        self.dir = Path(root)
-        self.dir.mkdir(parents=True, exist_ok=True)
+        from .utils.glm_prefix_disk_store import GlmPrefixDiskStore
+
         self.max_bytes = float(max_bytes)
+        self._catalog = GlmPrefixDiskStore(
+            root, model_key, int(max_bytes) if math.isfinite(max_bytes) else 0,
+        )
+        self.dir = self._catalog.directory
         self.hits = self.misses = self.writes = self.evictions = self.errors = 0
         self._lock = threading.Lock()
         self.index: dict[str, dict] = {}
@@ -339,26 +343,10 @@ class PrefixDiskTier:
         import numpy as np
         return hashlib.sha256(np.asarray(list(ids), dtype=np.int64).tobytes()).hexdigest()[:40]
 
-    # index: <dir>/index.json {name: {"n", "bytes", "used"}}; files written as <name>.part.safetensors, then renamed
     def _load_index(self):
-        import json
-        p = self.dir / "index.json"
-        try:
-            raw = json.loads(p.read_text()) if p.exists() else {}
-        except Exception:
-            raw = {}
-        for name, e in raw.items():
-            if (self.dir / f"{name}.safetensors").exists():
-                self.index[name] = {"n": int(e["n"]), "bytes": int(e["bytes"]), "used": float(e["used"])}
-        for f in self.dir.iterdir():                       # unfinished writes (<name>.part) and unindexed files
-            if f.suffix == ".safetensors" and f.stem not in self.index:
-                f.unlink(missing_ok=True)
-
-    def _save_index(self):
-        import json
-        tmp = self.dir / "index.json.tmp"
-        tmp.write_text(json.dumps(self.index))
-        os.replace(tmp, self.dir / "index.json")
+        records = self._catalog.records()
+        with self._lock:
+            self.index = records
 
     def nbytes(self) -> int:
         with self._lock:
@@ -370,11 +358,20 @@ class PrefixDiskTier:
         receipt = Future()
         name = self.digest(key)
         with self._lock:
-            if name in self.index:
-                self.index[name]["used"] = time.time()
-                receipt.set_result({"outcome": "already_durable", "durable": True,
-                                    "retained_tokens": len(key), "detail": "glm-dflash2-prefix-disk"})
-                return receipt
+            known = name in self.index
+        # Another pool owner can evict a previously indexed snapshot. Confirm
+        # the finalized pair under the shared lock before claiming durability.
+        try:
+            retained = known and self._catalog.contains(name, len(key))
+        except (OSError, ValueError, KeyError, TypeError):
+            retained = False
+        if retained:
+            with self._lock:
+                if name in self.index:
+                    self.index[name]["used"] = time.time()
+            receipt.set_result({"outcome": "already_durable", "durable": True,
+                                "retained_tokens": len(key), "detail": "glm-dflash2-prefix-disk"})
+            return receipt
         self._queue.put((name, key, snap, receipt))
         return receipt
 
@@ -384,13 +381,10 @@ class PrefixDiskTier:
     def clear(self) -> int:
         """Clear this bundle's indexed snapshots while serving is excluded."""
         self.flush()  # A queued write must not recreate an entry after Clear.
+        removed = self._catalog.clear()
         with self._lock:
-            names = list(self.index)
-            for name in names:
-                (self.dir / f"{name}.safetensors").unlink(missing_ok=True)
-                self.index.pop(name, None)
-            self._save_index()
-        return len(names)
+            self.index.clear()
+        return removed
 
     def close(self) -> None:
         """Drain queued snapshots and release the writer at model teardown.
@@ -401,6 +395,7 @@ class PrefixDiskTier:
         if self._thread.is_alive():
             self._queue.put(None)
             self._thread.join()
+        self._catalog.close()
 
     def _writer(self):
         while True:
@@ -430,29 +425,26 @@ class PrefixDiskTier:
             for j, v in enumerate(state):
                 if v is not None:
                     arrays[f"c{i}.{j}"] = v
-        tmp = self.dir / f"{name}.part.safetensors"
-        mx.save_safetensors(str(tmp), arrays, metadata={"format": self.FORMAT, "layers": json.dumps(layers)})
-        os.replace(tmp, self.dir / f"{name}.safetensors")
-        size = (self.dir / f"{name}.safetensors").stat().st_size
+        self._catalog.save(name, len(key), lambda tmp: mx.save_safetensors(
+            str(tmp), arrays, metadata={"format": self.FORMAT, "layers": json.dumps(layers)},
+        ))
+        self._load_index()
         with self._lock:
-            self.index[name] = {"n": len(key), "bytes": int(size), "used": time.time()}
             self.writes += 1
-            while len(self.index) > 1 and sum(e["bytes"] for e in self.index.values()) > self.max_bytes:
-                old = min((k for k in self.index if k != name), key=lambda k: self.index[k]["used"])
-                self.index.pop(old)
-                (self.dir / f"{old}.safetensors").unlink(missing_ok=True)
-                self.evictions += 1
-            if sum(e["bytes"] for e in self.index.values()) > self.max_bytes:     # this snapshot alone exceeds it
-                self.index.pop(name)
-                (self.dir / f"{name}.safetensors").unlink(missing_ok=True)
-                self.evictions += 1
-            self._save_index()
             retained = name in self.index
             return {"outcome": "stored" if retained else "refused", "durable": retained,
                     "retained_tokens": len(key) if retained else 0,
-                    "detail": "glm-dflash2-prefix-disk" if retained else "snapshot exceeds disk budget"}
+                    "detail": "glm-dflash2-prefix-disk" if retained else "snapshot not retained by shared SSD budget"}
 
     def lookup(self, ids, min_len: int = 0):
+        try:
+            self._load_index()
+        except OSError as e:
+            import logging
+            logging.getLogger(__name__).warning("glm dflash2 prefix catalog unavailable: %s", e)
+            self.errors += 1
+            self.misses += 1
+            return None
         with self._lock:
             cands = sorted({e["n"] for e in self.index.values() if min_len < e["n"] <= len(ids)}, reverse=True)
             by_name = dict(self.index)
@@ -474,8 +466,10 @@ class PrefixDiskTier:
         import json
 
         from vmlx_engine.models.glm5_next import glm5_next as G
-        path = self.dir / f"{name}.safetensors"
-        try:
+        failed_identity = None
+        def read(path):
+            nonlocal failed_identity
+            failed_identity = self._catalog.file_identity(path)
             arrays, meta = mx.load(str(path), return_metadata=True)
             if meta.get("format") != self.FORMAT or arrays["ids"].tolist() != [int(t) for t in ids]:
                 raise ValueError("prefix snapshot does not match")
@@ -484,29 +478,31 @@ class PrefixDiskTier:
                 cls = {"Glm5KDACache": G.Glm5KDACache, "Glm5MLACache": G.Glm5MLACache}[cls_name]
                 state = [arrays[f"c{i}.{j}"] if p else None for j, p in enumerate(present)]
                 cache.append(cls.from_state(state, tuple(meta_state)))
+            # MLX loads lazily. Keep the eviction lock through materialization,
+            # not merely until the file's header has been read.
+            mx.eval(list(arrays.values()))
             return _PrefixSnapshot(cache, arrays["hidden"], arrays["logits"])
+        try:
+            return self._catalog.load(name, len(ids), read)
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning("glm dflash2 prefix snapshot %s unusable (%s); deleted", name, e)
+            logging.getLogger(__name__).warning("glm dflash2 prefix snapshot %s unusable (%s); ignored", name, e)
             self.errors += 1
-            with self._lock:
-                self.index.pop(name, None)
-                path.unlink(missing_ok=True)
-                self._save_index()
+            if failed_identity is not None:
+                try:
+                    self._catalog.remove(name, len(ids), failed_identity)
+                except OSError:
+                    logging.getLogger(__name__).warning("glm dflash2 failed snapshot cleanup deferred", exc_info=True)
             return None
 
 
 _PREFIX_STORES: dict = {}
 PREFIX_SNAPSHOT_EVERY = int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_EVERY", "2048"))
-_PREFIX_DISK = {"root": None, "max_bytes": 0.0}
+_PREFIX_DISK = {"root": None, "max_bytes": 0.0, "model_key": None}
 
 
 def session_cache_stats() -> dict:
-    """Metadata-only view of the native store; never query the Qwen store.
-
-    The native disk quota is per bundle, not the generic shared SSD pool.
-    Keep that scope explicit until the stores share a budget coordinator.
-    """
+    """Metadata-only native counters plus the shared aggregate SSD budget."""
     stores = list(_PREFIX_STORES.values())
     keys = [key for store in stores for key in list(store.entries)]
     result = {"runtime": "glm-dflash2", "ram": {
@@ -518,22 +514,22 @@ def session_cache_stats() -> dict:
     disks = list({id(store.disk): store.disk for store in stores if store.disk is not None}.values())
     if not _PREFIX_DISK["root"] and not disks:
         return result
-    size = sum(disk.nbytes() for disk in disks)
     cap = _PREFIX_DISK["max_bytes"]
     import math
+    from dataclasses import asdict
+
     limit = int(cap) if math.isfinite(cap) else 0
+    budget = (asdict(disks[0]._catalog.budget.refresh_health()) if disks else {
+        "bytes_after": 0, "max_size_bytes": limit, "accounted": False,
+        "telemetry_stale": True, "compliant": False,
+    })
+    budget["root"] = _PREFIX_DISK["root"]
     result["ssd"] = {
         "hits": sum(d.hits for d in disks), "misses": sum(d.misses for d in disks),
         "writes": sum(d.writes for d in disks), "write_errors": sum(d.errors for d in disks),
         "pending_writes": sum(d._queue.unfinished_tasks for d in disks),
-        "budget_scope": "bundle", "shared_pool": False,
-        "bundle_budget": {
-            "root": _PREFIX_DISK["root"], "scope": "bundle",
-            "bytes_after": size, "max_size_bytes": limit,
-            "accounted": bool(disks), "telemetry_stale": False,
-            "compliant": bool(disks) and (not limit or size <= limit),
-            "evicted_entries_total": sum(d.evictions for d in disks),
-        },
+        "budget_scope": "shared", "shared_pool": True,
+        "global_budget": budget,
     }
     return result
 
@@ -575,8 +571,8 @@ def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path, dr
     """CLI hook (non-batched launches): the DFlash2 lane's SSD tier follows the server's block disk cache flags
     (on unless --disable-block-disk-cache; --disable-prefix-cache governs the batched scheduler only; --block-disk-cache-dir;
     --block-disk-cache-max-gb,
-    where 0 = unlimited as for the block store). Files live in the sibling directory
-    '<block cache dir>-glm-dflash2/<bundle fingerprint>', outside the block store's own budget scan.
+    where 0 = unlimited as for the block store). New snapshots use the managed
+    shared pool. Legacy sibling directories are preserved, never silently reused.
     VMLX_GLM_DFLASH2_DISK_DIR (a directory, or 0 = off) and VMLX_GLM_DFLASH2_DISK_MAX_GB override."""
     from pathlib import Path
     env_dir = os.environ.get("VMLX_GLM_DFLASH2_DISK_DIR")
@@ -585,12 +581,11 @@ def configure_prefix_disk(enabled: bool, block_cache_dir, max_gb, model_path, dr
         root = None if env_dir in ("", "0") else Path(env_dir).expanduser()
     elif enabled:
         base = Path(block_cache_dir or Path.home() / ".cache" / "vmlx-engine" / "block-cache").expanduser()
-        root = Path(str(base) + "-glm-dflash2")
+        root = base
     env_gb = os.environ.get("VMLX_GLM_DFLASH2_DISK_MAX_GB")
     gb = float(env_gb) if env_gb else float(max_gb if max_gb is not None else 10.0)
-    if root is not None and model_path:
-        root = root / _bundle_fingerprint(model_path, draft_path)
     _PREFIX_DISK.update(root=str(root) if root is not None else None,
+                        model_key=_bundle_fingerprint(model_path, draft_path) if root is not None and model_path else None,
                         max_bytes=gb * 2 ** 30 if gb > 0 else float("inf"))
     close_prefix_stores()
 
@@ -615,7 +610,8 @@ def prefix_store_for(target) -> "PrefixStore":
     key = id(target)
     st = _PREFIX_STORES.get(key)
     if st is None:
-        disk = PrefixDiskTier(_PREFIX_DISK["root"], _PREFIX_DISK["max_bytes"]) if _PREFIX_DISK["root"] else None
+        disk = PrefixDiskTier(_PREFIX_DISK["root"], _PREFIX_DISK["max_bytes"],
+                              _PREFIX_DISK["model_key"]) if _PREFIX_DISK["root"] else None
         st = _PREFIX_STORES[key] = PrefixStore(int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_ENTRIES", "12")),
                                                 float(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_MAX_GB", "3")) * 2 ** 30,
                                                 disk=disk)

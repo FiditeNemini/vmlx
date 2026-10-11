@@ -1206,7 +1206,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 here keeps the control honest: two sessions set to different
                 percentages would otherwise look independent while contending
                 over the same pool. */}
-            <InfoNote text={t(dflash2Speculative && normalizedDetectedFamily === 'glm5-next' ? 'sessions.config.glmDflashCacheBudgetNote' : 'sessions.config.blockCacheSharedBudgetNote')} />
+            <InfoNote text={t('sessions.config.blockCacheSharedBudgetNote')} />
             {/* The pool spans cache ARCHITECTURES, not just sessions: typed SSM
                 companions, DSV4 composite records, rotating-SWA state and
                 multimodal blocks are all trimmed out of the same root. Someone

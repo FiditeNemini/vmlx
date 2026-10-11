@@ -1078,7 +1078,6 @@
       "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。",
       "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
       "nativeDflashCacheNote": "DFlash2 使用独立于连续批处理的原生提示缓存。下面的 SSD 设置控制其磁盘层，批处理的 Prefix Cache 开关不控制此层。原生缓存也可能在内存中保留可复用状态。",
-      "glmDflashCacheBudgetNote": "GLM DFlash2 目前将此容量限制应用于自身的 SSD 命名空间，与共享块缓存池分开计算。",
       "ramCacheTradeoffNotice": "纯 SSD 缓存策略：所有模型的内存分页缓存和媒体预处理 RAM 缓存均已锁定关闭。可复用提示会持久化到 SSD，缓存负载仅瞬时恢复；图像、视频和音频处理张量会在每次请求后释放。",
       "blockCacheMaxPercent": "SSD 缓存大小（磁盘百分比）",
       "blockCacheSavedGbOverride": "已保存的显式限制：{gb} GB。在更改百分比之前，此限制优先于上方的百分比。更改百分比将替换已保存的 GB 限制。",

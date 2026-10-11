@@ -14750,6 +14750,62 @@ async def _clear_glm_dflash2_cache(include_ssd: bool) -> bool:
     return True
 
 
+async def _clear_glm_shared_ssd_pool(expected_root, expected_pid):
+    """Drain native persistence while excluding generation, then clear SSD only."""
+    import sqlite3
+    from . import glm_dflash2
+
+    lock = getattr(_engine, "_generation_lock", None)
+    worker = getattr(_engine, "_run_model_call", None)
+    if lock is None or not callable(worker) or lock.locked():
+        raise HTTPException(status_code=409, detail="Wait for native generation to finish before clearing SSD cache")
+
+    def clear():
+        disks = list({id(s.disk): s.disk for s in glm_dflash2._PREFIX_STORES.values()
+                      if s.disk is not None}.values())
+        if not disks:
+            raise HTTPException(status_code=409, detail="No managed SSD pool is available")
+        budget = disks[0]._catalog.budget
+        if expected_pid != os.getpid() or expected_root != str(budget.root):
+            raise HTTPException(status_code=409, detail="SSD pool or engine identity changed; refresh before clearing")
+        for disk in disks:
+            disk.flush()
+        result = budget.clear_eligible()
+        for disk in disks:
+            disk._load_index()
+        return {
+            "status": "eligible_cleared", "cache_type": "ssd_pool",
+            "root": str(budget.root), "freed_bytes": result.evicted_bytes,
+            "removed_entries": result.evicted_entries,
+            "remaining_bytes": result.bytes_after,
+            "effective_cap_bytes": result.max_size_bytes,
+            "protected_temp_files": result.protected_temp_files,
+            "protected_recent_orphans": result.protected_recent_orphans,
+            "resident_cache_preserved": True, "retired_disk_hints": 0,
+        }
+
+    async with lock:
+        try:
+            # A disconnected client must not release admission while the
+            # executor is still deleting files. Cancellation cannot stop it.
+            task = asyncio.create_task(worker(clear))
+            cancelled = False
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = task.result()
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+        except BlockingIOError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, sqlite3.Error) as exc:
+            logger.exception("Native SSD pool clear could not finish")
+            raise HTTPException(status_code=503, detail="SSD clear did not finish; refresh cache status before retrying") from exc
+
+
 @app.get("/v1/cache/stats", dependencies=[Depends(verify_api_key)])
 async def cache_stats():
     """Get cache statistics for debugging and monitoring."""
@@ -16353,6 +16409,12 @@ async def clear_cache(
     """
     if cache_type == "ssd_pool":
         import sqlite3
+
+        from .speculative import is_dflash2_enabled
+        if (_engine is not None and is_dflash2_enabled()
+                and getattr(_current_model_config(), "family_name", None)
+                in {"glm5_next", "glm5_next_text"}):
+            return await _clear_glm_shared_ssd_pool(expected_root, expected_pid)
 
         # Do not use cached /health data as an idle assertion. This synchronous
         # handler does not yield to new ASGI admissions before the operation.

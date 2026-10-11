@@ -1078,7 +1078,6 @@
       "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
       "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
       "nativeDflashCacheNote": "DFlash2 uses a native prompt cache independently of continuous batching. The SSD controls below configure its disk tier; the batched Prefix Cache switch does not control this tier. Native in-memory reuse may also be retained.",
-      "glmDflashCacheBudgetNote": "GLM DFlash2 currently applies this budget to its own SSD namespace, separately from the shared block-cache pool.",
       "ramCacheTradeoffNotice": "SSD-only cache policy: In-Memory Paged Cache and Media Preprocess RAM Cache are locked OFF for every model. Reusable prompts persist on SSD and cache payloads are restored only transiently; image, video, and audio processor tensors are released after every request.",
       "blockCacheMaxPercent": "SSD Cache Size (% of disk)",
       "blockCacheSavedGbOverride": "Saved explicit limit: {gb} GB. This overrides the percentage above until you change it. Changing the percentage replaces this saved GB limit.",

@@ -338,9 +338,11 @@ interface SessionConfigFormProps {
   sessionId?: string
   /** Model path/name used only for artifact-specific policy labels (for example Bonsai's q8 exception). */
   modelIdentity?: string
+  /** Exact filesystem path; display names are not parseable paths. */
+  modelPath?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedNativeGlmSsd, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedRuntimeModalities, liveRuntimeModalities, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedNativeGlmSsd, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedRuntimeModalities, liveRuntimeModalities, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity, modelPath }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -427,7 +429,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   // A bundle may also SHIP its drafter (`<bundle>/dflash2`); then it is used by
   // default (useBundledDflash2), and bundles without one are unaffected.
   const qwen38Dense27b = !isImage && isQwen38Dense27b(modelIdentity)
-  const bundlePath = String(modelIdentity || '').split(/\s+/).reverse().find(part => part.startsWith('/')) || ''
+  const bundlePath = modelPath || ''
   const [dflash2Drafters, setDflash2Drafters] = useState<Array<{ name: string; path: string; bundled?: boolean }>>([])
   useEffect(() => {
     setDflash2Drafters([])

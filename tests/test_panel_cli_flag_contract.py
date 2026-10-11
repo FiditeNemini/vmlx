@@ -310,7 +310,8 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_core_flags() -> Non
 
     preview_body = preview[
         preview.index("function buildCommandPreview("):
-        preview.index("return parts.join", preview.index("function buildCommandPreview("))
+        # 5408e8e1 quotes each argument before joining; the flag-building body ends where quoting begins.
+        preview.index("const quote = (value: string)", preview.index("function buildCommandPreview("))
     ]
     runtime_start = sessions.index("buildArgs(config: ServerConfig): string[]")
     runtime_body = sessions[

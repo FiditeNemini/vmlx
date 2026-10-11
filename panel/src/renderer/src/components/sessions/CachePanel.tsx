@@ -334,7 +334,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     : []
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-vmlx-control="cache-panel">
       {error && (
         <div className="text-xs text-destructive bg-destructive/10 px-3 py-2 rounded">
           {error}

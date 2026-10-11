@@ -341,6 +341,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
               <button
                 onClick={() => { setShowCache(!showCache); if (!showCache) { setShowSettings(false); setShowServerSettings(false); setShowBenchmark(false); setShowEmbeddings(false); setShowPerformance(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded ${showCache ? 'bg-accent' : 'hover:bg-accent'}`}
+                data-vmlx-control="session-cache-button"
                 title={t('sessions.view.cacheTitle')}
               >
                 {t('sessions.view.cache')}
@@ -362,6 +363,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
               <button
                 onClick={() => { setShowPerformance(!showPerformance); if (!showPerformance) { setShowSettings(false); setShowServerSettings(false); setShowCache(false); setShowBenchmark(false); setShowEmbeddings(false); setShowLogs(false) } }}
                 className={`text-sm px-2 py-1 rounded ${showPerformance ? 'bg-accent' : 'hover:bg-accent'}`}
+                data-vmlx-control="session-perf-button"
                 title={t('sessions.view.perfTitle')}
               >
                 {t('sessions.view.perf')}

@@ -3721,6 +3721,9 @@ class MLLMOutput:
     # Engine-measured prefill {tokens, seconds, scope} -> usage.vmlx_prefill
     # (the UI's pp/s). SimpleEngine paths previously never set it.
     prefill_usage: Any = None
+    # Cumulative generated IDs, supplied only by qualified terminal paths.
+    # Empty means unavailable; never infer them from decoded text.
+    tokens: list[int] = field(default_factory=list)
 
 
 def is_base64_image(s: str) -> bool:
@@ -7026,6 +7029,7 @@ class MLXMultimodalLM:
                     prompt_tokens=int(getattr(chunk, "prompt_tokens", 0) or 0),
                     completion_tokens=token_count,
                     cached_tokens=int(getattr(chunk, "cached_tokens", 0) or 0),
+                    tokens=getattr(chunk, "output_token_ids", None) or [],
                     cache_detail=str(getattr(chunk, "cache_detail", "") or ""),
                     persistence_future=getattr(chunk, "persistence_future", None),
                     prefill_usage=getattr(chunk, "prefill_usage", None),

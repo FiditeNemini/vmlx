@@ -147,6 +147,7 @@ class SpecStats:
     cached_tokens: int = 0                  # prompt tokens restored from the lane's prefix store
     cache_source: str = ""                  # "ram" | "disk" for a restored prefix (usage cache_detail)
     blocks: list = field(default_factory=list)   # block size used by each verify round
+    output_token_ids: list = field(default_factory=list)
 
     @property
     def tok_per_round(self) -> float:
@@ -771,6 +772,8 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
     st.prompt_tokens, st.prefill_s = prompt.size, time.perf_counter() - t0
     t1 = time.perf_counter()
     tokens = [int(tok.item())]; n = 1
+    # Reuse the generation's existing history; export a copy only at terminal.
+    st.output_token_ids = tokens
     try:
         yield [tokens[-1]], 0
         if tokens[-1] in eos:
@@ -962,6 +965,8 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
                                mx.get_peak_memory() / 1e9, reason)
         r.drafted = int(drafted)
         r.cached_tokens = int(st.cached_tokens)        # prompt tokens restored from the prefix store (usage)
+        if finished:
+            r.output_token_ids = list(st.output_token_ids)
         # usage prompt_tokens_details.cache_detail, like the batched lanes' "native-glm+disk" / "block-disk"
         r.cache_detail = {"ram": "glm-dflash2-prefix", "disk": "glm-dflash2-prefix+disk"}.get(st.cache_source, "")
         if finished and store is not None:

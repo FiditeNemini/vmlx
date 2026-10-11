@@ -37,6 +37,15 @@ def _lane_outputs(lane):
     if lane == "batched-mllm":         # cold VLM prompt (no hit)
         return [_out(t0 + 2.0, 1, prompt_tokens=4096, prefill_usage=dict(receipt, path="mllm")),
                 _out(t0 + 4.0, 81, finished=True, prompt_tokens=4096, prefill_usage=dict(receipt, path="mllm"))]
+    if lane == "batched-mllm-mtp":     # Qwen Flash-Next native MTP (record attached by the scheduler at finish)
+        mtp = RT.mtp_spec_stats({"request_id": "r", "cycles": 70, "drafted_tokens": 140, "accepted_tokens": 98,
+                                 "acceptance_rate": 0.7, "final_depth": 2, "depth_acceptance_rates":
+                                 {"d1": 0.8, "d2": 0.6, "d3": None}, "finish_reason": "stop", "fallback_reason": None})
+        r = dict(receipt, tokens=108, seconds=0.38, path="mllm")
+        return [_out(t0 + 0.63, 1, prompt_tokens=6344, cached_tokens=6236, cache_detail="block-disk+ssm",
+                     prefill_usage=r),
+                _out(t0 + 4.89, 127, finished=True, prompt_tokens=6344, cached_tokens=6236,
+                     cache_detail="block-disk+ssm", prefill_usage=r, spec_stats=mtp)]
     if lane == "simple-dflash2-qwen":  # DFlash2 with AR bursts, session-store hit
         spec = {"kind": "dflash2", "lane": "qwen", "cycles": 60, "emitted_per_cycle": 3.293, "drafted": 600,
                 "accepted": 138, "acceptance": 0.23, "widths": {"5": 11, "8": 37, "16": 10}, "ar_tokens": 192,
@@ -58,7 +67,8 @@ def _lane_outputs(lane):
     raise AssertionError(lane)
 
 
-LANES = ["batched-llm", "batched-mllm", "simple-dflash2-qwen", "simple-dflash2-glm", "simple-llm-no-receipt"]
+LANES = ["batched-llm", "batched-mllm", "batched-mllm-mtp", "simple-dflash2-qwen", "simple-dflash2-glm",
+         "simple-llm-no-receipt"]
 
 
 class _Engine:
@@ -98,7 +108,7 @@ def _record(lane, monkeypatch):
     outputs = _lane_outputs(lane)
     cls = SimpleEngine if lane.startswith("simple") else BatchedEngine
     engine = RT.instrument(cls(outputs))
-    if lane == "batched-mllm":
+    if lane.startswith("batched-mllm"):
         engine.is_mllm = True
     clock = iter([1000.0])
     monkeypatch.setattr(RT.time, "perf_counter", lambda: next(clock, 1000.0))
@@ -189,3 +199,23 @@ async def test_health_and_cache_stats_publish_the_record(monkeypatch):
     monkeypatch.setattr(speculative, "is_dflash2_enabled", lambda: False)
     payload = await server.cache_stats()
     assert payload["last_request"]["completion_tokens"] == 31
+
+
+def test_mtp_record_is_attached_only_to_its_own_request(monkeypatch):
+    """Text lane: the mlx_lm MTP patch keeps ONE process-global record keyed by generator uid."""
+    from vmlx_engine.patches.mlx_lm_mtp import batch_generator as mtp_bg
+    from vmlx_engine.scheduler import _native_mtp_spec_stats_for
+
+    monkeypatch.setattr(mtp_bg, "_LAST_NATIVE_MTP", {"request_id": "7", "acceptance_rate": 0.5, "drafted_tokens": 10,
+                                                      "accepted_tokens": 5, "cycles": 6, "final_depth": 1})
+    assert _native_mtp_spec_stats_for(7)["acceptance"] == 0.5
+    assert _native_mtp_spec_stats_for(8) is None          # another request's record never leaks
+    monkeypatch.setattr(mtp_bg, "_LAST_NATIVE_MTP", None)
+    assert _native_mtp_spec_stats_for(7) is None
+
+
+def test_mllm_scheduler_attaches_the_finished_requests_mtp_record():
+    src = textwrap.dedent(inspect.getsource(__import__("vmlx_engine.mllm_scheduler", fromlist=["x"]).MLLMScheduler
+                                            ._process_batch_responses))
+    assert 'str(_mtp.get("request_id")) == str(request_id)' in src
+    assert "output.spec_stats = mtp_spec_stats(_mtp)" in src

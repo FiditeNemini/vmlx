@@ -1,0 +1,40 @@
+{
+  "aborted": false,
+  "cache_detail": "block-disk+ssm",
+  "cached_prompt_tps": 10069.8,
+  "cached_tokens": 6236,
+  "completion_tokens": 127,
+  "decode": {
+    "seconds": 4.26,
+    "tokens": 126,
+    "tps": 29.6
+  },
+  "engine_type": "batched",
+  "finish_reason": "stop",
+  "method": "stream_chat",
+  "model_type": "mllm",
+  "prefill": {
+    "path": "mllm",
+    "scope": "model_prefill_and_prompt_state",
+    "seconds": 0.38,
+    "tokens": 108,
+    "tps": 284.2
+  },
+  "prompt_tokens": 6344,
+  "speculative": {
+    "acceptance": 0.7,
+    "accepted": 98,
+    "cycles": 70,
+    "depth_acceptance": {
+      "d1": 0.8,
+      "d2": 0.6,
+      "d3": null
+    },
+    "drafted": 140,
+    "fallback_reason": null,
+    "final_depth": 2,
+    "finish_reason": "stop",
+    "kind": "mtp"
+  },
+  "ttft_s": 0.63
+}

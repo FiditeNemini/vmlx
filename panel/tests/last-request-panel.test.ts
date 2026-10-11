@@ -26,7 +26,7 @@ function cards(lane: string): Record<string, string> {
 describe('Perf panel last-request cards (shared engine fixtures)', () => {
   it('covers every lane fixture the engine test writes', () => {
     const lanes = readdirSync(FIXTURES).filter(f => f.endsWith('.json')).map(f => f.replace(/\.json$/, '')).sort()
-    expect(lanes).toEqual(['batched-llm', 'batched-mllm', 'simple-dflash2-glm', 'simple-dflash2-qwen', 'simple-llm-no-receipt'])
+    expect(lanes).toEqual(['batched-llm', 'batched-mllm', 'batched-mllm-mtp', 'simple-dflash2-glm', 'simple-dflash2-qwen', 'simple-llm-no-receipt'])
     for (const lane of lanes) {
       const items = lastRequestItems(fixture(lane), t)
       // Every card always renders (absent figures read "not reported", never hidden).
@@ -50,6 +50,11 @@ describe('Perf panel last-request cards (shared engine fixtures)', () => {
     expect(cards('simple-dflash2-qwen').speculative).toBe('dflash2 (qwen) · accept 23.0% · 3.29/cycle · AR 192 tok · widths 5:11 8:37 16:10')
     expect(cards('simple-dflash2-glm').speculative).toBe('dflash2 (glm) · accept 27.5% · 2.10/cycle · AR 64 tok · widths 4:40')
     expect(cards('simple-dflash2-glm').prefill).toBe('231.6 pp/s (359 tok · glm_dflash2)')
+  })
+
+  it('shows native MTP acceptance and final depth (Qwen Flash-Next lane; Naive has no MTP)', () => {
+    expect(cards('batched-mllm-mtp').speculative).toBe('mtp · accept 70.0% · D2')
+    expect(cards('batched-llm').speculative).toBe('none')
   })
 
   it('says "not reported" for a lane without a prefill receipt and "no cache hit" when cold', () => {

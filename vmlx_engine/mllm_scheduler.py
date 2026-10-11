@@ -3736,6 +3736,13 @@ class MLLMScheduler:
                 cached_tokens=getattr(response, 'cached_tokens', 0),
                 cache_detail=getattr(response, 'cache_detail', "") or "",
             )
+            if response.finish_reason is not None:
+                # This request's native-MTP record (written by the batch generator
+                # while it built this final response) -> last_request.speculative.
+                _mtp = getattr(getattr(self.batch_generator, "_stats", None), "last_native_mtp", None)
+                if isinstance(_mtp, dict) and str(_mtp.get("request_id")) == str(request_id):
+                    from .request_telemetry import mtp_spec_stats
+                    output.spec_stats = mtp_spec_stats(_mtp)
 
             # Determine effective finish reason (string stop overrides)
             finish_reason = response.finish_reason

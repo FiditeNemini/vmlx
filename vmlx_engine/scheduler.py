@@ -580,6 +580,20 @@ class IdleTaskResult(Enum):
     PARKED = "parked"
 
 
+def _native_mtp_spec_stats_for(uid) -> Optional[dict]:
+    """The finished request's native-MTP record from the mlx_lm BatchGenerator patch (keyed by generator uid), as
+    last_request.speculative. None when MTP did not run for this uid."""
+    try:
+        from .patches.mlx_lm_mtp import batch_generator as _mtp_bg
+        from .request_telemetry import mtp_spec_stats
+    except Exception:
+        return None
+    record = getattr(_mtp_bg, "_LAST_NATIVE_MTP", None)
+    if isinstance(record, dict) and str(record.get("request_id")) == str(uid):
+        return mtp_spec_stats(record)
+    return None
+
+
 @dataclass
 class SchedulerConfig:
     """Configuration for the scheduler."""
@@ -9632,6 +9646,11 @@ class Scheduler:
                 prefill_usage=(
                     getattr(response, "prefill_usage", None)
                     or getattr(request, "_vmlx_prefill_usage", None)
+                ),
+                spec_stats=(
+                    _native_mtp_spec_stats_for(response.uid)
+                    if getattr(response, "finish_reason", None) is not None
+                    else None
                 ),
                 logprobs=(
                     list(request.output_logprobs)

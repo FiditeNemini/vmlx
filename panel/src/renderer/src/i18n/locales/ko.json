@@ -1509,7 +1509,8 @@
       "lrArTokens": "AR {n} 토큰",
       "lrWidths": "폭 {w}",
       "lrRequest": "요청",
-      "lrAborted": "중단됨"
+      "lrAborted": "중단됨",
+      "lrFallback": "폴백: {why}"
     },
     "download": {
       "newestCreated": "최근 생성순",

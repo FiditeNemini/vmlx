@@ -298,6 +298,9 @@ class RequestOutput:
     # Append to preserve positional compatibility; not a GPU-kernel timer.
     generated_at: float = field(default_factory=lambda: time.perf_counter())
     prefill_usage: dict | None = None
+    # Finished request's speculative stats (native MTP record), for
+    # /health.last_request.speculative (vmlx_engine.request_telemetry).
+    spec_stats: dict | None = None
 
     @property
     def usage(self) -> Dict[str, int]:

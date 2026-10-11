@@ -1509,7 +1509,8 @@
       "lrArTokens": "AR {n} tok",
       "lrWidths": "widths {w}",
       "lrRequest": "Request",
-      "lrAborted": "aborted"
+      "lrAborted": "aborted",
+      "lrFallback": "fallback: {why}"
     },
     "download": {
       "newestCreated": "Newest Created",

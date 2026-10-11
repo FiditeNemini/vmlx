@@ -1509,7 +1509,8 @@
       "lrArTokens": "AR {n} 令牌",
       "lrWidths": "宽度 {w}",
       "lrRequest": "请求",
-      "lrAborted": "已中止"
+      "lrAborted": "已中止",
+      "lrFallback": "回退：{why}"
     },
     "download": {
       "newestCreated": "最新创建",

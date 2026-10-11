@@ -131,6 +131,24 @@ class _Tracker:
             _LAST = record
 
 
+def mtp_spec_stats(record: Any) -> Optional[dict]:
+    """A finished request's native-MTP record (text mlx_lm patch or MLLM batch generator, same schema) as the
+    ``speculative`` block of last_request."""
+    if not isinstance(record, dict):
+        return None
+    return {
+        "kind": "mtp",
+        "cycles": record.get("cycles"),
+        "drafted": record.get("drafted_tokens"),
+        "accepted": record.get("accepted_tokens"),
+        "acceptance": record.get("acceptance_rate"),
+        "final_depth": record.get("final_depth"),
+        "depth_acceptance": record.get("depth_acceptance_rates"),
+        "finish_reason": record.get("finish_reason"),
+        "fallback_reason": record.get("fallback_reason"),
+    }
+
+
 def last() -> Optional[dict]:
     with _LOCK:
         return dict(_LAST) if _LAST is not None else None

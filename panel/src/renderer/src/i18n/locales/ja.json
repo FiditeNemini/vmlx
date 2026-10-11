@@ -1509,7 +1509,8 @@
       "lrArTokens": "AR {n} トークン",
       "lrWidths": "幅 {w}",
       "lrRequest": "リクエスト",
-      "lrAborted": "中断"
+      "lrAborted": "中断",
+      "lrFallback": "フォールバック: {why}"
     },
     "download": {
       "newestCreated": "作成日時が新しい順",

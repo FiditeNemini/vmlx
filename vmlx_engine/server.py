@@ -14819,9 +14819,17 @@ async def cache_stats():
         from .speculative import is_dflash2_enabled as _df2_cache_enabled
         if _df2_cache_enabled():
             result["dflash2_cache"] = _active_dflash2_cache_runtime().session_cache_stats()
-            result["engine_stats"] = {
-                "last_durability": _engine.get_stats().get("last_durability")
-            }
+        # Every engine, not only DFlash2: SimpleEngine records the last terminal's durability too, and without any
+        # engine block a SimpleEngine session's Cache panel had nothing to show (T-PERF map 2026-10-11).
+        try:
+            _get_engine_stats = getattr(_engine, "get_stats", None)
+            _engine_stats = (_get_engine_stats() if callable(_get_engine_stats) else None) or {}
+        except Exception:
+            _engine_stats = {}
+        result["engine_stats"] = {
+            "engine_type": _engine_stats.get("engine_type"),
+            "last_durability": _engine_stats.get("last_durability"),
+        }
 
     # Scheduler-level overall stats (includes cache stats + request stats)
     scheduler = _get_scheduler()

@@ -1607,7 +1607,8 @@
       "clearAll": "Clear All",
       "reuseExplainer": "Reuse matches the longest continuous causal token prefix from token 0. Only the unmatched tail is prefilled; arbitrary suffix or interior sequences are never reused. On path-dependent families (DeepSeek V4, ZAYA CCA, and rotating-KV models such as Gemma 4 and Muse) a prompt SHORTER than the cached chain may reuse nothing and prefill in full.",
       "clearSkipped": "Some cache tiers were not cleared: {{skipped}}. They are still in use by a running request — try again once the session is idle.",
-      "lastDurability": "Last Generation Cache Persistence"
+      "lastDurability": "Last Generation Cache Persistence",
+      "noEngineCache": "This engine ({engine}) keeps no prefix cache, so there are no cache statistics to show."
     },
     "embeddings": {
       "sessionMustBeRunning": "Session must be running to generate embeddings.",

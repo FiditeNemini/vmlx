@@ -1157,8 +1157,16 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         </div>
       )}
 
-      {!schedulerCache && !schedulerStats && !dflash2Cache && !stats?.error && (
+      {/* Loading only until the first payload; a loaded payload without any cache section is an engine with no
+          prefix-cache stack (SimpleEngine / non-batched), not a pending request (was a forever spinner). */}
+      {!stats && !error && (
         <div className="text-sm text-muted-foreground">{t('sessions.cachePanel.loading')}</div>
+      )}
+      {stats && !stats.error && !schedulerCache && !schedulerStats && !dflash2Cache && !stats.block_disk_cache
+        && !stats.disk_cache && !stats.cache_totals && (
+        <div className="text-sm text-muted-foreground" data-vmlx-control="cache-panel-no-engine-cache">
+          {t('sessions.cachePanel.noEngineCache', { engine: stats.engine_stats?.engine_type || '—' })}
+        </div>
       )}
 
       {stats?.error && (

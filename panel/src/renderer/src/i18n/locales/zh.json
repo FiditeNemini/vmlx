@@ -1607,7 +1607,8 @@
       "clearAll": "全部清除",
       "reuseExplainer": "复用匹配从第 0 个 token 起最长的连续因果前缀。只有未匹配的尾部会被预填充；任意后缀或中间片段永远不会被复用。对于路径依赖的模型系列（DeepSeek V4、ZAYA CCA，以及 Gemma 4、Muse 等旋转 KV 模型），比缓存链更短的提示可能完全无法复用，需要全量预填充。",
       "clearSkipped": "部分缓存层未被清除：{{skipped}}。它们仍被运行中的请求占用，请在会话空闲后重试。",
-      "lastDurability": "最近一次生成的缓存持久化"
+      "lastDurability": "最近一次生成的缓存持久化",
+      "noEngineCache": "此引擎（{engine}）不保留前缀缓存，因此没有可显示的缓存统计。"
     },
     "embeddings": {
       "sessionMustBeRunning": "会话必须正在运行才能生成嵌入。",

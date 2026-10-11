@@ -1607,7 +1607,8 @@
       "clearAll": "Vaciar todo",
       "reuseExplainer": "La reutilización coincide con el prefijo causal continuo más largo desde el token 0. Solo se preprocesa la cola no coincidente; nunca se reutilizan sufijos arbitrarios ni secuencias intermedias. En familias dependientes de la ruta (DeepSeek V4, ZAYA CCA y modelos de KV rotatorio como Gemma 4 y Muse), un prompt MÁS CORTO que la cadena almacenada puede no reutilizar nada y preprocesarse por completo.",
       "clearSkipped": "Algunos niveles de caché no se borraron: {{skipped}}. Siguen en uso por una solicitud en curso; inténtalo cuando la sesión esté inactiva.",
-      "lastDurability": "Persistencia de caché de la última generación"
+      "lastDurability": "Persistencia de caché de la última generación",
+      "noEngineCache": "Este motor ({engine}) no mantiene caché de prefijos, así que no hay estadísticas de caché que mostrar."
     },
     "embeddings": {
       "sessionMustBeRunning": "La sesión debe estar en ejecución para generar incrustaciones.",

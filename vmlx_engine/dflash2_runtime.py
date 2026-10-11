@@ -1333,6 +1333,9 @@ def _stream_generate_resumable(
     finally:
         if _capture is not None:
             _capture.close()
+        _chooser = locals().get("chooser")
+        if _chooser is not None:
+            logger.info("DFlash2 chooser: %s", _chooser.summary())
         # The adapter is shared by every request on this model.
         adapter.media_embeds = None
         adapter.media_positions = None
@@ -1454,6 +1457,23 @@ class _BlockChooser:
             self.ar_since_probe = 0
             return ("spec", self.width)
         return ("ar", self.ar_burst)
+
+    def summary(self) -> str:
+        """Measured costs and predictions behind the decisions (one log line per request)."""
+        ar = self.cost.get("ar")
+        timed = [w for w in self.widths if w in self.cost]
+        return (
+            "ar_ms_per_token=%s ar_rate=%s width_ms=%s expected_tokens=%s width_rate=%s ar_tokens=%d cycles=%d"
+            % (
+                "-" if ar is None else "%.1f" % (ar * 1000.0),
+                "-" if ar is None else "%.1f" % (1.0 / ar),
+                {w: round(self.cost[w] * 1000.0, 1) for w in timed},
+                {w: round(self.expected_tokens(w), 2) for w in self.widths},
+                {w: round(self.expected_tokens(w) / self.cost[w], 1) for w in timed},
+                self.ar_tokens,
+                self.cycles,
+            )
+        )
 
     def observe_ar(self, seconds: float, tokens: int) -> None:
         """An AR burst: seconds per token, shared process-wide like the width costs."""

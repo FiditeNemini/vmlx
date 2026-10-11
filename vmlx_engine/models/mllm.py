@@ -6686,8 +6686,8 @@ class MLXMultimodalLM:
         GLM-5.3-Flash (glm5_next) has no M-RoPE: its language model takes
         merged input embeddings and positions from the cache offset, so its
         plan carries embeddings only (no position ids, rope delta 0) and the
-        GLM DFlash2 lane prefills them. Image requests only: any video keeps
-        the native VLM path.
+        GLM DFlash2 lane prefills them. Videos arrive as sampled image frames
+        (one key per frame); native video tokens/pixels keep the native path.
         """
         import hashlib
 
@@ -6973,13 +6973,12 @@ class MLXMultimodalLM:
                         formatted_prompt, True, images=all_images,
                         resize_shape=kwargs.get("resize_shape"),
                     )
-                    from ..glm_dflash2 import is_glm5_next as _is_glm5_next
-
-                    # GLM video is not planned (the lane prefills image
-                    # embeddings only); keep the whole request on the native
-                    # VLM path rather than dropping a historical clip.
-                    if not (videos and _is_glm5_next(self.model)):
-                        _df2_media = self._dflash2_media_plan(formatted_prompt, all_images, kwargs)
+                    # GLM video reaches here as sampled frames: SimpleEngine
+                    # expands each video placeholder into image placeholders
+                    # (_VIDEO_FRAME_FALLBACK_MODEL_TYPES), so every frame is an
+                    # image of the plan with its own key. The plan itself still
+                    # refuses native video tokens/pixels (native VLM path).
+                    _df2_media = self._dflash2_media_plan(formatted_prompt, all_images, kwargs)
                     _df2_route = _df2_media is not None
         if _df2_route:
             from ..dflash2_runtime import stream_dflash2_generate

@@ -187,6 +187,10 @@ class _TargetAdapter:
         # helper keeps just logits[:, -1:], so projecting every prompt row
         # through the 248k-vocab head is wasted work on the final chunk.
         self.last_row_logits = False
+        # False around plain AR steps (VMLX_DFLASH2_AR_SINK=0 experiment): they never
+        # roll back a verify block, so the GDN sink's per-row q/k/v/state capture is
+        # not needed there.
+        self.record_gdn = True
         # Media plan, set for ONE image/video request (_stream_generate_resumable
         # media=...). The VLM's own get_input_embeddings/get_rope_index produce
         # the whole prompt's input embeddings (vision features merged) and its
@@ -231,7 +235,7 @@ class _TargetAdapter:
             # rollback.  Prompt prefill never rolls back, and the list is only
             # cleared at the first decode cycle, so during prefill it just
             # pinned every chunk's qkv projection and recurrent state.
-            gdn_sink=None if self.last_row_logits else self.gdn_states,
+            gdn_sink=None if (self.last_row_logits or not self.record_gdn) else self.gdn_states,
             return_unnormed=True,
         )
         hidden = self.model.norm(hidden)
@@ -1083,6 +1087,12 @@ def _stream_generate_resumable(
         chooser = _BlockChooser(widths, cost=_width_costs(adapter, widths))
         after_ar = False
 
+        # VMLX_DFLASH2_AR_SINK=0 (experiment, 2026-10-11): AR steps skip the GDN
+        # rollback sink; the only rollback they need (a step launched past the last
+        # emitted token) restores the GDN layers' pre-step state from kept
+        # references (MLX arrays are immutable: no copy) and trims attention by 1.
+        _ar_no_sink = _capture is not None and os.environ.get("VMLX_DFLASH2_AR_SINK", "1") == "0"
+
         def _ar_step(tok_arr, history):
             # One plain target step on the DFlash2 adapter: the same forward as a
             # verify row, so the drafter's tap rows (hidden) stay available.
@@ -1090,8 +1100,13 @@ def _stream_generate_resumable(
             # rollback of a step launched past the last emitted token needs.
             if _capture is not None:
                 _capture.clear()
+            pre = None
+            if _ar_no_sink:
+                pre = [(i, c[0], c[1]) for i, c in enumerate(target_cache) if not c.is_trimmable()]
+                adapter.record_gdn = False
             with mx.stream(runtime.generation_stream):
                 logits = adapter(tok_arr, target_cache)
+                adapter.record_gdn = True
                 h = mx.concatenate(adapter._hidden_states, axis=-1)
                 last = logits[:, -1:]
                 if sampling_controls is not None:
@@ -1105,7 +1120,7 @@ def _stream_generate_resumable(
                     nxt = runtime._sample_probs(probs)
                 else:
                     nxt = mx.argmax(last, axis=-1)
-            return nxt, h
+            return nxt, h, pre
 
         while n < max_tokens:
             mode, burst = chooser.next_action()
@@ -1122,14 +1137,14 @@ def _stream_generate_resumable(
                 rows: list = []
                 launched_past = False
                 terminal = False
-                nx, h = _ar_step(mx.array([[tokens[-1]]]), prompt_list + tokens)
+                nx, h, _pre = _ar_step(mx.array([[tokens[-1]]]), prompt_list + tokens)
                 mx.async_eval(nx, h)
                 for j in range(k):
                     launched = None
                     if pipelined and j + 1 < k:
-                        nx2, h2 = _ar_step(nx.reshape(1, 1), None)
+                        nx2, h2, pre2 = _ar_step(nx.reshape(1, 1), None)
                         mx.async_eval(nx2, h2)
-                        launched = (nx2, h2)
+                        launched = (nx2, h2, pre2)
                     t = int(nx.item())
                     emitted.append(t)
                     rows.append(h)
@@ -1141,12 +1156,21 @@ def _stream_generate_resumable(
                         terminal = True
                     if terminal or j + 1 >= k:
                         launched_past = launched is not None
+                        if launched_past and launched[2] is not None:
+                            # Undo the overshoot forward without the sink.
+                            for _i, _conv, _state in launched[2]:
+                                target_cache[_i][0] = _conv
+                                target_cache[_i][1] = _state
+                            for _c in target_cache:
+                                if _c.is_trimmable():
+                                    _c.trim(1)
+                            launched_past = False
                         break
                     if launched is None:
-                        nx, h = _ar_step(nx.reshape(1, 1), prompt_list + tokens + emitted)
+                        nx, h, _pre = _ar_step(nx.reshape(1, 1), prompt_list + tokens + emitted)
                         mx.async_eval(nx, h)
                     else:
-                        nx, h = launched
+                        nx, h, _pre = launched
                 chooser.observe_ar(time.perf_counter() - _ar_t0, len(emitted))
                 after_ar = True
                 hidden = mx.concatenate([hidden] + rows, axis=1)

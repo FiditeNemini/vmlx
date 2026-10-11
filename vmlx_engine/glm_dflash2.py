@@ -145,6 +145,7 @@ class SpecStats:
     accepted: list = field(default_factory=list)
     ar_steps: int = 0                       # adaptive mode: tokens produced by plain target steps
     cached_tokens: int = 0                  # prompt tokens restored from the lane's prefix store
+    cache_source: str = ""                  # "ram" | "disk" for a restored prefix (usage cache_detail)
     blocks: list = field(default_factory=list)   # block size used by each verify round
 
     @property
@@ -256,6 +257,7 @@ class PrefixStore:
         self.entries = OrderedDict()
         self.hits = self.misses = self.evictions = 0
         self.disk = disk
+        self.last_source = ""                   # "ram" | "disk" | "" (miss) for the latest lookup
 
     def lookup(self, ids):
         best = None
@@ -274,11 +276,14 @@ class PrefixStore:
                 if key in self.entries:
                     self.entries.move_to_end(key)
                 self.hits += 1
+                self.last_source = "disk"
                 return n, snap
         if best is None:
             self.misses += 1
+            self.last_source = ""
             return None
         self.entries.move_to_end(best); self.hits += 1
+        self.last_source = "ram"
         return len(best), self.entries[best]
 
     def put(self, ids, cache, hidden, logits):
@@ -647,6 +652,7 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
                 mx.eval(logits, hidden, [c.state for c in cache])
                 prefix_store.put(prompt_ids[:pos], cache, hidden, logits[:, -1:])
     st.cached_tokens = reused
+    st.cache_source = prefix_store.last_source if (prefix_store is not None and reused) else ""
     if prefix_store is not None:
         mx.eval(logits, hidden, [c.state for c in cache])
         prefix_store.put(prompt_ids, cache, hidden, logits[:, -1:])
@@ -855,6 +861,8 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
                                mx.get_peak_memory() / 1e9, reason)
         r.drafted = int(drafted)
         r.cached_tokens = int(st.cached_tokens)        # prompt tokens restored from the prefix store (usage)
+        # usage prompt_tokens_details.cache_detail, like the batched lanes' "native-glm+disk" / "block-disk"
+        r.cache_detail = {"ram": "glm-dflash2-prefix", "disk": "glm-dflash2-prefix+disk"}.get(st.cache_source, "")
         yield r
         if finished:
             return

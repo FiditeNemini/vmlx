@@ -602,7 +602,12 @@ def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
     en_catalog = Path("panel/src/renderer/src/i18n/locales/en.json").read_text()
 
-    assert "const effectiveContinuousBatching = dsv4Active ? true : config.continuousBatching" in form
+    # DSV4 forces continuous batching on (DFlash2 speculative sessions force it
+    # off; that branch is the DFlash2 lane's, checked by its own tests).
+    assert (
+        "const effectiveContinuousBatching = dsv4Active ? true : dflash2Speculative ? false : config.continuousBatching"
+        in form
+    )
     assert "dsv4PrefixCache: false" in form
     assert "dsv4PoolQuant: false" not in form
     assert "dsv4CompositeCacheOptIn" not in form
@@ -614,7 +619,11 @@ def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
     assert "applyDsv4CompositeCacheToggle" not in form
     assert "cacheControlUpdatesForDsv4PoolQuantToggle" not in form
     assert "applyDsv4PoolQuantToggle" not in form
-    assert "disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}" in form
+    assert (
+        "disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled"
+        " || (exactTypedPromptDiskCache && !dflash2Speculative)}"
+        in form
+    )
     assert "cacheControlUpdatesForBlockDiskToggle(v, cacheControlState)" in form
     # The no-second-toggle copy is rendered via the locale catalog since the
     # i18n pass; the form must reference the key and English must still carry

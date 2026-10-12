@@ -5367,6 +5367,7 @@ export class SessionManager extends EventEmitter {
       blockDiskCacheDir: config.blockDiskCacheDir,
       blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
       blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
+      typedPromptSsdPool: exactTypedPromptDiskCache,
     })
     const cacheLaunchPolicy = cacheLaunch.policy
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff

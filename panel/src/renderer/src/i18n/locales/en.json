@@ -920,6 +920,7 @@
       "diskCacheHint": "Saves cached prompts to your SSD so they survive server restarts. Next time you load the same model, previous conversations warm up instantly.",
       "dsv4LegacyDiskNote": "DSV4 uses Block Disk Cache (SSD / L2) above for persistent native composite blocks. This legacy whole-prompt disk format remains unavailable for DSV4 typed cache records.",
       "legacyDiskNote": "Legacy prompt disk cache works with the memory-aware prefix backend. Block Disk Cache (SSD / L2) persists content-addressed blocks whether In-Memory Paged Cache (RAM) is On or explicitly Off. Only one disk format can be active at a time.",
+      "typedPromptPoolNote": "These exact typed snapshots share the SSD cache pool and its % budget with every other cache. When the pool is full the oldest entries are evicted first, and the notice at the top of the app reports it.",
       "openPanguDiskNote": "For openPangu this prompt-level disk cache stores the exact typed N-1 composite and restores it across process restarts. Block Disk Cache remains unavailable.",
       "diskCacheRequiresBatching": "Disk cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above.",
       "legacyDiskPagedConflict": "Legacy disk cache is not compatible with In-Memory Paged Cache (RAM). For persistent SSD storage, use 'Block Disk Cache (SSD / L2)' in that section instead. To use legacy Disk Cache, disable the RAM tier first.",

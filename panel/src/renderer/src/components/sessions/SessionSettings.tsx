@@ -442,6 +442,7 @@ export function buildCommandPreview(
     blockDiskCacheDir: config.blockDiskCacheDir,
     blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
     blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
+    typedPromptSsdPool: exactTypedPromptDiskCache,
   })
   parts.push(...cacheLaunch.args)
 

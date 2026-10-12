@@ -1327,6 +1327,32 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         />
         {cachePolicy.legacyDiskCacheChecked && (
           <>
+            {exactTypedPromptDiskCache ? (
+              // Exact typed snapshots live in the managed SSD pool (--disk-cache-pool): same % budget as the block
+              // store, oldest-first eviction across every cache, reported by the SSD pool notice. A flat GB cap held
+              // ~3 openPangu records (~3 GB each) and evicted on almost every turn.
+              <>
+                <InfoNote text={t('sessions.config.typedPromptPoolNote')} />
+                <SliderField settingKey="blockDiskCacheMaxPercent"
+                  label={t('sessions.config.blockCacheMaxPercent')}
+                  tooltip={t('sessions.config.blockCacheMaxPercentTooltip')}
+                  value={config.blockDiskCacheMaxPercent}
+                  onChange={v => {
+                    onChange('blockDiskCacheMaxGb', undefined)
+                    onChange('blockDiskCacheMaxPercent', v)
+                  }}
+                  min={0}
+                  max={90}
+                  step={1}
+                  allowFractional
+                  maxInput={90}
+                  defaultValue={10}
+                  allowUnlimited
+                  unlimitedValue={0}
+                  unlimitedLabel={t('sessions.cache.unlimited')}
+                />
+              </>
+            ) : (
             <SliderField settingKey="diskCacheMaxGb"
               label={t('sessions.config.maxCacheSizeGb')}
               tooltip={t('sessions.config.maxCacheSizeTooltip')}
@@ -1340,6 +1366,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               unlimitedValue={0}
               unlimitedLabel={t('sessions.cache.unlimited')}
             />
+            )}
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('sessions.config.cacheDirectory')}

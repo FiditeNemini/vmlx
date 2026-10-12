@@ -67,6 +67,36 @@ describe('authoritative cache launch arguments', () => {
     ])
   })
 
+  it('puts exact typed prompt snapshots in the managed SSD pool with the block budget, not a flat GB', () => {
+    const typed = {
+      ...SSD_ONLY,
+      enableDiskCache: true,
+      enableBlockDiskCache: false,
+      forceMemoryAwareCache: true,
+      diskCacheMaxGb: 10,
+      blockDiskCacheMaxPercent: 7,
+    }
+    const pooled = buildCacheLaunchArgs({ ...typed, typedPromptSsdPool: true }).args
+    expect(pooled).toContain('--enable-disk-cache')
+    expect(pooled).toContain('--disk-cache-pool')
+    expect(pooled).not.toContain('--disk-cache-max-gb')
+    expect(pooled[pooled.indexOf('--block-disk-cache-max-percent') + 1]).toBe('7')
+    // An explicit positive block GB still wins over the percent, exactly as for the block store.
+    const gb = buildCacheLaunchArgs({ ...typed, typedPromptSsdPool: true, blockDiskCacheMaxGb: 40 }).args
+    expect(gb[gb.indexOf('--block-disk-cache-max-gb') + 1]).toBe('40')
+    // Without the flag (legacy whole-prompt cache) nothing changes.
+    const legacy = buildCacheLaunchArgs(typed).args
+    expect(legacy).not.toContain('--disk-cache-pool')
+    expect(legacy[legacy.indexOf('--disk-cache-max-gb') + 1]).toBe('10')
+  })
+
+  it('passes typedPromptSsdPool from BOTH the launcher and the command preview', () => {
+    for (const file of ['../src/main/sessions.ts', '../src/renderer/src/components/sessions/SessionSettings.tsx']) {
+      const src = readFileSync(new URL(file, import.meta.url), 'utf8')
+      expect(src, file).toContain('typedPromptSsdPool: exactTypedPromptDiskCache')
+    }
+  })
+
   it('keeps openPangu-style exact prompt L2 memory-aware and non-paged', () => {
     const result = buildCacheLaunchArgs({
       ...SSD_ONLY,

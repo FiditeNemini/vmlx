@@ -33,6 +33,12 @@ export interface CacheLaunchArgsInput extends CacheControlState {
   blockDiskCacheDir?: string
   blockDiskCacheMaxGb?: unknown
   blockDiskCacheMaxPercent?: unknown
+  /**
+   * Exact typed prompt snapshots (openPangu, typed GLM) keep their whole-prompt SSD records in the managed aggregate
+   * pool, budgeted by the same SSD % (or explicit block GB) as the block store and visible to the SSD pool notice.
+   * Their former flat 10 GB budget held ~3 openPangu records and evicted on almost every turn.
+   */
+  typedPromptSsdPool?: boolean
 }
 
 export interface CacheLaunchArgsResult {
@@ -108,8 +114,18 @@ export function buildCacheLaunchArgs(input: CacheLaunchArgsInput): CacheLaunchAr
   if (policy.enableLegacyDiskCache) {
     args.push('--enable-disk-cache')
     if (input.diskCacheDir) args.push('--disk-cache-dir', input.diskCacheDir)
-    const diskCacheMaxGb = finiteNonNegativeNumber(input.diskCacheMaxGb)
-    if (diskCacheMaxGb != null) args.push('--disk-cache-max-gb', diskCacheMaxGb.toString())
+    if (input.typedPromptSsdPool) {
+      // Pool budget = the block store's: an explicit positive block GB, else the SSD % slider (0 = unlimited).
+      args.push('--disk-cache-pool')
+      if (input.blockDiskCacheDir) args.push('--block-disk-cache-dir', input.blockDiskCacheDir)
+      const poolGb = finiteNonNegativeNumber(input.blockDiskCacheMaxGb)
+      if (poolGb != null && poolGb > 0) args.push('--block-disk-cache-max-gb', poolGb.toString())
+      const poolPercent = finiteNonNegativeNumber(input.blockDiskCacheMaxPercent)
+      if (poolPercent != null) args.push('--block-disk-cache-max-percent', poolPercent.toString())
+    } else {
+      const diskCacheMaxGb = finiteNonNegativeNumber(input.diskCacheMaxGb)
+      if (diskCacheMaxGb != null) args.push('--disk-cache-max-gb', diskCacheMaxGb.toString())
+    }
   }
 
   if (policy.enableBlockDiskCache) {

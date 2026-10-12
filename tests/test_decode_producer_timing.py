@@ -232,3 +232,33 @@ def test_text_scheduler_times_prefill_for_generators_without_a_receipt(monkeypat
         assert receipt['path'] == 'scheduler_first_token'
         assert seen == [receipt, receipt, receipt]
     assert request._vmlx_prefill_insert is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mllm", [False, True])
+async def test_batched_adapters_tolerate_finished_outputs_without_token_ids(mllm):
+    """ad910f3f: a terminal output that carries no output_token_ids (some scheduler/terminal paths) must finish the stream
+    with tokens=[] instead of raising AttributeError at completion. The same adapters forward spec_stats (8e253552)."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    class Scheduler:
+        async def add_request(self, **kwargs):
+            return "no-ids"
+
+        add_request_async = add_request
+
+        async def stream_outputs(self, request_id):
+            yield SimpleNamespace(request_id=request_id, output_text="AB", new_text="AB", prompt_tokens=3,
+                                  completion_tokens=2, finished=True, finish_reason="stop",
+                                  spec_stats={"kind": "mtp", "acceptance": 0.5})
+
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._is_mllm = mllm
+    engine._engine = Scheduler()
+    engine._mllm_scheduler = Scheduler() if mllm else None
+    outputs = [output async for output in engine.stream_generate("hi")]
+    assert outputs[-1].tokens == [] and outputs[-1].finished
+    assert outputs[-1].spec_stats == {"kind": "mtp", "acceptance": 0.5}

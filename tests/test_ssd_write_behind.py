@@ -187,3 +187,45 @@ def test_hybrid_store_also_writes_behind(tmp_path, monkeypatch, slow_writer):
         assert all(b.cache_data is None for b in _blocks(manager))
     finally:
         store.shutdown()
+
+
+def test_nested_cache_list_layers_write_behind(tmp_path, monkeypatch, slow_writer):
+    """Naive N0.5 full-attention layers are CacheList(KVCache, KVCache): they must write behind too."""
+    monkeypatch.setenv("VMLX_SSD_WRITE_BEHIND", "1")
+    from mlx_lm.models.cache import CacheList
+
+    mx.random.seed(21)
+    k = mx.random.normal((1, 2, 128, 16)).astype(mx.bfloat16)
+    v = mx.random.normal((1, 2, 128, 16)).astype(mx.bfloat16)
+    ik = (mx.random.normal((1, 1, 128, 8)) / 7).astype(mx.float32)
+    iv = mx.zeros((1, 1, 128, 0), dtype=mx.float32)
+    mx.eval(k, v, ik, iv)
+    state = [{"class_name": "CacheList", "state": None, "meta_state": None,
+              "sub_caches": [{"class_name": "KVCache", "state": (k, v), "meta_state": ()},
+                             {"class_name": "KVCache", "state": (ik, iv), "meta_state": ()}]}]
+    store, manager, cache = _manager(tmp_path)
+    try:
+        assert cache.store_cache("nested", list(range(128)), state) is not None
+        assert cache.write_behind_pending() == 1, "CacheList stores must take the write-behind branch"
+        assert all(b.cache_data is not None for b in _blocks(manager))
+
+        def restore(rid):
+            table, rest = cache.fetch_cache(rid, list(range(128)) + [7])
+            assert table is not None and table.num_tokens == 128 and rest == [7]
+            restored = cache.reconstruct_cache(table)
+            assert restored is not None and isinstance(restored[0], CacheList)
+            got = [tuple(mx.array(a) for a in sub.state) for sub in restored[0].caches]
+            cache.release_cache(rid)
+            return got
+
+        from_ram = restore("in-window")
+        cache.settle_write_behind(wait=True)
+        assert all(b.cache_data is None for b in _blocks(manager))
+        from_ssd = restore("after-durable")
+        for (rk, rv), (sk, sv), (wk, wv) in zip(from_ram, from_ssd, [(k, v), (ik, iv)]):
+            for a, b, w in ((rk, sk, wk), (rv, sv, wv)):
+                assert a.dtype == w.dtype and a.shape == w.shape
+                assert mx.array_equal(a.view(mx.uint8), w.view(mx.uint8)).item()
+                assert mx.array_equal(b.view(mx.uint8), w.view(mx.uint8)).item()
+    finally:
+        store.shutdown()

@@ -583,6 +583,8 @@ def test_native_mixed_state_size_eviction_and_republication(tmp_path):
             assert table is not None
             hashes = [manager.allocated_blocks[i].block_hash for i in table.block_ids]
             assert store.wait_for_blocks(hashes, timeout=5.0) == set(hashes)
+            # The next scheduler step releases SSD-only write-behind RAM copies.
+            prefix.settle_write_behind(wait=True)
             prefix.release_cache(request_id)
 
         publish('before-pressure')

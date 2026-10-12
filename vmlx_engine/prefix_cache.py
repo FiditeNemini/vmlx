@@ -5097,6 +5097,21 @@ class BlockAwarePrefixCache:
             write_fence.get("native_paged_holds") or {}
         )
         target_hashes = set(disk_only_fallbacks) | set(native_paged_holds)
+        if disk_only_fallbacks and getattr(self, "_ssd_write_behind", False):
+            _held = sum(
+                1
+                for block, payload in disk_only_fallbacks.values()
+                if payload is not None and getattr(block, "cache_data", None) is payload
+            )
+            if _held != len(disk_only_fallbacks):
+                logger.info(
+                    "Block-disk-only write-behind not used for %s: %d of %d "
+                    "block(s) hold their writer payload (native path-dependent "
+                    "or quantized payloads keep the synchronous fence)",
+                    request_id,
+                    _held,
+                    len(disk_only_fallbacks),
+                )
         if (
             disk_only_fallbacks
             and not native_paged_holds
@@ -6503,16 +6518,16 @@ class BlockAwarePrefixCache:
                                         or has_dsv4_delta_cache_data
                                         or has_zaya_cca_cache_data
                                         or has_native_quantized
-                                        or has_native_cache_list
                                         or _has_native_tq
                                     )
                                 ):
                                     # SSD-only write-behind: the block keeps the
-                                    # payload the writer was given (for plain and
-                                    # rotating KV the very same arrays its frozen
-                                    # views alias) until its fence settles, so a
-                                    # lookup before the write is durable restores
-                                    # from RAM instead of waiting at admission.
+                                    # payload the writer was given (for plain,
+                                    # rotating and nested CacheList KV the very
+                                    # same arrays its frozen views alias) until
+                                    # its fence settles, so a lookup before the
+                                    # write is durable restores from RAM instead
+                                    # of waiting at admission.
                                     block.cache_data = block_kv_data
                                     block.cache_data_from_disk = False
                                     block.durability_write_pending = True

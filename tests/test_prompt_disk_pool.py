@@ -140,3 +140,26 @@ def test_cli_resolves_the_pool_like_the_block_store(tmp_path, monkeypatch):
     explicit = SimpleNamespace(disk_cache_pool=True, block_disk_cache_dir=None, block_disk_cache_max_gb=0.0,
                                block_disk_cache_max_percent=10)
     assert cli.resolve_prompt_disk_pool(explicit)[1] == 0.0             # explicit 0 = unlimited, as for blocks
+
+
+def test_pool_mode_reclaims_pre_pool_local_records(tmp_path):
+    from vmlx_engine.disk_cache import DiskCacheManager
+
+    index = tmp_path / "index" / "model_abc"
+    legacy = DiskCacheManager(cache_dir=str(index), max_size_gb=10)
+    try:
+        assert legacy.store(list(range(40)), _cache(9))
+        assert legacy.flush_pending_writes(list(range(40)))
+    finally:
+        legacy.shutdown()
+    assert list(index.glob("cache_*tok.safetensors"))
+    m = _manager(tmp_path)                                              # same namespace, now pooled
+    try:
+        assert not list(index.glob("cache_*tok.safetensors"))           # old files reclaimed
+        assert m._count_entries() == 0
+        assert m.fetch(list(range(40))) is None                         # an ordinary miss, then re-stored in the pool
+        assert m.store(list(range(40)), _cache(9))
+        assert m.flush_pending_writes(list(range(40)))
+        assert m.fetch(list(range(40))) is not None
+    finally:
+        m.shutdown()

@@ -431,6 +431,8 @@ class DiskCacheManager:
 
         # Clean up orphaned .tmp files from crashed writes
         self._cleanup_orphaned_tmp()
+        if self._pool_store is not None:
+            self._reclaim_local_records()
 
         if self._pool_store is not None:
             logger.info(
@@ -1009,6 +1011,28 @@ class DiskCacheManager:
                 except Exception:
                     pass
                 return None
+        finally:
+            self._pool.put(conn)
+
+    def _reclaim_local_records(self) -> None:
+        """Pool mode supersedes this namespace's local record files (written before --disk-cache-pool). Their rows
+        can never hit again (pool reads are by signature), and leaving them would strand up to the old flat budget
+        (10 GB) on disk. Only files inside this manager's own cache_dir are touched; pool files are absolute paths."""
+        conn = self._pool.get()
+        try:
+            rows = conn.execute("SELECT token_hash, file_name FROM cache_entries").fetchall()
+            reclaimed = 0
+            for token_hash, file_name in rows:
+                if os.path.isabs(str(file_name)):
+                    continue
+                path = self.cache_dir / file_name
+                if path.parent == self.cache_dir and path.suffix == ".safetensors" and not path.is_symlink():
+                    path.unlink(missing_ok=True)
+                conn.execute("DELETE FROM cache_entries WHERE token_hash = ?", (token_hash,))
+                reclaimed += 1
+            if reclaimed:
+                conn.commit()
+                logger.info("Disk cache: reclaimed %d pre-pool record(s) from %s", reclaimed, self.cache_dir)
         finally:
             self._pool.put(conn)
 

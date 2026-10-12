@@ -39,9 +39,20 @@ class ZeroCenteredRMSNorm(nn.Module):
         self.eps = eps
         self.weight = mx.zeros((dims,))
 
+    def _scale(self) -> mx.array:
+        # float32 (1 + w), rebuilt only when the weight array is replaced
+        # (load_weights / set_dtype). Kept out of the parameter tree.
+        cached = self.__dict__.get("_scale_cache")
+        if cached is None or cached[0] is not self.weight:
+            cached = (self.weight, 1.0 + self.weight.astype(mx.float32))
+            self.__dict__["_scale_cache"] = cached
+        return cached[1]
+
     def __call__(self, x: mx.array) -> mx.array:
-        scale = 1.0 + self.weight.astype(mx.float32)
-        return mx.fast.rms_norm(x.astype(mx.float32), scale, self.eps).astype(x.dtype)
+        # rms_norm reads x in its own dtype and accumulates in float32; with a
+        # float32 scale the result equals the all-float32 formula bit for bit
+        # (asserted in tests) without an explicit input cast.
+        return mx.fast.rms_norm(x, self._scale(), self.eps).astype(x.dtype)
 
 
 def install_exact_qwen35_numerics(language_model: nn.Module) -> dict:

@@ -311,6 +311,13 @@ def test_zero_centered_norm_is_fp32_one_plus_w():
     # The vendored storage form (1 + w rounded to bf16) is measurably different.
     rounded = mx.fast.rms_norm(x, w + 1.0, 1e-6)
     assert not mx.array_equal(rounded, ref).item()
+    # The cached float32 scale follows a replaced weight (load_weights/set_dtype).
+    norm.weight = mx.zeros((64,), dtype=mx.bfloat16)
+    plain = (xf * mx.rsqrt(mx.mean(xf * xf, -1, keepdims=True) + 1e-6)).astype(mx.bfloat16)
+    assert mx.array_equal(norm(x), plain).item()
+    norm.set_dtype(mx.float32)
+    ref32 = xf * mx.rsqrt(mx.mean(xf * xf, -1, keepdims=True) + 1e-6)
+    assert mx.allclose(norm(xf), ref32, rtol=1e-6, atol=1e-6).item()  # fp32: reduction-order ULPs only
 
 
 def test_gdn_qk_eps_on_mean_equals_l2norm_eps_on_sum():

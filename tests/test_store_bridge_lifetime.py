@@ -62,6 +62,8 @@ def test_full_store_releases_conversion_bridges_before_cleanup(tmp_path, monkeyp
         assert len(bridges) == 0, "BF16 store built an fp32 bridge copy of the cache"
         assert len(bits_views) == (4 if dtype == mx.bfloat16 else 0)
         assert len(hashes) == 1
+        # SSD-only write-behind returns before the write is durable (test_ssd_write_behind).
+        cache.settle_write_behind(wait=True)
         restored = store.read_block(hashes[0])
         assert restored is not None and len(restored) == 2
         for entry, pair in zip(restored, pairs):

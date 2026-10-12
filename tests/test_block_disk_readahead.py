@@ -69,6 +69,8 @@ def test_reconstruct_advises_every_disk_block_in_order(tmp_path, monkeypatch):
     deadline = time.time() + 30
     while time.time() < deadline and store.get_stats()["write_pipeline"]["pending_items"]:
         time.sleep(0.02)
+    # SSD-only write-behind keeps RAM copies until the model thread settles them.
+    pc.settle_write_behind(wait=True)
     pc.release_cache("seed")
 
     advised: list = []

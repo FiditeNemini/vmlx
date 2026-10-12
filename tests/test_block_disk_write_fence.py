@@ -80,6 +80,8 @@ def test_ssd_only_refuses_writes_when_request_fence_cannot_begin(tmp_path, monke
         continued = cache.store_cache("next-tool-boundary", [1, 2, 3, 4], data)
         assert continued is not None
         assert writes and all(write.get("fence_id") for write in writes)
+        # SSD-only write-behind returns before the write is durable (test_ssd_write_behind).
+        cache.settle_write_behind(wait=True)
         assert store.get_stats()["write_pipeline"]["pending_items"] == 0
     finally:
         store.shutdown()

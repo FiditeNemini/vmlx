@@ -44,6 +44,8 @@ from .paged_cache import PagedCacheManager
 from .prefix_cache import (
     BlockAwarePrefixCache,
     DSV4_APPEND_SAFE_CHECKPOINT_POLICY,
+    _settle_write_behind_on_model_thread,
+    _write_behind_ready,
     PAGED_CACHE_SCHEMA_VERSION,
     PrefixCacheManager,
     build_block_cache_namespace,
@@ -7516,7 +7518,7 @@ class Scheduler:
 
     def has_idle_tasks(self) -> bool:
         """Whether idle maintenance work is queued (engine idle-branch gate)."""
-        return bool(getattr(self, "_idle_tasks", None))
+        return bool(getattr(self, "_idle_tasks", None)) or _write_behind_ready(self)
 
     def run_one_idle_task(self) -> bool:
         """Run at most one queued idle task. Returns True if one ran.
@@ -7525,6 +7527,9 @@ class Scheduler:
         when the scheduler has no foreground work — the engine loop's idle
         branch guarantees both.
         """
+        if _write_behind_ready(self):
+            _settle_write_behind_on_model_thread(self)
+            return True
         tasks = getattr(self, "_idle_tasks", None)
         if not tasks:
             return False
@@ -13085,6 +13090,9 @@ class Scheduler:
         # and Metal has synchronized, so it's safe to remove.
         if self._pending_aborts:
             self._process_pending_aborts()
+
+        # Release SSD-only write-behind RAM copies whose writes became durable.
+        _settle_write_behind_on_model_thread(self)
 
         # Schedule waiting requests (errors here propagate immediately —
         # these are logic errors, not cache corruption)

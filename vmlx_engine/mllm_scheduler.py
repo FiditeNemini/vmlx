@@ -228,6 +228,8 @@ from .prefix_cache import (
     runtime_cache_fingerprint,
     _cleanup_phase_start,
     _cleanup_phase_finish,
+    _settle_write_behind_on_model_thread,
+    _write_behind_ready,
 )
 from .utils.cache_extent import cache_offset, logical_truncate_target
 
@@ -3155,7 +3157,9 @@ class MLLMScheduler:
         return bool(self.waiting or self.running or getattr(self, "_pending_aborts", None))
 
     def has_idle_tasks(self) -> bool:
-        """Whether hybrid SSM rederive maintenance is queued (vmlx#245)."""
+        """Whether hybrid SSM rederive or SSD write-behind release is queued (vmlx#245)."""
+        if _write_behind_ready(self):
+            return True
         generator = getattr(self, "batch_generator", None)
         return bool(
             getattr(self, "_is_hybrid", False)
@@ -3174,6 +3178,9 @@ class MLLMScheduler:
         """
         if self.waiting or self.running:
             return False
+        if _write_behind_ready(self):
+            _settle_write_behind_on_model_thread(self)
+            return True
         generator = getattr(self, "batch_generator", None)
         if generator is None or not hasattr(generator, "run_idle_rederive"):
             return False
@@ -5328,6 +5335,9 @@ class MLLMScheduler:
         # Metal computation has completed. Hold _queue_lock to prevent
         # race with abort_request() modifying _pending_aborts/UID maps.
         self._process_pending_aborts()
+
+        # Release SSD-only write-behind RAM copies whose writes became durable.
+        _settle_write_behind_on_model_thread(self)
         _trace_mark("abort_s")
         if self._pending_aborts:
             # A failed removal cannot admit or decode more work against the

@@ -2816,6 +2816,25 @@ class BlockCacheEntry:
     cache_type: str = "assistant"  # "system" | "user" | "assistant" — segment ownership
 
 
+def _write_behind_ready(scheduler: Any) -> bool:
+    """Whether the scheduler's block cache has a settled SSD write-behind fence."""
+    cache = getattr(scheduler, "block_aware_cache", None)
+    if not isinstance(cache, BlockAwarePrefixCache):
+        return False
+    return cache.write_behind_ready()
+
+
+def _settle_write_behind_on_model_thread(scheduler: Any) -> None:
+    """Release durable write-behind RAM copies; call only on the model thread."""
+    cache = getattr(scheduler, "block_aware_cache", None)
+    if not isinstance(cache, BlockAwarePrefixCache) or not cache._write_behind_entries:
+        return
+    try:
+        cache.settle_write_behind()
+    except Exception as settle_error:  # noqa: BLE001
+        logger.warning("SSD write-behind settle failed: %s", settle_error)
+
+
 class BlockAwarePrefixCache:
     """
     Prefix cache that uses PagedCacheManager for block-based storage.
@@ -2842,6 +2861,11 @@ class BlockAwarePrefixCache:
         # Clean up when request completes
         cache.release_cache(request_id)
     """
+
+    # Class defaults keep instances built without __init__ (test doubles) on the
+    # synchronous SSD-only fence; __init__ sets the real switch and queue.
+    _ssd_write_behind = False
+    _write_behind_entries: Any = ()
 
     # reconstruct_cache cold-cache read-ahead window (blocks hinted ahead of the loop).
     _READAHEAD_BLOCKS = 128
@@ -2942,6 +2966,23 @@ class BlockAwarePrefixCache:
             )
         except (TypeError, ValueError):
             self._native_block_disk_admission_timeout = 30.0
+        # SSD-only write-behind (VMLX_SSD_WRITE_BEHIND, default on, 0 = off).
+        # A disk-only store used to wait on the model thread for its writer fence
+        # before returning, so the next request (typically a tool continuation
+        # right after a long cold prompt) waited at admission for the SSD write
+        # of every new block. Instead each admitted block keeps the exact payload
+        # it handed to the writer as its RAM copy until that block is durable
+        # after aggregate eviction; a lookup inside the window reconstructs from
+        # it. The model thread drops the copies once the fence settles (scheduler
+        # step, idle task or the next store). A block the writer did not retain
+        # is retired exactly as the synchronous path retires it. Nothing is held
+        # past durability, so no RAM tier appears.
+        self._ssd_write_behind = os.environ.get(
+            "VMLX_SSD_WRITE_BEHIND", "1"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        self._write_behind_entries: deque = deque()
+        self._write_behind_lock = threading.Lock()
+        self._write_behind_clear_pending = False
         # Ordinary (non-path-dependent) families used a hard 0.0 here, meaning a
         # block whose payload did not fit the pending-write byte budget AT THAT
         # INSTANT was discarded rather than waiting for the background writer to
@@ -4880,6 +4921,157 @@ class BlockAwarePrefixCache:
             name=f"native-cache-fence-{str(fence_id)[-8:]}",
         ).start()
 
+    def _begin_write_behind(
+        self,
+        request_id: str,
+        disk_store: Any,
+        fence_id: str,
+        disk_only_fallbacks: Dict[bytes, Tuple[Any, Any]],
+    ) -> None:
+        """Track one sealed SSD-only fence whose blocks still hold RAM copies.
+
+        A daemon thread only waits for the post-eviction fence result; every
+        payload release and every retirement happens in
+        ``settle_write_behind`` on the model thread (DESIGN I4).
+        """
+
+        entry: Dict[str, Any] = {
+            "request_id": request_id,
+            "fence_id": fence_id,
+            "fallbacks": dict(disk_only_fallbacks),
+            "t0": time.perf_counter(),
+            "done": threading.Event(),
+            "durable": set(),
+            "wait_s": None,
+        }
+        timeout = float(self._native_block_disk_admission_timeout)
+        target_hashes = set(entry["fallbacks"])
+
+        def _wait() -> None:
+            try:
+                entry["durable"] = self._wait_native_write_fence_blocks(
+                    disk_store,
+                    fence_id,
+                    target_hashes,
+                    timeout=timeout,
+                )
+            except Exception as wait_error:
+                logger.warning(
+                    "Block-disk-only write-behind wait failed for %s: %s",
+                    request_id,
+                    wait_error,
+                )
+            finally:
+                entry["wait_s"] = time.perf_counter() - entry["t0"]
+                entry["done"].set()
+
+        with self._write_behind_lock:
+            self._write_behind_entries.append(entry)
+        estimate = getattr(self.paged_cache, "estimate_block_nbytes", None)
+        held = (
+            sum(estimate(payload) for _block, payload in entry["fallbacks"].values())
+            if callable(estimate)
+            else 0
+        )
+        logger.info(
+            "Block-disk-only write-behind: %d block(s) published for %s; RAM "
+            "copies (%.1f MB) held until the SSD write is durable",
+            len(target_hashes),
+            request_id,
+            held / 1e6,
+        )
+        threading.Thread(
+            target=_wait,
+            daemon=True,
+            name=f"ssd-write-behind-{str(fence_id)[-8:]}",
+        ).start()
+
+    def write_behind_ready(self) -> bool:
+        """Whether a write-behind fence has settled and awaits model-thread release."""
+
+        # FIFO like the writer: only a settled head entry can be released.
+        entries = self._write_behind_entries
+        if not entries:
+            return False
+        with self._write_behind_lock:
+            return bool(entries) and entries[0]["done"].is_set()
+
+    def write_behind_pending(self) -> int:
+        """Number of SSD-only fences still holding RAM copies."""
+
+        return len(self._write_behind_entries)
+
+    def settle_write_behind(self, *, wait: bool = False) -> int:
+        """Release the RAM copies of durable write-behind blocks (model thread).
+
+        Durable blocks drop their payload at once (the model thread owns every
+        reconstruction, so no reader can observe a torn release); a block the
+        writer did not retain is retired exactly like the synchronous fence
+        retires it. ``wait=True`` (shutdown, clear, tests) blocks until every
+        pending fence has settled. Returns the number of fences settled.
+        """
+
+        settled = 0
+        if not self._write_behind_entries:
+            return 0
+        while True:
+            with self._write_behind_lock:
+                if not self._write_behind_entries:
+                    break
+                entry = self._write_behind_entries[0]
+                if not entry["done"].is_set():
+                    if not wait:
+                        break
+                else:
+                    self._write_behind_entries.popleft()
+            if not entry["done"].is_set():
+                entry["done"].wait()
+                continue
+            fallbacks = entry["fallbacks"]
+            durable = set(entry["durable"]) & set(fallbacks)
+            released = 0
+            for block_hash in durable:
+                block, payload = fallbacks.pop(block_hash)
+                if (
+                    getattr(block, "block_hash", block_hash) == block_hash
+                    and getattr(block, "cache_data", None) is payload
+                ):
+                    self.paged_cache.release_resident_payload(block)
+                    released += 1
+            retired = 0
+            if fallbacks:
+                retired = self._discard_nondurable_disk_only_blocks(fallbacks)
+                logger.error(
+                    "Block-disk-only write-behind for %s: %d block(s) were not "
+                    "retained by the SSD writer and were retired (%d durable); "
+                    "persistent RAM KV payloads=0",
+                    entry["request_id"],
+                    retired,
+                    len(durable),
+                )
+            else:
+                logger.info(
+                    "Block-disk-only write-behind settled for %s: %d block(s) "
+                    "durable %.0f ms after publication; RAM copies released "
+                    "(persistent RAM KV payloads=0)",
+                    entry["request_id"],
+                    len(durable),
+                    1000.0 * float(entry["wait_s"] or 0.0),
+                )
+            settled += 1
+            if released or retired:
+                self._write_behind_clear_pending = True
+        if self._write_behind_clear_pending and HAS_MLX:
+            self._write_behind_clear_pending = False
+            try:
+                mx.clear_cache()
+            except Exception as clear_error:  # noqa: BLE001
+                logger.debug(
+                    "Could not clear released write-behind buffers: %s",
+                    clear_error,
+                )
+        return settled
+
     def _settle_native_write_fence(
         self,
         request_id: str,
@@ -4905,6 +5097,48 @@ class BlockAwarePrefixCache:
             write_fence.get("native_paged_holds") or {}
         )
         target_hashes = set(disk_only_fallbacks) | set(native_paged_holds)
+        if (
+            disk_only_fallbacks
+            and not native_paged_holds
+            and getattr(self, "_ssd_write_behind", False)
+            and disk_store is not None
+            and fence_id is not None
+            and callable(getattr(disk_store, "wait_for_write_fence_blocks", None))
+            and all(
+                payload is not None
+                and getattr(block, "cache_data", None) is payload
+                for block, payload in disk_only_fallbacks.values()
+            )
+        ):
+            # Every block of this store kept its writer payload (see the store
+            # loop), so the lookup that follows can restore from RAM: seal the
+            # fence and settle it later on the model thread instead of waiting.
+            try:
+                sealed = bool(
+                    disk_store.seal_write_fence(
+                        fence_id,
+                        producer_aborted=False,
+                    )
+                )
+            except Exception as fence_error:
+                sealed = False
+                logger.warning(
+                    "Block disk: could not seal write-behind fence %s for %s: %s",
+                    fence_id,
+                    request_id,
+                    fence_error,
+                )
+            write_fence["seal_attempted"] = True
+            write_fence["sealed"] = sealed
+            if sealed:
+                self._begin_write_behind(
+                    request_id,
+                    disk_store,
+                    fence_id,
+                    disk_only_fallbacks,
+                )
+                write_fence["write_behind"] = True
+                return
         durable_hashes: set[bytes] = set()
         eventual_wait_allowed = False
         fence_wait_timeout = (
@@ -5087,6 +5321,8 @@ class BlockAwarePrefixCache:
         defer_post_fence_gc: bool = False,
     ) -> Optional[BlockTable]:
         """Store cache data and deterministically terminate any begun L2 fence."""
+        if getattr(self, "_write_behind_entries", None):
+            self.settle_write_behind()
         cache_extra_keys = self._shape_scoped_cache_extra_keys(
             tokens,
             cache_extra_keys,
@@ -5113,7 +5349,13 @@ class BlockAwarePrefixCache:
             # earlier in _store_cache_impl cannot release buffers still owned by
             # the writer queue and produced the measured +202 MiB quiet RSS
             # ratchet on Muse despite every retained cache tier reporting 0 B.
-            if write_fence.get("disk_only_fallbacks") and HAS_MLX:
+            # Write-behind fences still own their buffers here; settle_write_behind
+            # clears them on the model thread once the writer is done.
+            if (
+                write_fence.get("disk_only_fallbacks")
+                and not write_fence.get("write_behind")
+                and HAS_MLX
+            ):
                 try:
                     import gc as _gc
 
@@ -6244,12 +6486,40 @@ class BlockAwarePrefixCache:
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )
-                                _write_block_to_disk(
+                                _admitted_write = _write_block_to_disk(
                                     block_chain_hash,
                                     np_block,
                                     len(block_tokens),
                                     parent_hash,
                                 )
+                                if (
+                                    _admitted_write
+                                    and _disk_only
+                                    and getattr(self, "_ssd_write_behind", False)
+                                    and block_chain_hash in disk_only_fallbacks
+                                    and not (
+                                        has_minimax_m3_cache_data
+                                        or has_dsv4_cache_data
+                                        or has_dsv4_delta_cache_data
+                                        or has_zaya_cca_cache_data
+                                        or has_native_quantized
+                                        or has_native_cache_list
+                                        or _has_native_tq
+                                    )
+                                ):
+                                    # SSD-only write-behind: the block keeps the
+                                    # payload the writer was given (for plain and
+                                    # rotating KV the very same arrays its frozen
+                                    # views alias) until its fence settles, so a
+                                    # lookup before the write is durable restores
+                                    # from RAM instead of waiting at admission.
+                                    block.cache_data = block_kv_data
+                                    block.cache_data_from_disk = False
+                                    block.durability_write_pending = True
+                                    disk_only_fallbacks[block_chain_hash] = (
+                                        block,
+                                        block_kv_data,
+                                    )
                             else:
                                 logger.debug(
                                     f"Block disk: queuing write for block "
@@ -9694,6 +9964,11 @@ class BlockAwarePrefixCache:
                 snapshots.clear()
         for d in self._entries_by_type.values():
             d.clear()
+        # Pending write-behind fences reference blocks the clear drops; their
+        # writers finish on their own and nothing remains to release.
+        if self._write_behind_entries:
+            with self._write_behind_lock:
+                self._write_behind_entries.clear()
         self.paged_cache.clear(force=True)
         self._n_kv_heads = None  # Reset cached head count (may change on model switch)
         self.reset_stats()

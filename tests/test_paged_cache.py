@@ -1079,6 +1079,8 @@ class TestBlockAwarePrefixCache:
         table = cache.store_cache("writer", tokens, state)
         assert table is not None
         assert table.num_tokens == 7
+        # SSD-only write-behind keeps RAM copies until durable (test_ssd_write_behind).
+        cache.settle_write_behind(wait=True)
         assert all(
             manager.allocated_blocks[block_id].cache_data is None
             for block_id in table.block_ids
@@ -1173,6 +1175,8 @@ class TestBlockAwarePrefixCache:
         try:
             stored = cache.store_cache("writer", tokens, state)
             assert stored is not None
+            # SSD-only write-behind keeps RAM copies until durable (test_ssd_write_behind).
+            cache.settle_write_behind(wait=True)
             entry = cache._request_tables.pop("writer")
             manager.release_request_refs(entry.block_table)
             manager.detach_request("writer")

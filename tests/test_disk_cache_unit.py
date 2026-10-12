@@ -236,6 +236,7 @@ class TestDiskCacheUnit:
         - stores
         - hit_rate
         - pending_writes
+        - inflight_entries (records queued for the writer and served from memory until written)
         - tq_native_enabled
         """
         tmpdir = tempfile.mkdtemp(prefix="vmlx_disk_cache_test_")
@@ -255,9 +256,11 @@ class TestDiskCacheUnit:
                 "stores",
                 "hit_rate",
                 "pending_writes",
+                "inflight_entries",
                 "tq_native_enabled",
             }
             assert set(stats.keys()) == expected_keys
+            assert stats["inflight_entries"] == 0
 
             # Verify types
             assert isinstance(stats["entries"], int)

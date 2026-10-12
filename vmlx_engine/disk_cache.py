@@ -377,6 +377,15 @@ class DiskCacheManager:
         self._load_executor = None
         self._load_worker_prefix = "llm-worker"
 
+        # In-flight entries: records already copied to CPU memory and queued for the writer, readable until their file
+        # lands. A tool continuation that arrives while its prompt record is still being written is served from here
+        # instead of waiting for the SSD write (the scheduler's terminal store used to block on flush_pending_writes:
+        # ~0.5 s per openPangu turn for a ~3 GB typed snapshot) and instead of reading the same bytes back from disk.
+        # Transient by construction: an entry lives exactly as long as the writer still holds the same payload, so the
+        # retained-RAM contract (no RAM tier on SSD-only lanes) is unchanged.
+        self._inflight: Dict[str, Dict[str, Any]] = {}
+        self._inflight_lock = threading.Lock()
+
         # Background writer thread
         self._write_queue: queue.Queue = queue.Queue(maxsize=1000)
         self._stop_event = threading.Event()
@@ -604,6 +613,21 @@ class DiskCacheManager:
         The returned cache is ready to be used as prompt_cache in BatchGenerator.
         """
         token_hash = token_hash_override or _hash_tokens(tokens, cache_extra_keys)
+
+        with self._inflight_lock:
+            inflight = self._inflight.get(token_hash)
+        if inflight is not None:
+            cache = self._cache_from_inflight(inflight)
+            if cache is not None:
+                self._last_fetch_cache_type = inflight["cache_type"] or "assistant"
+                self._last_fetch_tq_native = False
+                with self._stats_lock:
+                    self.hits += 1
+                logger.info(
+                    "Disk cache hit (in-flight, served from memory while its SSD write completes): %d tokens",
+                    len(tokens),
+                )
+                return cache
 
         conn = self._pool.get()
         try:
@@ -932,6 +956,38 @@ class DiskCacheManager:
         finally:
             self._pool.put(conn)
 
+    def _cache_from_inflight(self, entry: Dict[str, Any]) -> Optional[List[Any]]:
+        """Rebuild cache objects from an in-flight record exactly as a file hit would.
+
+        The arrays are the CPU copies the writer is serializing (read-only here); ``mx.array`` copies them into new
+        device buffers, so the restored cache never aliases the writer's payload. Same dtype restoration and class
+        construction as the file path (``_restore_bitcast_dtypes`` → ``from_state``); runtime-fingerprint and
+        header checks are not needed — the record was produced by this process a moment ago.
+        """
+        try:
+            import numpy as np
+
+            raw_arrays = {
+                k: (mx.array(v) if isinstance(v, np.ndarray) else v)
+                for k, v in entry["arrays"].items()
+            }
+            metadata = dict(entry["metadata"])
+            raw_arrays = _restore_bitcast_dtypes(raw_arrays, metadata)
+            raw_arrays = _restore_widened_dtypes(raw_arrays, metadata)
+            import mlx_lm.models.cache as _cache_mod
+            from mlx_lm.utils import tree_unflatten
+
+            arrays = tree_unflatten(list(raw_arrays.items()))
+            info, _save_meta, classes = tree_unflatten(list(metadata.items()))
+            return [
+                getattr(_cache_mod, cls).from_state(state, meta_state)
+                for cls, state, meta_state in zip(classes, arrays, info)
+            ]
+        except Exception as exc:
+            # Not a miss of the record: the file path below still serves it once written.
+            logger.warning("In-flight disk cache entry could not be rebuilt; using the SSD record: %s", exc)
+            return None
+
     def fetch_longest_prefix(
         self,
         tokens: List[int],
@@ -987,6 +1043,20 @@ class DiskCacheManager:
                 ).fetchall()
         finally:
             self._pool.put(conn)
+
+        with self._inflight_lock:
+            inflight_rows = [
+                (h, e["num_tokens"], e["payload_prefix_hash"])
+                for h, e in self._inflight.items()
+                if min_tokens <= e["num_tokens"] <= len(full_tokens)
+                and e["cache_extra_marker"] == extra_marker
+            ]
+        if inflight_rows:
+            seen = {r[0] for r in rows}
+            rows = sorted(
+                list(rows) + [r for r in inflight_rows if r[0] not in seen],
+                key=lambda r: -int(r[1]),
+            )
 
         if not rows:
             with self._stats_lock:
@@ -1153,6 +1223,9 @@ class DiskCacheManager:
 
         if existing:
             return True  # Already cached
+        with self._inflight_lock:
+            if token_hash in self._inflight:
+                return True  # Same record already queued for the writer
 
         if not _HAS_MLX:
             return False
@@ -1318,7 +1391,17 @@ class DiskCacheManager:
             logger.warning(f"Failed to pre-serialize cache for disk: {e}")
             return False
 
-        # Enqueue for background write (pre-evaluated arrays — no lazy Metal ops)
+        # Enqueue for background write (pre-evaluated arrays — no lazy Metal ops). Registered in-flight first so a
+        # fetch can never fall between "queued" and "visible".
+        with self._inflight_lock:
+            self._inflight[token_hash] = {
+                "arrays": cache_data_flat,
+                "metadata": cache_metadata_flat,
+                "num_tokens": len(tokens),
+                "payload_prefix_hash": payload_prefix_hash,
+                "cache_type": cache_type,
+                "cache_extra_marker": extra_marker,
+            }
         try:
             self._write_queue.put_nowait(
                 (
@@ -1332,8 +1415,17 @@ class DiskCacheManager:
             )
             return True
         except queue.Full:
+            self._release_inflight(token_hash, cache_data_flat)
             logger.warning("Disk cache write queue full, dropping store request")
             return False
+
+    def _release_inflight(self, token_hash: str, arrays: Any) -> None:
+        """Drop an in-flight entry once its write finished (or failed). Identity-checked: a later store of the same
+        key with a new payload is never dropped by an older write's completion."""
+        with self._inflight_lock:
+            entry = self._inflight.get(token_hash)
+            if entry is not None and entry["arrays"] is arrays:
+                del self._inflight[token_hash]
 
     def _store_tq_native(
         self,
@@ -1494,23 +1586,28 @@ class DiskCacheManager:
                         token_hash, tokens, cache_data_flat, cache_metadata_flat = item
                         cache_type = "assistant"
                         cache_extra_marker = None
-                    if cache_extra_marker is None:
-                        self._write_cache(
-                            token_hash,
-                            tokens,
-                            cache_data_flat,
-                            cache_metadata_flat,
-                            cache_type,
-                        )
-                    else:
-                        self._write_cache(
-                            token_hash,
-                            tokens,
-                            cache_data_flat,
-                            cache_metadata_flat,
-                            cache_type,
-                            cache_extra_marker,
-                        )
+                    try:
+                        if cache_extra_marker is None:
+                            self._write_cache(
+                                token_hash,
+                                tokens,
+                                cache_data_flat,
+                                cache_metadata_flat,
+                                cache_type,
+                            )
+                        else:
+                            self._write_cache(
+                                token_hash,
+                                tokens,
+                                cache_data_flat,
+                                cache_metadata_flat,
+                                cache_type,
+                                cache_extra_marker,
+                            )
+                    finally:
+                        # The index row (if the write succeeded) is committed before this release, so a reader moves
+                        # from the in-flight copy to the file without a gap.
+                        self._release_inflight(token_hash, cache_data_flat)
             except OSError as e:
                 if e.errno == errno.ENOSPC:
                     logger.warning(
@@ -1901,6 +1998,7 @@ class DiskCacheManager:
                     self.hits / max(self.hits + self.misses, 1), 3
                 ),
                 "pending_writes": self._write_queue.qsize(),
+                "inflight_entries": len(self._inflight),
                 "tq_native_enabled": self._allow_tq_native,
             }
             # Include TQ-native stats if any TQ operations occurred

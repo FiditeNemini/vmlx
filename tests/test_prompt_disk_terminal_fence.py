@@ -1,4 +1,10 @@
-"""Terminal cleanup must publish prompt SSD writes before the next tool request."""
+"""Terminal cleanup must publish prompt SSD records before the next tool request.
+
+Default (2026-10-11): the record is readable from the disk cache's in-flight map while its SSD write completes, so
+cleanup does not wait for the write (openPangu: ~0.5 s per ~3 GB typed snapshot on every tool call) and the next
+request is served without a false miss. VMLX_PROMPT_SSD_TERMINAL_FLUSH=1 restores the synchronous fence, where the
+record is durable on disk before cleanup returns.
+"""
 import threading
 from types import SimpleNamespace
 
@@ -12,9 +18,7 @@ from vmlx_engine.request import Request, RequestStatus, SamplingParams
 from vmlx_engine.scheduler import Scheduler
 
 
-@pytest.mark.parametrize("memory_accepts", [False, True])
-@pytest.mark.parametrize("fail_write", [False, True])
-def test_memory_aware_terminal_waits_for_real_prompt_writer(tmp_path, monkeypatch, fail_write, memory_accepts):
+def _scheduler_with_finished_request(tmp_path, monkeypatch, memory_accepts):
     import vmlx_engine.scheduler as scheduler_module
 
     monkeypatch.setattr(scheduler_module, "clear_mlx_memory_cache", lambda log=None: None)
@@ -53,6 +57,57 @@ def test_memory_aware_terminal_waits_for_real_prompt_writer(tmp_path, monkeypatc
     scheduler._materialize_deferred_prompt_cache = lambda *args: None
     scheduler._truncate_cache_to_prompt_length = lambda caches, length: caches
     scheduler.model = object()
+    return scheduler, request, cache, manager
+
+
+@pytest.mark.parametrize("memory_accepts", [False, True])
+@pytest.mark.parametrize("fail_write", [False, True])
+def test_terminal_record_is_served_in_flight_without_waiting_for_the_writer(
+    tmp_path, monkeypatch, fail_write, memory_accepts
+):
+    monkeypatch.delenv("VMLX_PROMPT_SSD_TERMINAL_FLUSH", raising=False)
+    scheduler, request, cache, manager = _scheduler_with_finished_request(tmp_path, monkeypatch, memory_accepts)
+    entered = threading.Event()
+    release = threading.Event()
+    original_write = manager._write_cache
+
+    def delayed_write(*args, **kwargs):
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("test did not release SSD writer")
+        if fail_write:
+            raise OSError("simulated SSD write failure")
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_write_cache", delayed_write)
+    try:
+        scheduler._cleanup_finished({request.request_id})          # returns while the writer is still blocked
+        assert entered.wait(5)
+        # The next request (same engine) is served from memory: no false miss, no wait.
+        restored = manager.fetch(request.prompt_token_ids, cache_extra_keys=request._cache_extra_keys)
+        assert restored is not None
+        assert mx.array_equal(restored[0].keys, cache.keys[..., :cache.offset, :]).item()
+        outcome = LEDGER.take(request.request_id)
+        assert outcome["outcome"] == "stored" and outcome["durable"] is False   # honest: not on disk yet
+        release.set()
+        manager._write_queue.join()
+        reader = DiskCacheManager(str(tmp_path), max_size_gb=0.1)  # durable afterwards (unless the write failed)
+        try:
+            from_disk = reader.fetch(request.prompt_token_ids, cache_extra_keys=request._cache_extra_keys)
+            assert (from_disk is None) is fail_write
+        finally:
+            reader.shutdown()
+    finally:
+        release.set()
+        manager.shutdown()
+        LEDGER.take(request.request_id)
+
+
+@pytest.mark.parametrize("memory_accepts", [False, True])
+@pytest.mark.parametrize("fail_write", [False, True])
+def test_memory_aware_terminal_waits_for_real_prompt_writer(tmp_path, monkeypatch, fail_write, memory_accepts):
+    monkeypatch.setenv("VMLX_PROMPT_SSD_TERMINAL_FLUSH", "1")
+    scheduler, request, cache, manager = _scheduler_with_finished_request(tmp_path, monkeypatch, memory_accepts)
     entered = threading.Event()
     release = threading.Event()
     cleanup_returned = threading.Event()

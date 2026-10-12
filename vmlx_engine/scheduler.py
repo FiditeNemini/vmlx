@@ -580,6 +580,12 @@ class IdleTaskResult(Enum):
     PARKED = "parked"
 
 
+def _prompt_ssd_terminal_flush() -> bool:
+    """VMLX_PROMPT_SSD_TERMINAL_FLUSH=1 makes the terminal prompt-SSD store wait for its write (the pre-2026-10-11
+    behaviour; A/B control). Default: the record is served from the disk cache's in-flight map until written."""
+    return os.environ.get("VMLX_PROMPT_SSD_TERMINAL_FLUSH", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _native_mtp_spec_stats_for(uid) -> Optional[dict]:
     """The finished request's native-MTP record from the mlx_lm BatchGenerator patch (keyed by generator uid), as
     last_request.speculative. None when MTP did not run for this uid."""
@@ -11828,6 +11834,7 @@ class Scheduler:
                                 # is memory-aware (paged off), so write L2 here
                                 # too; DiskCacheManager preserves M3 idx_keys.
                                 prompt_disk_durable = False
+                                prompt_disk_inflight = False
                                 if (
                                     self.disk_cache is not None
                                     and not self._is_hybrid
@@ -11845,18 +11852,27 @@ class Scheduler:
                                                 None,
                                             ),
                                         )
-                                        if disk_accepted:
-                                            # Terminal dispatch waits for this
-                                            # cleanup frame. Do not publish the
-                                            # tool completion while its prompt
-                                            # entry is still in the SSD queue.
+                                        if disk_accepted and not _prompt_ssd_terminal_flush():
+                                            # The next request's admission waits
+                                            # for this cleanup frame. The record
+                                            # is readable from memory until its
+                                            # file lands (DiskCacheManager
+                                            # in-flight map), so a tool
+                                            # continuation is served without
+                                            # waiting for the SSD write (~0.5 s
+                                            # per ~3 GB openPangu snapshot) and
+                                            # without reading it back.
+                                            prompt_disk_inflight = True
+                                        elif disk_accepted:
+                                            # VMLX_PROMPT_SSD_TERMINAL_FLUSH=1:
+                                            # durable before the receipt settles.
                                             prompt_disk_durable = self.disk_cache.flush_pending_writes(
                                                 prompt_tokens,
                                                 cache_extra_keys=getattr(
                                                     request, "_cache_extra_keys", None
                                                 ),
                                             )
-                                        if not prompt_disk_durable:
+                                        if not prompt_disk_durable and not prompt_disk_inflight:
                                             _PERSIST.record(
                                                 request_id,
                                                 "failed" if disk_accepted else "refused",
@@ -11932,6 +11948,14 @@ class Scheduler:
                                     _PERSIST.record(
                                         request_id, "stored", "prompt SSD; no retained RAM payload",
                                         retained_tokens=len(cache_key_tokens), durable=True,
+                                    )
+                                elif prompt_disk_inflight:
+                                    # Not yet durable: the writer still owns the
+                                    # bytes. Reported as such, never as durable.
+                                    _PERSIST.record(
+                                        request_id, "stored",
+                                        "prompt SSD write in flight (served from memory until written)",
+                                        retained_tokens=len(cache_key_tokens), durable=False,
                                     )
                                 else:
                                     logger.warning(

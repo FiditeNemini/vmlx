@@ -38,9 +38,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
-      {/* Toast container — fixed at bottom-right */}
+      {/* Toast container — fixed at bottom-right. Click-through (pointer-events-none) except each toast's own
+          buttons: the corner is where the Chat Settings Save button and the composer's Send button sit, and an
+          error toast stays 10 s. A click there landed on the toast, so a settings change made right after a failed
+          send was never saved and the next turn silently used the old settings (in-app row 2026-10-11, Gemma
+          audio-400 -> next turn without tools). */}
       {toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-md">
+        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-md pointer-events-none" data-vmlx-control="toast-stack">
           {toasts.map(toast => (
             <ToastItem key={toast.id} toast={toast} onDismiss={dismiss} />
           ))}
@@ -50,7 +54,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   )
 }
 
-function ToastItem({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: number) => void }) {
+export function ToastItem({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: number) => void }) {
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
@@ -97,7 +101,8 @@ function ToastItem({ toast, onDismiss }: { toast: ToastMessage; onDismiss: (id: 
         </div>
         <button
           onClick={() => onDismiss(toast.id)}
-          className="text-muted-foreground hover:text-foreground text-xs flex-shrink-0 ml-2"
+          className="text-muted-foreground hover:text-foreground text-xs flex-shrink-0 ml-2 pointer-events-auto"
+          data-vmlx-control="toast-dismiss"
         >
           <X className="h-3 w-3" />
         </button>

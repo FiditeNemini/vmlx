@@ -106,3 +106,57 @@ def test_install_keeps_non_bf16_biases_and_the_keep_switch(monkeypatch):
     m2 = layer(mx.bfloat16)
     L.install(m2)
     assert "scales" in m2.layers[0]
+
+
+def test_projections_fed_the_same_activation_share_one_xsum(monkeypatch):
+    """q/k/v, gate/up and the GDN in-projections pass the same x object back to back: the XS row sums are computed once
+    and reused, bit-identically; a different array (even with equal shape and values) recomputes them."""
+    mx.random.seed(11)
+    weights = [_weight(n, 512, bits) for n, bits in ((256, 4), (64, 8), (128, 4))]
+    packed = [(q, L.pack_scales(s, b), bits) for (q, s, b), bits in zip(weights, (4, 8, 4))]
+    x = mx.random.normal((1, 3, 512)).astype(mx.bfloat16)
+    monkeypatch.setattr(L, "_SHARE_XSUM", False)
+    unshared = [L.lane_matmul(x, q, sbt, bits=bits) for q, sbt, bits in packed]
+    monkeypatch.setattr(L, "_SHARE_XSUM", True)
+    L._XS_LAST.slot = None
+    shared = []
+    for q, sbt, bits in packed:
+        shared.append(L.lane_matmul(x, q, sbt, bits=bits))
+        if len(shared) == 1:
+            first_xs = L._XS_LAST.slot[2]
+        assert L._XS_LAST.slot[0] is x and L._XS_LAST.slot[2] is first_xs      # computed once for the three calls
+    for a, b in zip(shared, unshared):
+        assert mx.array_equal(a, b)
+    twin = mx.array(x)                                                         # equal values, different object
+    q, sbt, bits = packed[0]
+    assert mx.array_equal(L.lane_matmul(twin, q, sbt, bits=bits), unshared[0])
+    assert L._XS_LAST.slot[0] is twin and L._XS_LAST.slot[2] is not first_xs
+    other = mx.random.normal((1, 3, 512)).astype(mx.bfloat16)
+    ref = L.lane_matmul(other, q, sbt, bits=bits)
+    monkeypatch.setattr(L, "_SHARE_XSUM", False)
+    assert mx.array_equal(ref, L.lane_matmul(other, q, sbt, bits=bits))
+
+
+def test_installed_model_output_is_identical_with_and_without_xsum_sharing(monkeypatch):
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q, self.k, self.v = nn.Linear(256, 256, bias=False), nn.Linear(256, 64, bias=False), nn.Linear(256, 64, bias=False)
+            self.gate, self.up, self.down = nn.Linear(256, 512, bias=False), nn.Linear(256, 512, bias=False), nn.Linear(512, 256, bias=False)
+
+        def __call__(self, x):
+            h = x + self.q(x)[..., :256] + mx.concatenate([self.k(x), self.v(x)], axis=-1).sum(-1, keepdims=True)
+            return self.down(nn.silu(self.gate(h)) * self.up(h))
+
+    mx.random.seed(5)
+    m = Block()
+    nn.quantize(m, group_size=64, bits=4)
+    for p in ("q", "k", "v", "gate", "up", "down"):
+        mod = getattr(m, p)
+        mod.scales, mod.biases = mod.scales.astype(mx.bfloat16), mod.biases.astype(mx.bfloat16)
+    L.install(m)
+    x = mx.random.normal((1, 5, 256)).astype(mx.bfloat16)
+    monkeypatch.setattr(L, "_SHARE_XSUM", False)
+    off = m(x)
+    monkeypatch.setattr(L, "_SHARE_XSUM", True)
+    assert mx.array_equal(m(x), off)

@@ -34,6 +34,8 @@ TRADE-OFFS
 from __future__ import annotations
 
 import hashlib
+import os
+import threading
 
 import mlx.core as mx
 
@@ -276,7 +278,7 @@ class _Baked:
         self.base, self.body, self.inputs, self.outputs = base, body, inputs, outputs
         self.compiled: dict = {}
 
-    def __call__(self, *, template=(), **kwargs):
+    def kernel(self, template=()):
         key = tuple(template)
         run = self.compiled.get(key)
         if run is None:
@@ -284,7 +286,10 @@ class _Baked:
             name = f"{self.base}_{hashlib.sha256((_HEADER + source).encode()).hexdigest()[:16]}"
             run = self.compiled[key] = mx.fast.metal_kernel(
                 name=name, input_names=self.inputs, output_names=self.outputs, source=source, header=_HEADER)
-        return run(**kwargs)
+        return run
+
+    def __call__(self, *, template=(), **kwargs):
+        return self.kernel(template)(**kwargs)
 
 
 _K = {
@@ -358,38 +363,71 @@ def available() -> bool:
     return _AVAILABLE
 
 
+# Launch plans per (N, K, M, bits, group, tiled): the compiled kernels with their grids and output shapes, so a call
+# builds no template lists, hashes or dicts (graph build per call was 3.9 us vs 0.3 us for nn.QuantizedLinear; over a
+# 27B step's 281-496 lane projections that is ~1 ms of CPU on the decode critical path).
+_PLANS: dict = {}
+
+
+def _plan(N: int, K: int, M: int, bits: int, group: int, tiled: bool):
+    key = (N, K, M, bits, group, tiled)
+    plan = _PLANS.get(key)
+    if plan is not None:
+        return plan
+    if bits != 4 and group != 64:
+        raise ValueError("non-4-bit lane weights need groups of 64")
+    MP = 16 * ((M + 15) // 16)
+    KG = K // group
+    mdims = _mdims(M, MP)
+    xs_run = _K["xsum"].kernel([("K", K), ("GS", group)])
+    xs_kw = dict(grid=(KG, MP, 1), threadgroup=(min(KG, 256), 1, 1), output_shapes=[(KG, MP)],
+                 output_dtypes=[mx.float32])
+    sk = split_k(N, K)
+    block = MP if MP <= ROW_BLOCK else ROW_BLOCK
+    edge = int(MP % block != 0)
+    if bits != 4:
+        main_run = _K["lowbit" if bits < 4 else "bytes"].kernel(
+            [("TMR", block // 16), ("N", N), ("K", K), ("NT", NT), ("SK", sk), ("BITS", bits), ("TILED", int(tiled))])
+    else:
+        main_run = _K["main_tiled" if tiled else "main"].kernel(
+            [("TMR", block // 16), ("N", N), ("K", K), ("NT", NT), ("SK", sk), ("GS", group), ("EDGE", edge)])
+    main_kw = dict(grid=(-(-N // NT) * 32 * sk, -(-MP // block), 1), threadgroup=(32 * sk, 1, 1),
+                   output_shapes=[(M, N)], output_dtypes=[mx.bfloat16])
+    plan = _PLANS[key] = (xs_run, xs_kw, main_run, main_kw, mdims, (K, group, MP))
+    return plan
+
+
+# XS (per-group row sums of x) depends only on x, K, the group size and the padded row count -- not on the weight.
+# Projections fed the SAME activation (q/k/v, gate/up, a GDN layer's four in-projections) run back to back, so the
+# last XS is kept with a reference to its x and reused when the next call passes that same array object: 240 of the
+# 496 xsum launches of a Qwen3.8-27B JANG_4D step. Bit-identical (the same kernel on the same x) and row-independence
+# is untouched. Holding x keeps its id from being recycled, so `is` cannot match a different array. One slot per
+# thread. VMLX_LANE_SHARE_XSUM=0 recomputes XS for every call (A/B).
+_SHARE_XSUM = os.environ.get("VMLX_LANE_SHARE_XSUM", "1") != "0"
+_XS_LAST = threading.local()
+
+
 def lane_matmul(x: mx.array, weight: mx.array, sbt: mx.array, *, bits: int, group: int = 64,
                 tiled: bool = False) -> mx.array:
     """x (..., K) bf16 times packed ``weight`` (N, K*bits/32) transposed; at most MAX_ROWS rows; MLX layout."""
     K = int(x.shape[-1])
     N = int(weight.shape[0])
     lead = x.shape[:-1]
-    x2 = x.reshape(-1, K)
-    M = int(x2.shape[0])
+    M = 1
+    for d in lead:
+        M *= int(d)
     if M > MAX_ROWS:
         raise ValueError(f"lane_matmul takes at most {MAX_ROWS} rows, got {M}")
-    MP = 16 * ((M + 15) // 16)
-    KG = K // group
-    mdims = _mdims(M, MP)
-    xs = _K["xsum"](inputs=[x2, mdims], template=[("K", K), ("GS", group)], grid=(KG, MP, 1),
-                    threadgroup=(min(KG, 256), 1, 1), output_shapes=[(KG, MP)], output_dtypes=[mx.float32])[0]
-    sk = split_k(N, K)
-    block = MP if MP <= ROW_BLOCK else ROW_BLOCK
-    edge = int(MP % block != 0)
-    if bits != 4:
-        if group != 64:
-            raise ValueError("non-4-bit lane weights need groups of 64")
-        y = _K["lowbit" if bits < 4 else "bytes"](
-            inputs=[x2, xs, weight, sbt, mdims],
-            template=[("TMR", block // 16), ("N", N), ("K", K), ("NT", NT), ("SK", sk), ("BITS", bits), ("TILED", int(tiled))],
-            grid=(-(-N // NT) * 32 * sk, -(-MP // block), 1), threadgroup=(32 * sk, 1, 1),
-            output_shapes=[(M, N)], output_dtypes=[mx.bfloat16])[0]
+    xs_run, xs_kw, main_run, main_kw, mdims, xs_key = _plan(N, K, M, bits, group, bool(tiled))
+    x2 = x.reshape(M, K)
+    last = getattr(_XS_LAST, "slot", None) if _SHARE_XSUM else None
+    if last is not None and last[0] is x and last[1] == xs_key:
+        xs = last[2]
     else:
-        y = _K["main_tiled" if tiled else "main"](
-            inputs=[x2, xs, weight, sbt, mdims],
-            template=[("TMR", block // 16), ("N", N), ("K", K), ("NT", NT), ("SK", sk), ("GS", group), ("EDGE", edge)],
-            grid=(-(-N // NT) * 32 * sk, -(-MP // block), 1), threadgroup=(32 * sk, 1, 1),
-            output_shapes=[(M, N)], output_dtypes=[mx.bfloat16])[0]
+        xs = xs_run(inputs=[x2, mdims], **xs_kw)[0]
+        if _SHARE_XSUM:
+            _XS_LAST.slot = (x, xs_key, xs)
+    y = main_run(inputs=[x2, xs, weight, sbt, mdims], **main_kw)[0]
     return y.reshape(*lead, N)
 
 

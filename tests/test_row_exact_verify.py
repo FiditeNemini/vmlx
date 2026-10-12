@@ -42,6 +42,52 @@ def test_each_row_equals_its_single_row_quantized_matmul(bits, dtype, shape, row
     assert bool(mx.array_equal(got, want).item())
 
 
+@pytest.mark.parametrize("bits", [4, 6, 8])
+@pytest.mark.parametrize("shape", [(512, 1024), (3584, 1024), (1024, 2048), (1024, 3584), (4096, 768)])
+@pytest.mark.parametrize("rows", [5, 6, 7, 8])
+def test_rows_stay_exact_on_activation_like_inputs_across_weights(bits, shape, rows):
+    """Wide windows (5-8 rows, single launch or row blocks) on shifted, outlier-bearing rows."""
+    out_dim, in_dim = shape
+    for seed in range(3):
+        w = mx.random.normal((out_dim, in_dim), key=mx.random.key(40 + seed)) * 0.05
+        wq, scales, biases = mx.quantize(w.astype(mx.bfloat16), group_size=64, bits=bits)
+        x = (mx.random.normal((1, rows, in_dim), key=mx.random.key(80 + seed))
+             + mx.random.uniform(-2.0, 2.0, (1, rows, 1), key=mx.random.key(90 + seed))).astype(mx.bfloat16)
+        got = R.row_exact_qmv(x, wq, scales, biases, group_size=64, bits=bits)
+        assert got is not None
+        want = mx.concatenate([
+            mx.quantized_matmul(x[:, r:r + 1], wq, scales, biases, transpose=True, group_size=64, bits=bits)
+            for r in range(rows)
+        ], axis=1)
+        assert bool(mx.array_equal(got, want).item())
+
+
+@pytest.mark.parametrize("bits", [4, 6, 8])
+@pytest.mark.parametrize("in_dim", [768, 1024, 1280, 3584])
+def test_offered_kernels_are_the_mlx_single_row_kernel_family(bits, in_dim):
+    """Only the transcription of MLX's own M=1 kernel may be offered for admission.
+
+    qmv_fast and qmv_impl share most arithmetic, so the other family matches
+    some probes by coincidence; admitted that way (per shape) it differed from
+    M=1 on real rows of other weights of the same shape.
+    """
+    out_dim, rows = 4096, 2
+    fast_ok = in_dim % (R._values_per_thread(bits) * 32) == 0
+    variants = R._variants(rows, in_dim, out_dim, bits, 64, mx.bfloat16)
+    assert {v.split("_")[0] for v in variants if v != "quad"} == ({"fast"} if fast_ok else {"generic"})
+    w = mx.random.normal((out_dim, in_dim), key=mx.random.key(3)) * 0.05
+    wq, scales, biases = mx.quantize(w.astype(mx.bfloat16), group_size=64, bits=bits)
+    for seed in range(4):
+        x = (mx.random.normal((rows, in_dim), key=mx.random.key(200 + seed))
+             + mx.random.uniform(-3.0, 3.0, (rows, 1), key=mx.random.key(300 + seed))).astype(mx.bfloat16)
+        want = mx.concatenate([
+            mx.quantized_matmul(x[r:r + 1], wq, scales, biases, transpose=True, group_size=64, bits=bits)
+            for r in range(rows)
+        ])
+        for variant in variants:
+            assert bool(mx.array_equal(R._launch(x, wq, scales, biases, bits, 64, variant), want).item()), variant
+
+
 def test_unsupported_inputs_fall_back_to_stock():
     w, scales, biases = _quantized(256, 512, 4, mx.float16)
     one_row = mx.zeros((1, 1, 512), dtype=mx.float16)

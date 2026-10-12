@@ -624,7 +624,14 @@ def _variants(rows, in_dim, out_dim, bits, group_size, dtype) -> tuple[str, ...]
     quad_ok = (in_dim in (64, 128) and bits in (2, 4, 8)
                and group_size % (in_dim // 4) == 0 and rows * in_dim // 4 <= 128)
     variants = ("quad",) if quad_ok else ()
-    base = ("fast", "generic") if fast_ok else ("generic",)
+    # Only the transcription of the kernel MLX itself dispatches at M=1:
+    # qmv_fast exactly when ``fast_ok`` (measured on MLX 0.32.3 for 4/6/8-bit
+    # at K = 256..3584, including K % 512 == 256 at 6/8-bit), qmv_impl
+    # otherwise. The other family shares most of the arithmetic and matches
+    # some probes by coincidence (1..12 of 12 per shape); admitted that way
+    # it was inexact on real rows (8-bit K=1024 N=3584 at 6 rows: 45 of 49
+    # calls differed from M=1).
+    base = ("fast",) if fast_ok else ("generic",)
     # Admission order. Measured on Qwen3.8-27B shapes (M5 Max, 4 rows): the
     # shared-unpack "multi" walk is best or tied for 4/5/6/8-bit; the batched
     # grid ("batch", MLX's own single-row kernel per row) is slowest and is
@@ -672,22 +679,40 @@ def _launch(x2d, weight, scales, biases, bits, group_size, variant="fast"):
     return y
 
 
+def _admission_probes(rows: int, in_dim: int, dtype) -> list:
+    """Zero-mean rows plus rows shaped like real activations.
+
+    Real hidden rows carry a large mean (so qdot's ``sum * bias`` term is
+    large) and outlier channels; a zero-mean probe leaves that term near zero
+    and hides rounding differences there.
+    """
+    zero_mean = mx.random.normal((rows, in_dim), key=mx.random.key(1234)) * 0.5
+    shift = mx.random.uniform(-3.0, 3.0, (rows, 1), key=mx.random.key(1235))
+    spikes = (mx.random.uniform(shape=(rows, in_dim), key=mx.random.key(1236)) < 0.01) * 30.0
+    return [zero_mean.astype(dtype), (zero_mean + shift + spikes).astype(dtype)]
+
+
 def _admit(key, weight, scales, biases, bits, group_size, rows, in_dim, dtype, variants,
            ref_scales=None, ref_biases=None):
     if key in _ADMITTED:
         return _ADMITTED[key]
     ref_scales = scales if ref_scales is None else ref_scales
     ref_biases = biases if ref_biases is None else ref_biases
-    probe = (mx.random.normal((rows, in_dim), key=mx.random.key(1234)) * 0.5).astype(dtype)
-    want = mx.concatenate([
-        mx.quantized_matmul(probe[r:r + 1], weight, ref_scales, ref_biases, transpose=True,
-                            group_size=group_size, bits=bits, mode="affine")
-        for r in range(rows)
-    ], axis=0)
+    probes = _admission_probes(rows, in_dim, dtype)
+    wants = [
+        mx.concatenate([
+            mx.quantized_matmul(probe[r:r + 1], weight, ref_scales, ref_biases, transpose=True,
+                                group_size=group_size, bits=bits, mode="affine")
+            for r in range(rows)
+        ], axis=0)
+        for probe in probes
+    ]
     chosen = None
     for variant in variants:
-        got = _launch(probe, weight, scales, biases, bits, group_size, variant)
-        if bool(mx.array_equal(got, want).item()):
+        if all(
+            bool(mx.array_equal(_launch(probe, weight, scales, biases, bits, group_size, variant), want).item())
+            for probe, want in zip(probes, wants)
+        ):
             chosen = variant
             break
     _ADMITTED[key] = chosen

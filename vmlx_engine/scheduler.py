@@ -253,6 +253,14 @@ _GEN_PROMPT_STRIP_DISABLED = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _without_generation_prompt_salt(keys: Any) -> Any:
+    """Drop the generation-prompt suffix hash from a request's cache extra keys (other keys are kept)."""
+    if isinstance(keys, dict) and "generation_prompt" in keys:
+        rest = {k: v for k, v in keys.items() if k != "generation_prompt"}
+        return rest or None
+    return keys
+
+
 CACHE_CORRUPTION_PATTERNS = [
     "'NoneType' object is not subscriptable",
     "BatchKVCache",
@@ -6439,6 +6447,22 @@ class Scheduler:
         # The reconstruction logic handles missing layers gracefully
         return extracted
 
+    def _generation_prompt_strip_active(self) -> bool:
+        """Whether cache keys strip the generation-prompt suffix, which then needs its hash as a rail discriminator.
+
+        Mixed full/SWA models, openPangu and GLM-5.3 key on the full prompt (see the fetch path), as does any family
+        under VMLX_DISABLE_GEN_PROMPT_STRIP. Their stored states are bound to exactly the tokens they consumed,
+        suffix included, so a request on another thinking rail can only reuse a genuinely identical token prefix.
+        Keeping the suffix hash on top of that made a thinking toggle re-prefill the whole history (Naive N0.5,
+        41-46k-token chat: cached 0, ~70 s TTFT, app and raw API, 2026-10-12).
+        """
+        return not (
+            getattr(self, "_mixed_attention_cache_model", False)
+            or getattr(self, "_uses_openpangu_cache", False)
+            or getattr(self, "_uses_glm5_next_cache", False)
+            or _GEN_PROMPT_STRIP_DISABLED
+        )
+
     def add_request(self, request: Request) -> None:
         """
         Add a new request to the scheduler.
@@ -6448,6 +6472,14 @@ class Scheduler:
         """
         if request.request_id in self.requests:
             raise ValueError(f"Request {request.request_id} already exists")
+
+        if not self._generation_prompt_strip_active():
+            # Unstripped keys already contain the generation-prompt suffix tokens, so the rails are separated token
+            # by token; the suffix hash only re-keyed the shared history from block 0. Drop it once here so every
+            # fetch and store of this request uses the same keys.
+            request._cache_extra_keys = _without_generation_prompt_salt(
+                getattr(request, "_cache_extra_keys", None)
+            )
 
         # Reset PLD auto-tune window on each new request — each generation
         # is a different workload, so cwnd from the previous request is
@@ -6556,22 +6588,13 @@ class Scheduler:
         # template trailer (e.g. `<|im_start|>assistant\n<think>\n`) during prefill.
         _full_tokens_list = list(request.prompt_token_ids)
         _gpl_fetch = getattr(request, "_gen_prompt_len", 0) or 0
-        if (
-            getattr(self, "_mixed_attention_cache_model", False)
-            or getattr(self, "_uses_openpangu_cache", False)
-            or getattr(self, "_uses_glm5_next_cache", False)
-        ):
+        if not self._generation_prompt_strip_active():
             # Mixed full/SWA models must use the full effective prompt as the
             # cache key for strict logprob equivalence. Stripping the generation
             # prompt replays several suffix tokens from an earlier RotatingKV
             # boundary; MiMo V2.5 shows small but real distribution drift there.
-            _gpl_fetch = 0
-        elif _GEN_PROMPT_STRIP_DISABLED:
-            # Same reasoning, forced on for ANY family. Exists because the drift
-            # above was only ever established on MiMo V2.5, and whether a given
-            # strip-active family pays it is a measurement nobody could run
-            # without a switch. Costs prefix reuse across generation-prompt
-            # variants, so it is opt-in.
+            # VMLX_DISABLE_GEN_PROMPT_STRIP forces the same for ANY family (the
+            # drift was only ever established on MiMo V2.5; opt-in switch).
             _gpl_fetch = 0
         if 0 < _gpl_fetch < len(_full_tokens_list):
             _fetch_tokens = _full_tokens_list[:-_gpl_fetch]

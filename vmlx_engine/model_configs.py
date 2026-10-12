@@ -222,6 +222,39 @@ def register_all(registry=None):
         )
     )
 
+    # MiniCPM-V-4.7 (openbmb, 1B dense + 35B-A3B MoE). A SigLIP-style tower
+    # with intra-ViT compression and canvas M-RoPE around an UNMODIFIED Qwen3.5
+    # text model (text_config.model_type qwen3_5_text / qwen3_5_moe_text, both
+    # 3:1 GatedDeltaNet:attention hybrids -> hybrid cache). One row for both
+    # sizes: the multimodal-wrapper tier matches model_type before the
+    # text_config tier (which left the 1B at the unknown default, no parsers).
+    # Parsers verified on transformers ground-truth outputs
+    # (tests/test_minicpmv47_runtime.py): the template opens
+    # `<think>\n` (thinking ON by default; OFF renders `<think>\n\n</think>\n\n`)
+    # and emits Qwen3-Coder XML tool calls; EOS <|im_end|> 248046 + <|endoftext|> 248044.
+    _register(
+        ModelConfig(
+            family_name="minicpm_v4_7",
+            model_types=["minicpmv4_7"],
+            cache_type="hybrid",
+            eos_tokens=["<|im_end|>", "<|endoftext|>"],
+            tool_parser="qwen",
+            reasoning_parser="qwen3",
+            think_in_template=True,
+            supports_thinking=True,
+            supports_native_tools=True,
+            is_mllm=True,
+            architecture_hints={
+                "default_enable_thinking": True,
+                "modalities": ["text", "image", "video"],
+                "audio_input": False,
+                "mrope_mode": "canvas",
+                "eos_token_ids": [248046, 248044],
+            },
+            priority=4,
+        )
+    )
+
     # Nanbeige 4.2 — text-only looped transformer.
     #
     # The 22 shared decoder blocks execute twice, so model.make_cache() must

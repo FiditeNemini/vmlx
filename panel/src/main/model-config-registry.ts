@@ -543,6 +543,9 @@ registerFamily('molmo', { cacheType: 'kv', isMultimodal: true, description: 'Mol
 registerFamily('cogvlm', { cacheType: 'kv', isMultimodal: true, description: 'CogVLM vision-language', priority: 20 })
 registerFamily('internvl', { cacheType: 'kv', isMultimodal: true, description: 'InternVL vision-language', priority: 15 })
 registerFamily('minicpm-v', { cacheType: 'kv', isMultimodal: true, description: 'MiniCPM-V vision', priority: 20 })
+// MiniCPM-V-4.7: canvas M-RoPE VLM around an unmodified Qwen3.5 GDN hybrid text model (1B dense, 35B-A3B MoE).
+// Template opens <think> by default and emits Qwen3-Coder XML tool calls (engine row: model_configs.py minicpm_v4_7).
+registerFamily('minicpm-v4.7', { cacheType: 'hybrid', usePagedCache: false, toolParser: 'qwen', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: true, defaultEnableThinking: true, enableAutoToolChoice: true, isMultimodal: true, description: 'MiniCPM-V 4.7 (Qwen3.5 hybrid text, canvas M-RoPE)', priority: 4 })
 registerFamily('florence', { cacheType: 'kv', isMultimodal: true, description: 'Florence vision', priority: 20 })
 registerFamily('got-ocr', { cacheType: 'kv', isMultimodal: true, description: 'GOT-OCR2 document/scene OCR', priority: 15 })
 registerFamily('smolvlm', { cacheType: 'kv', isMultimodal: true, description: 'SmolVLM', priority: 20 })
@@ -721,6 +724,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'got_ocr2': 'got-ocr',
   'molmo': 'molmo',
   'minicpmv': 'minicpm-v',
+  'minicpmv4_7': 'minicpm-v4.7',
   'smolvlm': 'smolvlm',
   'internvl_chat': 'internvl',
   // ── Others (architecture-compatible mappings) ──

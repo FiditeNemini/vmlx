@@ -2187,7 +2187,10 @@ def _normalize_qwen_video_arrays_for_processor(
     processor_key = (
         f"{processor_type.__module__}.{processor_type.__name__}".lower()
     )
-    if "qwen3_vl" not in processor_key or "videoprocessor" not in processor_key:
+    presampled = bool(getattr(processor, "_vmlx_video_frames_presampled", False))
+    if not presampled and (
+        "qwen3_vl" not in processor_key or "videoprocessor" not in processor_key
+    ):
         return videos
     if not bool(getattr(video_processor, "do_rescale", False)):
         return videos
@@ -2629,7 +2632,12 @@ def _call_processor_direct_unscoped(
                 param.kind == inspect.Parameter.VAR_KEYWORD
                 for param in params.values()
             )
-            if "fps" in params or accepts_var_kwargs:
+            # Processors flagged as taking pre-sampled frames (MiniCPM-V-4.7:
+            # do_sample_frames=False) never read fps, and its strict video
+            # kwargs reject the per-video list.
+            if ("fps" in params or accepts_var_kwargs) and not getattr(
+                processor, "_vmlx_video_frames_presampled", False
+            ):
                 kwargs["fps"] = _video_fps
             if video_timestamps is not None and (
                 "video_timestamps" in params
@@ -8628,6 +8636,10 @@ def _offset_proxy_needed_for_model_type(model_type: str) -> bool:
     mt = str(model_type or "").lower()
     if mt.startswith("qwen"):
         return True
+    # MiniCPM-V-4.7 wraps the unmodified Qwen3.5 text model (same attention
+    # slicing contract, explicit position_ids).
+    if mt == "minicpmv4_7":
+        return True
     # gemma4 stays wrapped: its patched attention reads the TRUE per-row
     # offset through the proxy (_gemma4_cache_rope_offset -> _inner), while
     # its model code has int(c.offset) sites (per-layer-inputs on E-models)
@@ -11961,6 +11973,7 @@ class MLLMBatchGenerator:
                 request, input_ids, cache, kwargs
             )
             request.vision_encoded = True
+            self._record_request_rope_delta(request)
             if hasattr(output, "logits"):
                 return output.logits
             return output
@@ -13556,6 +13569,7 @@ class MLLMBatchGenerator:
             request, input_ids, seq_len, cache, kwargs
         )
         request.vision_encoded = True
+        self._record_request_rope_delta(request)
 
         if hasattr(output, "logits"):
             return output.logits
@@ -19373,6 +19387,40 @@ class MLLMBatchGenerator:
             )
         return token, logprobs
 
+    def _record_request_rope_delta(self, request: Any) -> None:
+        """Remember this request's mRoPE delta after its media prefill.
+
+        Only for language models that declare
+        ``decode_positions_add_request_rope_delta`` (MiniCPM-V-4.7 canvas
+        M-RoPE): their decode position is ``cache_len + rope_delta`` (the
+        transformers contract), and the delta is per request, so it cannot
+        live in the language model's module state when rows are batched.
+        """
+        lm = self.language_model
+        if not getattr(lm, "decode_positions_add_request_rope_delta", False):
+            return
+        deltas = getattr(request, "_mrope_tail_rope_deltas", None)
+        if deltas is None:
+            deltas = getattr(lm, "_rope_deltas", None)
+        request._mrope_decode_delta = (  # type: ignore[attr-defined]
+            int(deltas.reshape(-1)[0].item()) if deltas is not None else 0
+        )
+
+    def _request_rope_delta_rows(self, batch_size: int) -> Optional[mx.array]:
+        """Per-row ``(B, 1)`` decode rope deltas, or None when all are zero."""
+        if not getattr(self.language_model, "decode_positions_add_request_rope_delta", False):
+            return None
+        requests = list(getattr(getattr(self, "active_batch", None), "requests", None) or [])
+        deltas = [int(getattr(r, "_mrope_decode_delta", 0) or 0) for r in requests]
+        if not any(deltas):
+            return None
+        if len(deltas) != batch_size:
+            raise RuntimeError(
+                f"mRoPE decode deltas cover {len(deltas)} request(s) but the decode "
+                f"batch has {batch_size} row(s)"
+            )
+        return mx.array(deltas, dtype=mx.int32)[:, None]
+
     def _step(
         self, input_tokens: mx.array, cache: List[Any]
     ) -> Tuple[mx.array, List[mx.array]]:
@@ -19431,6 +19479,9 @@ class MLLMBatchGenerator:
                 self.language_model,
             )
             if position_ids is not None:
+                _row_deltas = self._request_rope_delta_rows(int(position_ids.shape[1]))
+                if _row_deltas is not None:
+                    position_ids = position_ids + _row_deltas[None, :, :]
                 lm_kwargs["position_ids"] = position_ids
         if trace:
             self._decode_trace_posid_s = getattr(

@@ -1485,11 +1485,15 @@ def _load_jang_vlm_processor(path: Path, model):
     if processor_temp_dir is not None:
         processor._vmlx_processor_config_temp_dir = processor_temp_dir
 
-    try:
-        from jang_tools.load_jangtq_vlm import _install_video_fallback
-        _install_video_fallback(processor)
-    except Exception as _vfe:
-        logger.debug(f"video fallback not installed: {_vfe}")
+    # The jang_tools fallback rewrites failed video calls into Qwen grid_thw
+    # tensors. MiniCPM-V-4.7's native processor emits pixel_values_videos +
+    # target_sizes_videos and must fail loudly instead of being rewritten.
+    if model_type != "minicpmv4_7":
+        try:
+            from jang_tools.load_jangtq_vlm import _install_video_fallback
+            _install_video_fallback(processor)
+        except Exception as _vfe:
+            logger.debug(f"video fallback not installed: {_vfe}")
 
     return processor
 

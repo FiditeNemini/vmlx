@@ -464,8 +464,14 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         if state is not None and state.shape[0] != B:
             state = None
         inv_scale = k.shape[-1] ** -0.5
-        q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-        k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+        # Default: epsilon 1e-6 on the MEAN of squares (historical behaviour,
+        # = d * 1e-6 on the sum). transformers/FLA l2norm adds 1e-6 to the
+        # SUM; a model that sets ``qk_l2norm_eps`` (MiniCPM-V-4.7) gets that
+        # exact form via eps / d on the mean.
+        qk_eps = getattr(self, "qk_l2norm_eps", None)
+        norm_eps = 1e-6 if qk_eps is None else float(qk_eps) / k.shape[-1]
+        q = (inv_scale**2) * mx.fast.rms_norm(q, None, norm_eps)
+        k = inv_scale * mx.fast.rms_norm(k, None, norm_eps)
 
         fused_update = None
         if self._fused_gdn_gates and not self.training:

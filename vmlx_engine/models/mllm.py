@@ -87,6 +87,10 @@ def _register_local_mlx_vlm_runtime_if_needed(model_path: str | Path) -> None:
         from .glm5_next.register import register_glm5_next_vlm_runtime
 
         register_glm5_next_vlm_runtime()
+    if model_type == "minicpmv4_7":
+        from .minicpmv4_7.register import register_minicpmv4_7_runtime
+
+        register_minicpmv4_7_runtime()
 
 
 def _register_step3p7_mlx_vlm_runtime() -> None:
@@ -4419,6 +4423,32 @@ _VIDEO_FRAME_FALLBACK_MODEL_TYPES = {
 
 
 
+# Families whose native processor takes SimpleEngine's sampled frames as a
+# real clip (pixel_values_videos at the video pad id) instead of frames sent as
+# images. MiniCPM-V-4.7 encodes a video as consecutive <image>-wrapped frames
+# of <|video_pad|> with no image ids, one canvas group; frames-as-images would
+# add <image_id> text between frames and split the canvas.
+_NATIVE_VIDEO_FRAME_MODEL_TYPES = {"minicpmv4_7"}
+
+
+def _video_frames_as_native_clip(frames: list) -> "np.ndarray":
+    """(T, H, W, 3) uint8 clip from SimpleEngine's sampled frame files."""
+    from PIL import Image
+
+    arrays = []
+    for frame in frames:
+        if isinstance(frame, (str, os.PathLike)):
+            with Image.open(frame) as image:
+                arrays.append(np.asarray(image.convert("RGB")))
+        else:
+            arrays.append(np.asarray(frame))
+    if not arrays:
+        raise ValueError("video produced no frames")
+    if len({a.shape for a in arrays}) != 1:
+        raise ValueError("sampled video frames must share one size")
+    return np.stack(arrays)
+
+
 def _order_images_and_video_frames(chat_messages: list[dict], images: list, frame_lists: list[list]) -> list | None:
     """Media list in PROMPT order for VLMs that read videos as image frames.
 
@@ -6408,6 +6438,12 @@ class MLXMultimodalLM:
                 chat_messages,
                 video_frame_counts,
             )
+        native_video_clips = None
+        if model_type in _NATIVE_VIDEO_FRAME_MODEL_TYPES and video_frame_lists:
+            # The video placeholder stays in the prompt; frames go to the
+            # processor's videos= path, images keep their own list.
+            native_video_clips = [_video_frames_as_native_clip(f) for f in video_frame_lists]
+            all_images = list(prepared_images)
 
         # ADVISORY only (Eric's rule: estimates may advise, never refuse). Video
         # frames are already planned to the per-video cap in _prepare_video; a
@@ -6596,6 +6632,8 @@ class MLXMultimodalLM:
             images=all_images,
             resize_shape=kwargs.get("resize_shape"),
         )
+        if native_video_clips:
+            kwargs["video"] = native_video_clips
 
         result = generate(
             self.model,
@@ -6908,6 +6946,12 @@ class MLXMultimodalLM:
                 chat_messages,
                 video_frame_counts,
             )
+        native_video_clips = None
+        if model_type in _NATIVE_VIDEO_FRAME_MODEL_TYPES and video_frame_lists:
+            # The video placeholder stays in the prompt; frames go to the
+            # processor's videos= path, images keep their own list.
+            native_video_clips = [_video_frames_as_native_clip(f) for f in video_frame_lists]
+            all_images = list(prepared_images)
 
         # ADVISORY only (Eric's rule: estimates may advise, never refuse). Video
         # frames are already planned to the per-video cap in _prepare_video; a
@@ -7229,6 +7273,8 @@ class MLXMultimodalLM:
         from ..utils.prefill_step import prefill_step_size
 
         kwargs.setdefault("prefill_step_size", prefill_step_size())
+        if native_video_clips:
+            kwargs["video"] = native_video_clips
         try:
             with _MaybeVLMStream():
                 for chunk in stream_generate(

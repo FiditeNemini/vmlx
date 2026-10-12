@@ -60,12 +60,18 @@ def naive_padded_prefill_identity() -> str | None:
     """Cache-identity fragment: states made under different prefill arithmetic are never mixed."""
     mode = naive_padded_prefill_mode()
     sub = ("+dsa_stock_subchunk_v1" if naive_dsa_stock_subchunk() else "") + \
-        ("+dsa_sparse_kernel_v1" if naive_dsa_sparse_kernel() else "")
+        ("+dsa_sparse_kernel_v1" if naive_dsa_sparse_kernel() else "") + \
+        ("+dsa_fused_index_scores_v1" if _fused_index_scores() else "")
     if mode == "on":
         return NAIVE_PADDED_PREFILL_IDENTITY + sub
     if mode == "auto":
         return f"naive_padded_prefill_auto_v1:{naive_padded_prefill_auto_bytes()}" + sub
     return ("naive_stock" + sub) if sub else None
+
+
+def _fused_index_scores() -> bool:
+    from vmlx_engine.metal.dsa_index_scores import dsa_index_scores_requested
+    return dsa_index_scores_requested()
 
 
 def naive_dsa_stock_subchunk() -> bool:

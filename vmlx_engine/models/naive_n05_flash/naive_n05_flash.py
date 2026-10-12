@@ -35,6 +35,7 @@ from vmlx_engine.utils.gpu_keepalive import touch_global as _touch_keepalive
 _FUSED_ROUTER = os.environ.get("N05_FUSED_ROUTER", "1") != "0"
 from vmlx_engine.jangt.swa_blocked import swa_blocked_attention
 from vmlx_engine.jangt.dsa_sparse import dsa_sparse_attention_kernel
+from vmlx_engine.metal.dsa_index_scores import dsa_index_scores, dsa_index_scores_requested
 DSA_SPARSE_MIN_LK = 4096               # dense masked SDPA is faster below (2.5k keys: 19.7 vs 23.4 ms)
 _SWA_BLOCKED = os.environ.get("N05_SWA_BLOCKED", "1") != "0"
 SWA_BLOCKED_MIN_L = 512                 # below this the dense masked SDPA is as fast (measured: L=130 0.30 vs 0.43 ms)
@@ -157,6 +158,14 @@ class Indexer(nn.Module):
         if cache is not None:
             k, _ = cache.update_and_fetch(k, mx.zeros((B, 1, L, 0), dtype=k.dtype))
         w = (yw * (self.n_heads ** -0.5)).astype(mx.float32)
+        if L > 1:
+            # Prefill: fused relu(q.k) x head weight x head sum in registers (metal/dsa_index_scores.py) — no
+            # (heads, queries, keys) fp32 intermediate, 2.1-2.5x faster per DSA layer, and true fp32 (the stock GPU
+            # matmul here is ~8e-4 relative off an fp64 reference on M5; the kernel ~3e-7). Part of the cache
+            # identity (naive_padded_prefill_identity). VMLX_DSA_FUSED_INDEX_SCORES=0 keeps the stock path.
+            fused = dsa_index_scores(q, k, w, enabled=dsa_index_scores_requested())
+            if fused is not None:
+                return fused
         Lk = k.shape[2]
         # query sub-chunks bound the (B, H, qc, Lk) fp32 intermediate to <= ~1 GiB, independent of the prefill chunk
         # size (an unchunked 4096-token chunk at 32k history would materialize 8.6 GB). Same math per element: exact.

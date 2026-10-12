@@ -410,13 +410,7 @@ class LaneQuantizedLinear(_nn.QuantizedLinear):
         for d in x.shape[:-1]:
             rows *= int(d)
         tiled = getattr(self, "_lane_tiled", False)
-        if rows == 1 and not tiled:
-            # An untiled weight (VMLX_LANE_QMM_TILED=0) lets a single row (DFlash2 AR step / first token) take MLX's
-            # qmv, the fastest 1-row path: the lane kernel pads 1 row to 16 and measured 1.02-1.12x qmv per
-            # projection (2026-10-11). Tiled weights cannot (untiling per call costs a weight copy).
-            y = mx.quantized_matmul(x, self["weight"], self["scales"], self["biases"], transpose=True,
-                                    group_size=self.group_size, bits=self.bits)
-        elif rows <= MAX_ROWS and x.dtype == mx.bfloat16:
+        if rows <= MAX_ROWS and x.dtype == mx.bfloat16:
             y = lane_matmul(x, self["weight"], self._lane_sbt, bits=self.bits, group=self.group_size, tiled=tiled)
         else:
             weight = untile_weight(self["weight"], bits=self.bits, group=self.group_size) if tiled else self["weight"]

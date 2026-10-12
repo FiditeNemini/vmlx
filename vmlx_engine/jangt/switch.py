@@ -121,8 +121,7 @@ class JTMixedSwitchGLU(nn.Module):
                 # fused prefill epilogue needs layer-wide columns shared by gate and up (checked, else separate path)
                 cg, cu = np.array(g["ocol"]), np.array(u["ocol"])
                 if g["n_out"] and (cg == cg[0]).all() and (cg == cu).all() and (cg[0] >= 0).all():
-                    U["gu_cols"] = mx.array(cg[0].astype(np.int32))
-                    g["_wout32"] = g["wout"].astype(mx.float32); u["_wout32"] = u["wout"].astype(mx.float32)
+                    U["gu_cols"] = mx.array(cg[0].astype(np.int32))      # the epilogue widens the fp16 wout itself
             if self.dn_fmt == "jangt":
                 d = self.down_proj.unit()
                 oc = np.array(d["ocol"]); m = np.ones((self.E, self.I), np.float32)
@@ -163,14 +162,12 @@ class JTMixedSwitchGLU(nn.Module):
         from vmlx_engine.jangt.prefill import gather_qmm_sorted_jt
         y = gather_qmm_sorted_jt(xs_rot.astype(mx.bfloat16), P, idx_s, plan=plan).astype(mx.float32)
         if P["n_out"]:
-            if not hasattr(self, "_wo"):
-                self._wo = {}
-            k = id(P["wout"])
-            if k not in self._wo:
-                self._wo[k] = P["wout"].astype(mx.float32).swapaxes(-1, -2)
+            # fp32 widening per call (exact; transient, (E, n_out, N) per layer) instead of a resident fp32 transposed
+            # copy of every layer's wout: those copies kept Naive 0.66 GiB above its weights.
+            wo = P["wout"].astype(mx.float32).swapaxes(-1, -2)
             cols = mx.maximum(P["ocol"], 0)[idx_s.astype(mx.int32)]
             xo = mx.take_along_axis(xs_raw, cols, axis=1).astype(mx.float32)
-            y = y + mx.gather_mm(xo[:, None, :], self._wo[k], rhs_indices=idx_s.astype(mx.uint32), sorted_indices=True)[:, 0, :]
+            y = y + mx.gather_mm(xo[:, None, :], wo, rhs_indices=idx_s.astype(mx.uint32), sorted_indices=True)[:, 0, :]
         return y
 
     def _prefill(self, x2, idx2, w2):

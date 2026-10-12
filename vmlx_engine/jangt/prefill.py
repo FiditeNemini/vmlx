@@ -151,7 +151,8 @@ def gather_qmm_sorted_jt(x, P: dict, idx_sorted, Pu: dict | None = None, limit: 
 # outlier input columns: g = W_g,rot . x_rot + Wout_g . x_raw[ocol] (same for u), and SwiGLU needs both sums BEFORE
 # the activation, so the separate path ran gate and up as two NAX passes (+2 small gather_mm). Here the outlier term is
 # added to the accumulator fragments right before tq_act: one pass reads x once and decodes both weight tiles.
-# xo (M, NO) fp32 = x_raw[ocol] for the sorted rows; wog/wou (E, N, NO) fp32.
+# xo (M, NO) fp32 = x_raw[ocol] for the sorted rows; wog/wou (E, N, NO) = the bundle's own wout (fp16), widened per
+# element (exact) -- no resident fp32 copy (2026-10-12: Naive kept 0.66 GiB of them, 2x the bundle's 0.35 GiB wout).
 _EPI = """
     if constexpr (JT_NO > 0) {
       for (short f = 0; f < decltype(Gt)::kNumFrags; ++f)
@@ -162,7 +163,7 @@ _EPI = """
             const device float* xr_ = xo + size_t(y_row + row) * JT_NO;
             const size_t wb = (size_t(index) * N + y_col + col) * JT_NO;
             float ag = 0.0f, au = 0.0f;
-            for (int j = 0; j < JT_NO; ++j) { ag += xr_[j] * wog[wb + j]; au += xr_[j] * wou[wb + j]; }
+            for (int j = 0; j < JT_NO; ++j) { ag += xr_[j] * float(wog[wb + j]); au += xr_[j] * float(wou[wb + j]); }
             Gt.val_frags[f][e] += ag; Ut.val_frags[f][e] += au;
           }
         }
@@ -170,12 +171,12 @@ _EPI = """
 """
 
 
-def _impl_out(K, W: int, NO: int) -> str:
+def _impl_out(K, W: int, NO: int, wtname: str = "half") -> str:
     s = _impl(K, W).replace(f"jt_gather_qmm_nax_K{_tag(K)}(", f"jt_gather_qmm_nax_out_K{_tag(K)}_n{NO}(", 1)
     s = s.replace(f"jt_h32_radix_K{_tag(K)}", f"jt_h32_radix_K{_tag(K)}_o{NO}").replace(f"jt_act_K{_tag(K)}(", f"jt_act_K{_tag(K)}_o{NO}(")
     a = "const int M, const int N, const int K, const float lim,"
     assert s.count(a) == 1
-    s = s.replace(a, a + " const device float* xo, const device float* wog, const device float* wou,")
+    s = s.replace(a, a + f" const device float* xo, const device {wtname}* wog, const device {wtname}* wou,")
     b = "    if (FUSED) {\n      for (short i = 0; i < decltype(Gt)::kNumFrags; i++)"
     assert s.count(b) == 1, "epilogue anchor"
     s = s.replace(b, _EPI + b)
@@ -183,9 +184,9 @@ def _impl_out(K, W: int, NO: int) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _kernel_out(K, W: int, NO: int, tname: str, expert: bool = False, h32: bool = False):
+def _kernel_out(K, W: int, NO: int, tname: str, expert: bool = False, h32: bool = False, wtname: str = "half"):
     header = JK._mlx_headers(["steel/gemm/gemm.h", "steel/gemm/nax.h", "steel/gemm/loader.h", "quantized_nax.h"]) + \
-        _loader(K, 12, W) + _impl_out(K, W, NO)
+        _loader(K, 12, W) + _impl_out(K, W, NO, wtname)
     src = f"""
   constexpr int BK_padded = (64 + 16 / sizeof({tname}));
   threadgroup {tname} Wg[64 * BK_padded];
@@ -194,10 +195,13 @@ def _kernel_out(K, W: int, NO: int, tname: str, expert: bool = False, h32: bool 
       x, wg, sg, wu, su, indices, y, meta[0], meta[1], meta[2], lim[0], xo, wog, wou, Wg, Wu,
       threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup{_tail_args(expert, h32)});
 """
-    return mx.fast.metal_kernel(name=f"jt_qmm_nax_out_K{_tag(K)}_w{W}_n{NO}_{_variant(True, expert, h32)}_{tname}",
+    return mx.fast.metal_kernel(name=f"jt_qmm_nax_out_K{_tag(K)}_w{W}_n{NO}_{_variant(True, expert, h32)}_{tname}_wo{wtname}",
                                 input_names=["x", "wg", "sg", "wu", "su", "indices", "meta", "lim", "xo", "wog", "wou"]
                                 + _tail_inputs(expert, h32),
                                 output_names=["y"], header=header, source=src)
+
+
+_WOUT_TNAME = {mx.float16: "half", mx.bfloat16: "bfloat16_t", mx.float32: "float"}
 
 
 def gather_gate_up_sorted_jt(x, xo, Pg: dict, Pu: dict, idx_sorted, limit: float = 0.0, plan=None,
@@ -208,8 +212,11 @@ def gather_gate_up_sorted_jt(x, xo, Pg: dict, Pu: dict, idx_sorted, limit: float
     M, Kin = x.shape; E, N, W = Pg["packed"].shape; NO = int(Pg["n_out"])
     idx = _pad_idx(idx_sorted)
     meta_x, gy, extra = _launch(M, N, E, plan, rotate_output)
-    k = _kernel_out(Pg["K"], W, NO, JK._TNAME[x.dtype], plan is not None, bool(rotate_output))
+    wog, wou = Pg["wout"], Pu["wout"]
+    if wou.dtype != wog.dtype:
+        wou = wou.astype(wog.dtype)
+    k = _kernel_out(Pg["K"], W, NO, JK._TNAME[x.dtype], plan is not None, bool(rotate_output), _WOUT_TNAME[wog.dtype])
     return k(inputs=[x, Pg["packed"], Pg["scale"], Pu["packed"], Pu["scale"], idx, mx.array([M, N, Kin] + meta_x, dtype=mx.int32),
-                     mx.array([float(limit)], dtype=mx.float32), xo.astype(mx.float32), Pg["_wout32"], Pu["_wout32"]] + extra,
+                     mx.array([float(limit)], dtype=mx.float32), xo.astype(mx.float32), wog, wou] + extra,
              grid=(((N + 63) // 64) * 128, gy, 1), threadgroup=(128, 1, 1),
              output_shapes=[(M, N)], output_dtypes=[x.dtype])[0]

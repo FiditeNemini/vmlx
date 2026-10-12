@@ -74,3 +74,30 @@ def test_tqlinear_forward_shapes_decode_and_prefill_paths():
         y = t(mx.ones((1, rows, 64), dtype=mx.float16))
         mx.eval(y)
         assert y.shape == (1, rows, 32) and y.dtype == mx.float16
+
+
+def test_tqlinear_row_exact_verify_keeps_verify_rows_on_the_decode_kernel(monkeypatch):
+    """Opt-in flag: inside a row-exact verify scope every row takes the per-row
+    decode kernel (bit-equal to its one-row call); outside it, or without the
+    flag, wide windows keep the sorted QMM."""
+    from vmlx_engine.metal.row_exact_qmv import row_exact_verify_scope
+
+    monkeypatch.setenv("VMLX_ROW_EXACT_VERIFY_QMV", "1")
+    sorted_calls = []
+    real_sorted = D.K.gather_qmm_sorted
+    monkeypatch.setattr(D.K, "gather_qmm_sorted", lambda *a, **k: sorted_calls.append(1) or real_sorted(*a, **k))
+    t = D.TQLinear(256, 64, 2)
+    t.tq2_packed = mx.random.randint(0, 2**31 - 1, t.tq2_packed.shape, key=mx.random.key(1)).astype(mx.uint32)
+    t.tq2_scales = mx.random.uniform(0.01, 0.05, t.tq2_scales.shape, key=mx.random.key(2)).astype(mx.float16)
+    x = (mx.random.normal((1, 8, 256), key=mx.random.key(3)) + 1.5).astype(mx.float16)
+    singles = mx.concatenate([t(x[:, r:r + 1]) for r in range(8)], axis=1)
+
+    with row_exact_verify_scope():
+        t(x)                                   # flag off: sorted path even in scope
+        assert len(sorted_calls) == 1
+        t.row_exact_verify = True
+        for rows in range(D.SORT_THRESHOLD, 9):
+            assert bool(mx.array_equal(t(x[:, :rows]), singles[:, :rows]).item())
+        assert len(sorted_calls) == 1
+    t(x)                                       # flag on, outside the scope: sorted path
+    assert len(sorted_calls) == 2

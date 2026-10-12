@@ -23,6 +23,13 @@ SORT_THRESHOLD = 4
 ROTATIONS = ("none", "hadamard32")
 
 
+def _row_exact_rows(rows: int) -> bool:
+    """Inside a row-exact verify forward and within its row limit."""
+    from ..metal.row_exact_qmv import MAX_ROWS, row_exact_scope_active
+
+    return rows <= MAX_ROWS and row_exact_scope_active()
+
+
 class TQLinear(nn.Module):
     def __init__(self, input_dims: int, output_dims: int, bits: int, rotation: str = "hadamard32"):
         super().__init__()
@@ -40,12 +47,19 @@ class TQLinear(nn.Module):
             raise ValueError("jangtq2 dense: quantization entry differs from installed module")
         return self
 
+    # Opt-in (a speculative target sets it): inside a row-exact verify scope
+    # keep every row on the per-row decode kernel, so each verify row equals
+    # its one-row decode call bit for bit (the sorted QMM reduces in a
+    # different order). Off by default: wide verify windows of other families
+    # take the faster sorted path.
+    row_exact_verify = False
+
     def __call__(self, x: mx.array) -> mx.array:
         lead, Kd = x.shape[:-1], x.shape[-1]
         x2 = x.reshape(-1, Kd); T = x2.shape[0]
         idx = mx.zeros((T,), dtype=mx.uint32)
         rot = self.rotation == "hadamard32"
-        if T < SORT_THRESHOLD:
+        if T < SORT_THRESHOLD or (getattr(self, "row_exact_verify", False) and _row_exact_rows(T)):
             y = K.gather_qmv(x2, self.tq2_packed, self.tq2_scales, self._cb, idx, self.bits, x_per_dispatch=True, rotate=rot)
         else:
             xr = K.h32_rows(x2, x2.dtype) if rot else x2

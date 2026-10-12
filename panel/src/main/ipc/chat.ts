@@ -110,7 +110,10 @@ import {
 import { RemoteRequestMetrics } from "../../shared/remoteRequestMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
-import { shouldReplayHistoricalReasoning } from "../../shared/nativeReasoningHistory";
+import {
+  historyIsStableAcrossToolAuthorization,
+  shouldReplayHistoricalReasoning,
+} from "../../shared/nativeReasoningHistory";
 import { orderComposerContentParts } from "../../shared/composerContentOrder";
 import { splitResponsesSystemMessages } from "../../shared/responsesSystemMessages";
 import {
@@ -1764,12 +1767,15 @@ export function registerChatHandlers(
       // engine can still expose MCP tools that the request genuinely needs
       // (for example, "check weather and reply exactly RAIN or DRY").
       const currentPromptAlreadyForbidsTools = userForbidsToolCalls;
+      // The epoch note is a leading system message: for history-stable families its presence must not follow the
+      // current message's wording, or a "without tools" turn re-prefills the whole chat.
       const toolCapabilityEpoch = toolCapabilityEpochInstruction(
         priorAssistantToolFingerprints,
         currentToolCapabilityFingerprint,
         currentToolNames,
         historicallyUnavailableTools,
-        currentPromptAlreadyForbidsTools,
+        currentPromptAlreadyForbidsTools &&
+          !historyIsStableAcrossToolAuthorization(chatDetectedFamily),
       );
       if (hasSystemPrompt && overrides?.builtinToolsEnabled) {
         const toolRule =

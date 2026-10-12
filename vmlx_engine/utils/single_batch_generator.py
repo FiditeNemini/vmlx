@@ -588,12 +588,14 @@ class SingleBatchGenerator:
         while len(cold_tokens) > every:
             self._prefill(cold_tokens[:every], req)
             cold_tokens = cold_tokens[every:]
+            _t0 = time.perf_counter()
             try:
                 with self._stream_context():
                     windows = clone_rotating_windows(req.cache)
             except Exception as exc:  # noqa: BLE001 - a missed checkpoint only costs reuse, never correctness
                 logger.warning("Naive boundary window capture declined: %s", exc)
                 break
+            req.boundary_capture_ms = getattr(req, "boundary_capture_ms", 0.0) + (time.perf_counter() - _t0) * 1000
             start += every
             if getattr(req, "boundary_windows", None) is None:
                 req.boundary_windows = []
@@ -611,7 +613,8 @@ class SingleBatchGenerator:
                 logger.warning("Naive boundary checkpoint at %d declined: %s", boundary, exc)
         req.boundary_windows = []
         if out:
-            logger.info("Naive boundary checkpoints captured at %s", [b for b, _ in out])
+            logger.info("Naive boundary checkpoints captured at %s (window capture %.1f ms total)",
+                        [b for b, _ in out], float(getattr(req, "boundary_capture_ms", 0.0)))
         return out or None
 
     def _clone_naive_prompt_snapshot(self, req):

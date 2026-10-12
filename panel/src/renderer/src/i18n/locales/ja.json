@@ -540,7 +540,8 @@
       "attachTitle": "画像、動画、音声、またはテキストファイルを添付",
       "stopTitle": "生成を停止 (Esc)",
       "sendTitle": "メッセージを送信 (Enter)",
-      "textAttachment": "テキスト"
+      "textAttachment": "テキスト",
+      "unsupportedAttachment": "このモデルは{{kind}}入力に対応していないため（{{modalities}}）、{{name}} は添付されませんでした。"
     },
     "bubble": {
       "codeDefaultLang": "コード",

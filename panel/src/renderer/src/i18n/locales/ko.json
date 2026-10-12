@@ -540,7 +540,8 @@
       "attachTitle": "이미지, 비디오, 오디오 또는 텍스트 파일 첨부",
       "stopTitle": "생성 중지 (Esc)",
       "sendTitle": "메시지 전송 (Enter)",
-      "textAttachment": "텍스트"
+      "textAttachment": "텍스트",
+      "unsupportedAttachment": "이 모델은 {{kind}} 입력을 받지 않으므로({{modalities}}) {{name}} 파일을 첨부하지 않았습니다."
     },
     "bubble": {
       "codeDefaultLang": "코드",

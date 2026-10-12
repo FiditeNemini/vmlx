@@ -540,7 +540,8 @@
       "attachTitle": "Attach image, video, audio, or text file",
       "stopTitle": "Stop generating (Esc)",
       "sendTitle": "Send message (Enter)",
-      "textAttachment": "Text"
+      "textAttachment": "Text",
+      "unsupportedAttachment": "This model does not take {{kind}} input ({{modalities}}), so {{name}} was not attached."
     },
     "bubble": {
       "videoPreviewUnavailable": "Video preview unavailable",

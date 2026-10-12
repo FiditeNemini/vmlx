@@ -540,7 +540,8 @@
       "attachTitle": "附加图像、视频、音频或文本文件",
       "stopTitle": "停止生成 (Esc)",
       "sendTitle": "发送消息 (Enter)",
-      "textAttachment": "文本"
+      "textAttachment": "文本",
+      "unsupportedAttachment": "此模型不接受{{kind}}输入（{{modalities}}），因此未附加 {{name}}。"
     },
     "bubble": {
       "codeDefaultLang": "代码",

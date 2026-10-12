@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, KeyboardEvent, DragEvent, Cli
 import { Paperclip, Send, Square, ImagePlus, X, Film, Music, FileText } from 'lucide-react'
 import { VoiceChat } from './VoiceChat'
 import { useTranslation } from '../../i18n'
+import { apiCapabilityModalities } from '../../../../shared/apiModelCapabilities'
 
 export type AttachmentKind = 'image' | 'video' | 'audio' | 'text'
 
@@ -66,10 +67,36 @@ function sizeLimitForKind(kind: AttachmentKind): number {
   return IMAGE_MAX_BYTES
 }
 
+/** A media file is refused at attach time only when the running engine ADVERTISES its modalities and that kind is
+ * not among them (the server would answer the turn with a 400). Unknown or failed detection never restricts. */
+export function attachmentAllowed(kind: AttachmentKind, modalities: string[] | null): boolean {
+  if (kind === 'text' || !modalities || modalities.length === 0) return true
+  return modalities.map(m => m.toLowerCase()).includes(kind)
+}
+
 export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, sessionId }: InputBoxProps) {
   const { t } = useTranslation()
   const [message, setMessage] = useState('')
   const [attachments, setAttachments] = useState<MediaAttachment[]>([])
+  const [runtimeModalities, setRuntimeModalities] = useState<string[] | null>(null)
+  const [attachNotice, setAttachNotice] = useState<string | null>(null)
+
+  // The running engine's advertised modalities (same read-only, incarnation-keyed query as the server drawer).
+  useEffect(() => {
+    let cancelled = false
+    setRuntimeModalities(null)
+    if (!sessionId || !(window as any).api?.performance?.capabilities) return
+    void (window as any).api.performance.capabilities(sessionId).then((reply: any) => {
+      if (!cancelled) setRuntimeModalities(apiCapabilityModalities(reply?.capabilities))
+    }).catch(() => { /* unknown: allow every kind */ })
+    return () => { cancelled = true }
+  }, [sessionId, loading])
+
+  useEffect(() => {
+    if (!attachNotice) return
+    const timer = setTimeout(() => setAttachNotice(null), 8000)
+    return () => clearTimeout(timer)
+  }, [attachNotice])
   const [isDragOver, setIsDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -120,6 +147,12 @@ export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, 
         console.warn(`[InputBox] Skipping ${file.name}: ${file.size} bytes exceeds ${kind} limit`)
         continue
       }
+      if (!attachmentAllowed(kind, runtimeModalities)) {
+        setAttachNotice(t('chat.input.unsupportedAttachment', {
+          kind, name: file.name, modalities: (runtimeModalities || []).join(' · '),
+        }))
+        continue
+      }
       const reader = new FileReader()
       reader.onload = () => {
         setAttachments(prev => [...prev, {
@@ -141,7 +174,7 @@ export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, 
         reader.readAsDataURL(file)
       }
     }
-  }, [])
+  }, [runtimeModalities, t])
 
   const handlePaste = useCallback((e: ClipboardEvent) => {
     const items = e.clipboardData?.items
@@ -199,6 +232,16 @@ export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, 
             <ImagePlus className="h-6 w-6" />
             <span className="text-xs font-medium">{t('chat.input.dropOverlay')}</span>
           </div>
+        </div>
+      )}
+
+      {attachNotice && (
+        <div
+          className="mb-2 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-xs text-foreground"
+          role="status"
+          data-vmlx-control="chat-attach-notice"
+        >
+          {attachNotice}
         </div>
       )}
 

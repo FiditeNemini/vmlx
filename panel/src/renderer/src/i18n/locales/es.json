@@ -540,7 +540,8 @@
       "attachTitle": "Adjuntar imagen, video, audio o archivo de texto",
       "stopTitle": "Detener generación (Esc)",
       "sendTitle": "Enviar mensaje (Enter)",
-      "textAttachment": "Texto"
+      "textAttachment": "Texto",
+      "unsupportedAttachment": "Este modelo no acepta entrada de {{kind}} ({{modalities}}), así que {{name}} no se adjuntó."
     },
     "bubble": {
       "codeDefaultLang": "código",

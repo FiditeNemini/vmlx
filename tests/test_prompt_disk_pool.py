@@ -163,3 +163,37 @@ def test_pool_mode_reclaims_pre_pool_local_records(tmp_path):
         assert m.fetch(list(range(40))) is not None
     finally:
         m.shutdown()
+
+
+def test_pooled_start_reclaims_only_stale_legacy_siblings_of_the_same_model(tmp_path):
+    import os
+    import time as _time
+
+    from vmlx_engine.disk_cache import DiskCacheManager
+
+    base = tmp_path / "prompt-cache"
+    old = base / "model_abc_aaaaaaaaaaaa"          # same model, older runtime fingerprint, idle for 2 days
+    fresh = base / "model_abc_bbbbbbbbbbbb"        # same model, touched recently (another live engine)
+    other = base / "othermodel_cccccccccccc"       # different model
+    mixed = base / "model_abc_dddddddddddd"        # same model but holds a foreign file
+    for d in (old, fresh, other, mixed):
+        d.mkdir(parents=True)
+        (d / "cache_0123_10tok.safetensors").write_bytes(b"x" * 1000)
+        (d / "cache_index.db").write_bytes(b"db")
+    (mixed / "notes.txt").write_text("keep me")
+    two_days = _time.time() - 2 * 24 * 3600
+    for d in (old, other, mixed):
+        for f in d.iterdir():
+            os.utime(f, (two_days, two_days))
+    m = DiskCacheManager(cache_dir=str(base / "model_abc_eeeeeeeeeeee"), pool_root=str(tmp_path / "pool"),
+                         pool_max_size_gb=1.0, pool_model_key="k")
+    try:
+        assert not old.exists()                     # reclaimed
+        assert fresh.exists() and other.exists() and mixed.exists()
+    finally:
+        m.shutdown()
+    legacy = DiskCacheManager(cache_dir=str(base / "model_abc_ffffffffffff"), max_size_gb=1)   # not pooled: no reclaim
+    try:
+        assert fresh.exists() and mixed.exists()
+    finally:
+        legacy.shutdown()

@@ -433,6 +433,7 @@ class DiskCacheManager:
         self._cleanup_orphaned_tmp()
         if self._pool_store is not None:
             self._reclaim_local_records()
+            self._reclaim_stale_sibling_namespaces()
 
         if self._pool_store is not None:
             logger.info(
@@ -1035,6 +1036,59 @@ class DiskCacheManager:
                 logger.info("Disk cache: reclaimed %d pre-pool record(s) from %s", reclaimed, self.cache_dir)
         finally:
             self._pool.put(conn)
+
+    # A sibling namespace untouched this long is not in use by another (older) engine.
+    _STALE_SIBLING_IDLE_S = 24 * 3600
+
+    def _reclaim_stale_sibling_namespaces(self) -> None:
+        """Reclaim this model's pre-pool whole-prompt dirs left under OTHER namespace hashes.
+
+        The dir name is `<model_slug>_<12-hex scope hash>` and the hash includes the runtime fingerprint, so every engine
+        update starts a new dir and the old one (up to the old flat 10 GB budget for openPangu) was never reclaimed.
+        Only siblings of this exact model slug are touched, only if they contain nothing but legacy record files
+        (`cache_*.safetensors`, `cache_index.db*`) and nothing in them changed for `_STALE_SIBLING_IDLE_S` (a running
+        older engine would be touching its files). Pool records are never here; they live in the managed pool.
+        """
+        import re as _re
+
+        name = self.cache_dir.name
+        m = _re.match(r"^(?P<slug>.+)_[0-9a-f]{12}$", name)
+        if not m:
+            return
+        slug = m.group("slug")
+        now = time.time()
+        reclaimed = freed = 0
+        try:
+            siblings = [p for p in self.cache_dir.parent.iterdir() if p != self.cache_dir and p.is_dir()]
+        except OSError:
+            return
+        for sib in siblings:
+            sm = _re.match(r"^(?P<slug>.+)_[0-9a-f]{12}$", sib.name)
+            if not sm or sm.group("slug") != slug or sib.is_symlink():
+                continue
+            try:
+                entries = list(sib.iterdir())
+                legacy = all(
+                    e.is_file() and not e.is_symlink() and (
+                        (e.name.startswith("cache_") and e.name.endswith(".safetensors"))
+                        or e.name.startswith("cache_index.db")
+                    )
+                    for e in entries
+                )
+                if not legacy or any(now - e.stat().st_mtime < self._STALE_SIBLING_IDLE_S for e in entries):
+                    continue
+                for e in entries:
+                    freed += e.stat().st_size
+                    e.unlink(missing_ok=True)
+                sib.rmdir()
+                reclaimed += 1
+            except OSError as exc:
+                logger.debug("Disk cache: sibling namespace %s not reclaimed: %s", sib, exc)
+        if reclaimed:
+            logger.info(
+                "Disk cache: reclaimed %d stale pre-pool namespace(s) of %s (%.1f GB)",
+                reclaimed, slug, freed / 1024 ** 3,
+            )
 
     def _discard_record_file(self, file_path: Path) -> None:
         """Delete a rejected record file — except in pool mode, where only the pool deletes (and accounts) its files;

@@ -60,17 +60,20 @@ def _log_naive_prefill_phase(req: _Request, phase: str, **fields: Any) -> None:
 
 
 def _naive_boundary_checkpoint_every() -> int:
-    """Exact Naive checkpoints every N prompt tokens of a cold prefill (VMLX_NAIVE_BOUNDARY_CHECKPOINT_TOKENS, 0 = off).
+    """Exact Naive checkpoints every N prompt tokens of a cold prefill (VMLX_NAIVE_BOUNDARY_CHECKPOINT_TOKENS, default
+    4096, 0 = off).
 
     Naive's sliding-window layers resume only from an exact window, and those used to exist only at each request's
     N-1 and terminal states, so any earlier divergence (a new chat with the same long system prompt, a tools toggle
     rendered after it, a mid-history edit) re-prefilled the whole prompt (62 s at 37.7k). A boundary costs one window
     copy (128 rows per sliding layer); its full-attention part is a slice of the N-1 snapshot.
+    Measured on a 36-38k Naive prompt (2026-10-12): new chat with the same system prompt 61.8 s -> 5.8 s, token-identical
+    to cold; cost ~0.12 s window capture + ~0.3 s extra store per cold prefill (interleaved A/B: +0.5 s of ~60 s).
     """
     try:
-        return max(0, int(os.environ.get("VMLX_NAIVE_BOUNDARY_CHECKPOINT_TOKENS", "0").strip() or 0))
+        return max(0, int(os.environ.get("VMLX_NAIVE_BOUNDARY_CHECKPOINT_TOKENS", "4096").strip() or 0))
     except ValueError:
-        return 0
+        return 4096
 
 
 def _cold_prefill_tail_split(gen_prompt_len: int = 0) -> int:

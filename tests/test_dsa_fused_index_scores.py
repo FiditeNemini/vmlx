@@ -89,3 +89,13 @@ def test_glm_pool_variant_matches_fp64_and_the_model_uses_it_for_prefill_chunks(
     assert "if S >= 64:" in src and "dsa_pool_index_scores(" in src
     from vmlx_engine.prefix_cache import runtime_cache_fingerprint
     assert "dsa_fused_index_scores_v1" in runtime_cache_fingerprint()
+
+
+def test_short_calls_use_16_row_tiles_with_identical_rows(monkeypatch):
+    """Calls under 32 rows run 16-row tiles (1.3-2.8x faster per short tail); every row equals the 64-row tile's."""
+    import vmlx_engine.metal.dsa_index_scores as m
+    assert [m._rows_frags(L) for L in (2, 16, 31, 32, 63, 64, 2048)] == [1, 1, 1, 4, 4, 4, 4]
+    q, k, w = _inputs(31, 4099, seed=3)
+    sized = dsa_index_scores(q, k, w)
+    monkeypatch.setattr(m, "_rows_frags", lambda L: 4)
+    assert mx.array_equal(sized, dsa_index_scores(q, k, w)).item()

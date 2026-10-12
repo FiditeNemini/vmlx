@@ -100,12 +100,20 @@ def _kernel():
 FI, FJ = 4, 2
 
 
-def _launch(q, k, w, *, H, L, D, Lk, qs_layout, k_axis, scale):
-    TM, TN = 2 * FI * 8, 2 * FJ * 8
+def _rows_frags(L: int) -> int:
+    """Fragments (8 rows each) per simdgroup row band: 64-row tiles, except 16-row tiles for calls under 32 rows (a warm
+    turn's short tail) so they pad to 16 rows instead of 64 — 1.3-2.8x faster per call at 16k-64k keys (M5 Max). 32-row
+    tiles measured 4-9% SLOWER than 64-row tiles at 40-63 rows, so there is no middle size. Every output element is the
+    same per-element arithmetic whatever the tile height (tests pin rows bit-identical across heights)."""
+    return 4 if L >= 32 else 1
+
+
+def _launch(q, k, w, *, H, L, D, Lk, qs_layout, k_axis, scale, fi=FI):
+    TM, TN = 2 * fi * 8, 2 * FJ * 8
     sc = mx.array([float(scale if scale is not None else 1.0)], dtype=mx.float32)
     return _kernel()(
         inputs=[q, k, w, sc],
-        template=[("H", int(H)), ("D", int(D)), ("FI", FI), ("FJ", FJ), ("TM", TM), ("TN", TN),
+        template=[("H", int(H)), ("D", int(D)), ("FI", int(fi)), ("FJ", FJ), ("TM", TM), ("TN", TN),
                   ("QS_LAYOUT", int(qs_layout)), ("K_AXIS", int(k_axis)), ("HAS_SCALE", int(scale is not None))],
         grid=(-(-Lk // TN) * 128, -(-L // TM), 1),
         threadgroup=(128, 1, 1),
@@ -115,9 +123,9 @@ def _launch(q, k, w, *, H, L, D, Lk, qs_layout, k_axis, scale):
 
 
 def _admit(L, Lk, D, arrays) -> bool:
-    TM, TN = 2 * FI * 8, 2 * FJ * 8
+    TN = 2 * FJ * 8
     return not (D % 8 or L < 2 or Lk < TN or any(a.dtype != mx.float32 for a in arrays)
-                or max(L, TM) * Lk >= 2**31)
+                or max(L, 64) * Lk >= 2**31)
 
 
 def dsa_index_scores(q: mx.array, k: mx.array, w: mx.array, *, enabled: bool = True):
@@ -137,14 +145,15 @@ def dsa_index_scores(q: mx.array, k: mx.array, w: mx.array, *, enabled: bool = T
     Lk = int(k.shape[2])
     if not _admit(L, Lk, D, (q, k, w)):
         return None                         # decode (L == 1) keeps the stock GEMV path
-    TM = 2 * FI * 8
+    fi = _rows_frags(L)
+    TM = 2 * fi * 8
     if L < TM:
         # A short prefill tail (a warm turn's few new tokens) takes the same arithmetic as the cold chunk did:
         # zero-pad the queries to one tile and keep the first L rows (each row is computed independently).
         out = _launch(mx.pad(q, [(0, 0), (0, 0), (0, TM - L), (0, 0)]), k, mx.pad(w, [(0, 0), (0, TM - L), (0, 0)]),
-                      H=H, L=TM, D=D, Lk=Lk, qs_layout=False, k_axis=2, scale=None)
+                      H=H, L=TM, D=D, Lk=Lk, qs_layout=False, k_axis=2, scale=None, fi=fi)
         return out[:, :L]
-    return _launch(q, k, w, H=H, L=L, D=D, Lk=Lk, qs_layout=False, k_axis=2, scale=None)
+    return _launch(q, k, w, H=H, L=L, D=D, Lk=Lk, qs_layout=False, k_axis=2, scale=None, fi=fi)
 
 
 def dsa_pool_index_scores(q: mx.array, pool_keys: mx.array, head_w: mx.array, scale: float, *, enabled: bool = True):
@@ -161,10 +170,11 @@ def dsa_pool_index_scores(q: mx.array, pool_keys: mx.array, head_w: mx.array, sc
     P = int(pool_keys.shape[1])
     if not _admit(S, P, D, (q, pool_keys, head_w)):
         return None
-    TM = 2 * FI * 8
+    fi = _rows_frags(S)
+    TM = 2 * fi * 8
     if S < TM:
         out = _launch(mx.pad(q, [(0, 0), (0, TM - S), (0, 0), (0, 0)]), pool_keys,
                       mx.pad(head_w, [(0, 0), (0, TM - S), (0, 0)]),
-                      H=H, L=TM, D=D, Lk=P, qs_layout=True, k_axis=1, scale=scale)
+                      H=H, L=TM, D=D, Lk=P, qs_layout=True, k_axis=1, scale=scale, fi=fi)
         return out[:, :S]
-    return _launch(q, pool_keys, head_w, H=H, L=S, D=D, Lk=P, qs_layout=True, k_axis=1, scale=scale)
+    return _launch(q, pool_keys, head_w, H=H, L=S, D=D, Lk=P, qs_layout=True, k_axis=1, scale=scale, fi=fi)

@@ -59,6 +59,20 @@ def _log_naive_prefill_phase(req: _Request, phase: str, **fields: Any) -> None:
         pass
 
 
+def _naive_boundary_checkpoint_every() -> int:
+    """Exact Naive checkpoints every N prompt tokens of a cold prefill (VMLX_NAIVE_BOUNDARY_CHECKPOINT_TOKENS, 0 = off).
+
+    Naive's sliding-window layers resume only from an exact window, and those used to exist only at each request's
+    N-1 and terminal states, so any earlier divergence (a new chat with the same long system prompt, a tools toggle
+    rendered after it, a mid-history edit) re-prefilled the whole prompt (62 s at 37.7k). A boundary costs one window
+    copy (128 rows per sliding layer); its full-attention part is a slice of the N-1 snapshot.
+    """
+    try:
+        return max(0, int(os.environ.get("VMLX_NAIVE_BOUNDARY_CHECKPOINT_TOKENS", "0").strip() or 0))
+    except ValueError:
+        return 0
+
+
 def _cold_prefill_tail_split(gen_prompt_len: int = 0) -> int:
     """How many trailing prompt tokens the COLD prefill computes separately.
 
@@ -148,6 +162,10 @@ class _Request:
     # same system prompt and tools restores it instead of re-prefilling them. 0 = no split.
     stable_root_split: int = 0
     stable_root_snapshot: Optional[list[Any]] = None
+    # Periodic exact checkpoints (Naive): (boundary, window capture) taken during the cold prefill, then assembled
+    # into (boundary, cache) from the N-1 snapshot for the scheduler to store before the N-1 checkpoint.
+    boundary_windows: list = field(default_factory=list)
+    boundary_checkpoints: Optional[list] = None
 
 
 @dataclass
@@ -164,6 +182,7 @@ class Response:
     prefill_usage: Optional[dict] = None
     mixed_swa_boundary: Any = None
     stable_root_snapshot: Optional[list[Any]] = None
+    boundary_checkpoints: Optional[list] = None
 
 
 class SingleBatchGenerator:
@@ -544,6 +563,56 @@ class SingleBatchGenerator:
             return None
         self.mixed_swa_boundary_captures += 1
         return capture
+
+    def _prefill_naive_boundaries(self, cold_tokens, req):
+        """Prefill Naive's cold prompt in whole boundary segments, capturing the sliding windows at each boundary.
+
+        Boundaries sit at the cold start + k * N (N a multiple of the prefill step), so the chunking -- and the
+        numerics -- are the same as one pass. Only when the cold start is block-aligned (the checkpoint must end on a
+        full block to be an exact anchor). Returns the tokens still to prefill (always non-empty when given some).
+        """
+        every = _naive_boundary_checkpoint_every()
+        block = int(self.mixed_swa_capture_block_size)
+        step = max(1, int(self.prefill_step_size))
+        if (not every or every % step or every % block
+                or getattr(self.model, "model_type", None) != "naive_n05_flash"):
+            return cold_tokens
+        from ..models.naive_n05_flash.cache_snapshot import cache_offset, clone_rotating_windows
+
+        try:
+            start = cache_offset(req.cache)
+        except Exception:  # noqa: BLE001 - unknown layout: keep the single-pass prefill
+            return cold_tokens
+        if start % block:
+            return cold_tokens
+        while len(cold_tokens) > every:
+            self._prefill(cold_tokens[:every], req)
+            cold_tokens = cold_tokens[every:]
+            try:
+                with self._stream_context():
+                    windows = clone_rotating_windows(req.cache)
+            except Exception as exc:  # noqa: BLE001 - a missed checkpoint only costs reuse, never correctness
+                logger.warning("Naive boundary window capture declined: %s", exc)
+                break
+            start += every
+            if getattr(req, "boundary_windows", None) is None:
+                req.boundary_windows = []
+            req.boundary_windows.append((start, windows))
+        return cold_tokens
+
+    def _assemble_naive_boundaries(self, req, snapshot):
+        from ..models.naive_n05_flash.cache_snapshot import assemble_boundary_checkpoint
+
+        out = []
+        for boundary, windows in req.boundary_windows:
+            try:
+                out.append((boundary, assemble_boundary_checkpoint(snapshot, windows, boundary)))
+            except Exception as exc:  # noqa: BLE001 - skip this boundary, keep the others
+                logger.warning("Naive boundary checkpoint at %d declined: %s", boundary, exc)
+        req.boundary_windows = []
+        if out:
+            logger.info("Naive boundary checkpoints captured at %s", [b for b, _ in out])
+        return out or None
 
     def _clone_naive_prompt_snapshot(self, req):
         # Mixed-SWA owns a full-prompt N-1 key, including the native generation
@@ -1088,6 +1157,7 @@ class SingleBatchGenerator:
             prefill_usage=req.prefill_usage,
             mixed_swa_boundary=req.mixed_swa_boundary,
             stable_root_snapshot=req.stable_root_snapshot,
+            boundary_checkpoints=getattr(req, "boundary_checkpoints", None),
         )
         if req.finish_reason is not None:
             self._request = None
@@ -1216,6 +1286,7 @@ class SingleBatchGenerator:
                 self._prefill(_cold_tokens[:_root], req)
                 req.stable_root_snapshot = self._clone_admissible_prompt_cache_snapshot(req.cache)
                 _cold_tokens = _cold_tokens[_root:]
+            _cold_tokens = self._prefill_naive_boundaries(_cold_tokens, req)
             if _tail > 0 and len(_cold_tokens) > _tail:
                 # Log so an A/B can PROVE the path engaged. A guard that
                 # silently declines makes the comparison stock-vs-stock.
@@ -1240,6 +1311,8 @@ class SingleBatchGenerator:
         if _phase_trace:
             _snapshot_t0 = time.perf_counter()
         typed_prompt_snapshot = self._clone_naive_prompt_snapshot(req)
+        if getattr(req, "boundary_windows", None) and typed_prompt_snapshot is not None:
+            req.boundary_checkpoints = self._assemble_naive_boundaries(req, typed_prompt_snapshot)
         if _phase_trace:
             _snapshot_done = time.perf_counter()
             _log_naive_prefill_phase(

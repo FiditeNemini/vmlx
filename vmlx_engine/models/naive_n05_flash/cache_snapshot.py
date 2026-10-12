@@ -48,6 +48,42 @@ def snapshot_size(cache, expected_tokens=None):
     return total
 
 
+def cache_offset(cache):
+    """The single token offset shared by every leaf of a Naive cache (ValueError when they disagree)."""
+    offsets = set()
+
+    def visit(entry):
+        if type(entry) is CacheList:
+            for child in entry.caches:
+                visit(child)
+        else:
+            offsets.add(int(entry.offset))
+
+    for entry in cache:
+        visit(entry)
+    if len(offsets) != 1:
+        raise ValueError("Naive cache components have unequal offsets")
+    return offsets.pop()
+
+
+def _clone_leaf(entry):
+    arrays = entry.state
+    metadata = entry.meta_state
+    if _compact_swa_length(entry, arrays) is not None:
+        from ...prefix_cache import _rotating_terminal_window
+
+        keys, values, size, keep, offset, idx = _rotating_terminal_window(
+            *arrays, metadata, expected_offset=entry.offset,
+            preserve_bounded_ring=True,
+        )
+        arrays = (keys, values)
+        metadata = tuple(map(str, (keep, size, offset, idx)))
+    # Detach even normalized suffix views from their oversized source backing.
+    arrays = tuple(array * 1 for array in arrays)
+    mx.eval(*arrays)
+    return type(entry).from_state(arrays, metadata)
+
+
 def clone_prompt_cache(cache):
     """Copy arrays plus ring metadata; FP32 indexer keys and empty V stay native."""
     snapshot_size(cache)
@@ -55,23 +91,60 @@ def clone_prompt_cache(cache):
     def clone(entry):
         if type(entry) is CacheList:
             return CacheList(*(clone(child) for child in entry.caches))
-        arrays = entry.state
-        metadata = entry.meta_state
-        if _compact_swa_length(entry, arrays) is not None:
-            from ...prefix_cache import _rotating_terminal_window
-
-            keys, values, size, keep, offset, idx = _rotating_terminal_window(
-                *arrays, metadata, expected_offset=entry.offset,
-                preserve_bounded_ring=True,
-            )
-            arrays = (keys, values)
-            metadata = tuple(map(str, (keep, size, offset, idx)))
-        # Detach even normalized suffix views from their oversized source backing.
-        arrays = tuple(array * 1 for array in arrays)
-        mx.eval(*arrays)
-        return type(entry).from_state(arrays, metadata)
+        return _clone_leaf(entry)
 
     return [clone(entry) for entry in cache]
+
+
+def clone_rotating_windows(cache):
+    """Boundary capture for periodic checkpoints: copy only the sliding-window leaves.
+
+    Naive's sliding window is small (128 rows), so this costs a few MB however long the prompt is. The append-only
+    full-attention and indexer leaves are taken later as slices of the N-1 snapshot (`assemble_boundary_checkpoint`).
+    Returns a structure mirroring the cache: ("list", children) for CacheList, the clone for RotatingKVCache, None
+    for KVCache.
+    """
+    snapshot_size(cache)
+
+    def capture(entry):
+        if type(entry) is CacheList:
+            return ("list", [capture(child) for child in entry.caches])
+        if type(entry) is RotatingKVCache:
+            return _clone_leaf(entry)
+        return None
+
+    return [capture(entry) for entry in cache]
+
+
+def assemble_boundary_checkpoint(snapshot, windows, boundary):
+    """Exact cache at an earlier prompt boundary: the N-1 snapshot's append-only leaves sliced to `boundary` plus
+    the sliding windows captured when the prefill stood exactly there."""
+    boundary = int(boundary)
+
+    def build(entry, win):
+        if type(entry) is CacheList:
+            if not (isinstance(win, tuple) and win and win[0] == "list" and len(win[1]) == len(entry.caches)):
+                raise ValueError("boundary windows do not match the cache structure")
+            return CacheList(*(build(child, w) for child, w in zip(entry.caches, win[1])))
+        if type(entry) is RotatingKVCache:
+            if type(win) is not RotatingKVCache or int(win.offset) != boundary:
+                raise ValueError("boundary window is missing or at another offset")
+            return win
+        if type(entry) is not KVCache or win is not None:
+            raise ValueError("unsupported Naive boundary component")
+        if int(entry.offset) < boundary:
+            raise ValueError("snapshot is shorter than the boundary")
+        keys, values = entry.state
+        leaf = KVCache()
+        leaf.keys, leaf.values = keys[..., :boundary, :], values[..., :boundary, :]
+        leaf.offset = boundary
+        return leaf
+
+    if len(snapshot) != len(windows):
+        raise ValueError("boundary windows do not match the cache structure")
+    out = [build(entry, win) for entry, win in zip(snapshot, windows)]
+    snapshot_size(out, expected_tokens=boundary)
+    return out
 
 
 def terminal_cache_key(cache, all_tokens, prompt_tokens):

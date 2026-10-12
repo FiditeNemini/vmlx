@@ -9869,6 +9869,21 @@ class Scheduler:
                                                 request._naive_prompt_checkpoint = (
                                                     prompt_key, self._extract_cache_states(prompt_state)
                                                 )
+                                                # Periodic exact checkpoints from the same cold prefill (generator
+                                                # _prefill_naive_boundaries): each is keyed by exactly its boundary's
+                                                # tokens and stored BEFORE the N-1 checkpoint, so the block store
+                                                # writes the exact window anchor and later chains dedup onto it.
+                                                boundaries = []
+                                                for _b, _bcache in (getattr(response, "boundary_checkpoints", None) or []):
+                                                    _bkey = list(request.prompt_token_ids[:int(_b)])
+                                                    if len(_bkey) != int(_b) or len(_bkey) >= len(prompt_key):
+                                                        continue
+                                                    snapshot_size(_bcache, expected_tokens=len(_bkey))
+                                                    _bstate = _bcache
+                                                    if getattr(self, "_kv_cache_bits", 0):
+                                                        _bstate = self._quantize_cache_for_storage(_bstate)
+                                                    boundaries.append((_bkey, self._extract_cache_states(_bstate)))
+                                                request._naive_boundary_checkpoints = boundaries or None
                                             request._extracted_cache_key_tokens = native_key
                                             cache_for_extract = raw_cache
                                             extended_store_armed = True
@@ -11747,6 +11762,15 @@ class Scheduler:
                                 _terminal_store_kwargs = dict(_paged_store_kwargs)
                                 if _defer_final_store_gc:
                                     _terminal_store_kwargs["defer_post_fence_gc"] = True
+                                for _bkey, _bstates in (getattr(request, "_naive_boundary_checkpoints", None) or []):
+                                    checkpoint_id = f"{request_id}:native-boundary-{len(_bkey)}"
+                                    try:
+                                        self.block_aware_cache.store_cache(
+                                            checkpoint_id, _bkey, _bstates, **_terminal_store_kwargs,
+                                        )
+                                    finally:
+                                        self.block_aware_cache.release_cache(checkpoint_id)
+                                request._naive_boundary_checkpoints = None
                                 naive_prompt = getattr(request, "_naive_prompt_checkpoint", None)
                                 if naive_prompt is not None:
                                     checkpoint_id = request_id + ":native-prompt"

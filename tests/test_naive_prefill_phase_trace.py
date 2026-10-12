@@ -105,6 +105,8 @@ def owner(monkeypatch, enabled=True, family="naive_n05_flash", fail=None):
         _cache_uses_openpangu=lambda cache: False,
         _cache_uses_glm5_next=lambda cache: False,
         _clone_naive_prompt_snapshot=snapshot,
+        # Periodic boundary checkpoints are off by default: the cold prompt passes through unchanged.
+        _prefill_naive_boundaries=lambda cold_tokens, req: cold_tokens,
         _yield_current_and_schedule_next=lambda req, **kwargs: "response",
     )
     obj._prefill = lambda tokens, req: ns["_prefill"](obj, tokens, req)

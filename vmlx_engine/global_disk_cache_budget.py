@@ -1203,7 +1203,9 @@ class GlobalDiskCacheBudget:
                 try:
                     if block_stat is None:
                         block_stat = resolved.stat()
-                    size = block_stat.st_size
+                    # A hard-linked block group file is charged once across its
+                    # member links (block_disk_store group files).
+                    size = block_stat.st_size // max(1, int(getattr(block_stat, "st_nlink", 1) or 1))
                 except OSError as exc:
                     raise OSError(f"cannot stat indexed block {resolved}: {exc}") from exc
                 indexed_access_ns = max(
@@ -1517,7 +1519,12 @@ class GlobalDiskCacheBudget:
             )
             conn.commit()
             try:
-                size = path.stat().st_size
+                _st = path.stat()
+                # A hard-linked block group file frees its bytes only with its
+                # last link: count what this unlink really frees (1 keeps a
+                # partial unlink "progressing" so suffix-first trimming moves on
+                # to the group's remaining members; the scan apportions sizes).
+                size = _st.st_size if int(getattr(_st, "st_nlink", 1) or 1) <= 1 else 1
                 path.unlink()
             except FileNotFoundError:
                 size = candidate.size_bytes
@@ -1630,7 +1637,12 @@ class GlobalDiskCacheBudget:
             if path is None:
                 continue
             try:
-                size = path.stat().st_size
+                _st = path.stat()
+                # A hard-linked block group file frees its bytes only with its
+                # last link: count what this unlink really frees (1 keeps a
+                # partial unlink "progressing" so suffix-first trimming moves on
+                # to the group's remaining members; the scan apportions sizes).
+                size = _st.st_size if int(getattr(_st, "st_nlink", 1) or 1) <= 1 else 1
                 path.unlink()
                 freed += max(0, int(size))
                 evicted_entries += 1
@@ -1647,7 +1659,12 @@ class GlobalDiskCacheBudget:
         freed = 0
         for path in candidate.paths:
             try:
-                size = path.stat().st_size
+                _st = path.stat()
+                # A hard-linked block group file frees its bytes only with its
+                # last link: count what this unlink really frees (1 keeps a
+                # partial unlink "progressing" so suffix-first trimming moves on
+                # to the group's remaining members; the scan apportions sizes).
+                size = _st.st_size if int(getattr(_st, "st_nlink", 1) or 1) <= 1 else 1
                 path.unlink()
                 freed += max(0, int(size))
             except FileNotFoundError:

@@ -44,9 +44,9 @@ def test_candidate_metadata_is_checked_once_per_payload_file(tmp_path, monkeypat
         loads = []
         original = bds._load_block_validation_entries
 
-        def counting(path):
+        def counting(path, member=None):
             loads.append(path)
-            return original(path)
+            return original(path, member)
 
         monkeypatch.setattr(bds, "_load_block_validation_entries", counting)
         first = store.read_block_validation_entries(block_hash)

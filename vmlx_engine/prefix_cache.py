@@ -7829,7 +7829,14 @@ class BlockAwarePrefixCache:
         try:
             # Collect cache data from all blocks
             all_block_data = []
+            # Block group files (block_disk_store): a run of SSD-only blocks that
+            # are consecutive members of one group file is read as ONE payload
+            # spanning them; the loop then skips the blocks it covered.
+            _span_skip = 0
             for _block_index, block_id in enumerate(block_table.block_ids):
+                if _span_skip:
+                    _span_skip -= 1
+                    continue
                 if (
                     _readahead_hashes
                     and _readahead_upto < len(_readahead_hashes)
@@ -7875,6 +7882,30 @@ class BlockAwarePrefixCache:
                     # frugal-stored prompt would silently fall through to a
                     # full prefill, defeating the cache.
                     _disk = getattr(self.paged_cache, "_disk_store", None)
+                    _span_reader = getattr(_disk, "read_group_span_for_reconstruction", None)
+                    if (
+                        callable(_span_reader)
+                        and bool(getattr(self.paged_cache, "disk_only", False))
+                        and block.block_hash is not None
+                    ):
+                        _span_hashes = []
+                        for _span_id in block_table.block_ids[_block_index:_block_index + 64]:
+                            _span_block = self.paged_cache.allocated_blocks.get(_span_id)
+                            if (
+                                _span_block is None
+                                or _span_block.cache_data is not None
+                                or _span_block.block_hash is None
+                            ):
+                                break
+                            _span_hashes.append(_span_block.block_hash)
+                        _span = _span_reader(_span_hashes) if len(_span_hashes) >= 2 else None
+                        if _span is not None:
+                            _span_data, _span_n = _span
+                            for _span_id in block_table.block_ids[_block_index:_block_index + _span_n]:
+                                disk_backed_block_ids.add(_span_id)
+                            all_block_data.append(_span_data)
+                            _span_skip = _span_n - 1
+                            continue
                     if _disk is not None and block.block_hash is not None:
                         try:
                             _selective_reader = getattr(
@@ -9267,6 +9298,13 @@ class BlockAwarePrefixCache:
             )
             return None
         finally:
+            # Block group files are read once per reconstruct; the loaded group
+            # payloads must not outlive it (RAM stays at the model's size).
+            _group_release = getattr(
+                getattr(self.paged_cache, "_disk_store", None), "release_group_cache", None
+            )
+            if callable(_group_release):
+                _group_release()
             _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
             _paged_frugal = bool(
                 getattr(self.paged_cache, "paged_frugal", _disk_only)

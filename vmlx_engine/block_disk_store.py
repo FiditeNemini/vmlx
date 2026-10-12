@@ -226,18 +226,23 @@ def _unpack_validation_tree(node: Any, handle: Any, tensor_names: set[str]) -> A
     return None
 
 
-def _load_block_validation_entries(file_path: Path) -> Optional[List[Tuple]]:
+def _load_block_validation_entries(
+    file_path: Path,
+    member: Optional[Tuple[Dict[str, Any], int]] = None,
+) -> Optional[List[Tuple]]:
     """Read only native cache decision metadata from a safetensors block.
 
     Returned tuples mirror the subset of deserialized cache entries consumed
     by ``prefix_cache`` candidate validators. Tensor bodies are represented by
     shape-only stand-ins; full validation and hydration remain on the owning
-    model worker.
+    model worker. ``member`` = (group meta, ordinal) reads one member of a group
+    file through the same names and shapes a single-block file would expose.
     """
     try:
         from safetensors import safe_open
 
-        with safe_open(str(file_path), framework="numpy") as handle:
+        with safe_open(str(file_path), framework="numpy") as raw_handle:
+            handle = raw_handle if member is None else _GroupMemberHandle(raw_handle, member[0], member[1])
             tensor_names = set(handle.keys())
             meta_key = (
                 "__vmlx_block_meta__"
@@ -528,6 +533,191 @@ def _cache_data_has_tq(cache_data: Any) -> bool:
     return False
 
 
+# ------------------------------------------------------------------ group files (2026-10-12)
+# A long cold store wrote one safetensors file per 64-token block (Naive N0.5: 85 tensors per file), and a restore paid
+# a file open + header check + mx.load + 85-array eval + deserialize + validation per block: 1,252 guarded reads,
+# 2.0-2.5 s for an 80k-token Naive-layout prefix (one whole-prefix file loads in 0.13 s). The writer now coalesces up
+# to ``_group_max()`` consecutive eligible blocks of one batch (same fence, parent chain) into ONE file: every 4-D
+# tensor all members share (same dtype, same non-token dims) is concatenated along its token axis (dim 2), anything
+# else is kept per member under ``b{i}.``. Every member keeps ITS OWN hash path, index row and lifecycle: the group
+# file is hard-linked under each member's path, so deletion, eviction, orphan cleanup and replace-existing stay per
+# block and the filesystem frees the bytes with the last link. Size accounting divides by ``st_nlink`` (a row stores
+# its share). A member read loads the group once (cached by file identity for the next members) and rebuilds exactly
+# the tensor dict a single-block file would hold, so deserialization and validation are unchanged.
+# VMLX_BLOCK_GROUP_FILES=N (default 16; 0 or 1 = one file per block).
+_GROUP_META_KEY = "__vmlx_group_meta__"
+_BLOCK_META_KEY = "__vmlx_block_meta__"
+_GROUP_ELIGIBLE_TAGS = frozenset({"kv", "cache_list", "rotating_kv_pending", "skip"})
+_GROUP_EXCLUDED_KEY_PARTS = ("_scales", "_zeros", "_data", "turboquant", "tq_", "dsv4", "zaya", "minimax",
+                             "cumulative", "_offset", "_max_size", "_keep", "no_state")
+
+
+def _group_max() -> int:
+    try:
+        return max(0, int(os.environ.get("VMLX_BLOCK_GROUP_FILES", "16")))
+    except (TypeError, ValueError):
+        return 16
+
+
+class _GroupMember:
+    """Batch payload for one member of a staged group file (published as a hard link, not a rename)."""
+
+    __slots__ = ("path", "index", "size", "share")
+
+    def __init__(self, path: Path, index: int, size: int, share: int):
+        self.path, self.index, self.size, self.share = path, int(index), int(size), int(share)
+
+
+def _apportioned_size(file_stat) -> int:
+    """Bytes a path accounts for: a hard-linked group file is charged once across its member links."""
+    return max(0, int(file_stat.st_size)) // max(1, int(getattr(file_stat, "st_nlink", 1) or 1))
+
+
+def _numpy_block_group_eligible(tensors: Dict[str, Any]) -> bool:
+    """A frozen NumPy block payload that a group file can hold losslessly: only plain/CacheList KV and pending
+    rotating markers (no rotating windows, cumulative/SSM state, quantized or TQ entries, DSV4/ZAYA/M3)."""
+    meta_arr = tensors.get(_BLOCK_META_KEY)
+    if meta_arr is None or _GROUP_META_KEY in tensors:
+        return False
+    try:
+        import numpy as np
+
+        meta = json.loads(np.asarray(meta_arr).tobytes().decode("utf-8"))
+    except Exception:
+        return False
+    layer_types = meta.get("__layer_types__") if isinstance(meta, dict) else None
+    if not isinstance(layer_types, dict) or not layer_types:
+        return False
+    if any(str(tag) not in _GROUP_ELIGIBLE_TAGS for tag in layer_types.values()):
+        return False
+    for name in tensors:
+        if name == _BLOCK_META_KEY:
+            continue
+        if any(part in name for part in _GROUP_EXCLUDED_KEY_PARTS):
+            return False
+    return True
+
+
+def _numpy_group_tensors(members: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    """Pack frozen NumPy member payloads ``[(hash_hex, tensors), ...]`` into one group tensor dict."""
+    import numpy as np
+
+    first = members[0][1]
+    concat: Dict[str, List[int]] = {}
+    for name, arr in first.items():
+        if name == _BLOCK_META_KEY or getattr(arr, "ndim", 0) != 4:
+            continue
+        shapes_ok = True
+        for _, tensors in members[1:]:
+            other = tensors.get(name)
+            if (other is None or other.ndim != 4 or other.dtype != arr.dtype
+                    or other.shape[:2] != arr.shape[:2] or other.shape[3] != arr.shape[3]):
+                shapes_ok = False
+                break
+        if shapes_ok:
+            offsets = [0]
+            for _, tensors in members:
+                offsets.append(offsets[-1] + int(tensors[name].shape[2]))
+            concat[name] = offsets
+    out: Dict[str, Any] = {}
+    for name, offsets in concat.items():
+        out[name] = np.ascontiguousarray(np.concatenate([tensors[name] for _, tensors in members], axis=2))
+    for i, (_, tensors) in enumerate(members):
+        for name, arr in tensors.items():
+            if name not in concat:
+                out[f"b{i}.{name}"] = arr
+    group_meta = {"version": 1, "members": [h for h, _ in members], "concat": concat, "axis": 2}
+    out[_GROUP_META_KEY] = np.frombuffer(json.dumps(group_meta, sort_keys=True).encode("utf-8"), dtype=np.uint8).copy()
+    return out
+
+
+def _decode_group_meta(arr) -> Optional[Dict[str, Any]]:
+    try:
+        import numpy as np
+
+        meta = json.loads(np.asarray(arr).tobytes().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(meta, dict) or meta.get("version") != 1 or not isinstance(meta.get("members"), list):
+        return None
+    if not isinstance(meta.get("concat"), dict) or int(meta.get("axis", 2)) != 2:
+        return None
+    return meta
+
+
+def _group_member_keys(group: Dict[str, Any], n_members: int) -> List[List[Tuple[str, str]]]:
+    """Per member: [(name in the member's own dict, name in the group)] for the ``b{i}.`` entries (built once)."""
+    keys: List[List[Tuple[str, str]]] = [[] for _ in range(n_members)]
+    for name in group:
+        if name.startswith("b") and "." in name:
+            head, _, short = name.partition(".")
+            try:
+                i = int(head[1:])
+            except ValueError:
+                continue
+            if 0 <= i < n_members:
+                keys[i].append((short, name))
+    return keys
+
+
+def _group_member_view(
+    group: Dict[str, Any],
+    group_meta: Dict[str, Any],
+    index: int,
+    member_keys: Optional[List[List[Tuple[str, str]]]] = None,
+) -> Dict[str, Any]:
+    """The tensor dict of member ``index``: concatenated slots sliced along dim 2 (views), ``b{index}.`` keys
+    unprefixed. Exactly the mapping a single-block file of that member would load."""
+    view: Dict[str, Any] = {}
+    for name, offsets in group_meta["concat"].items():
+        lo, hi = int(offsets[index]), int(offsets[index + 1])
+        view[name] = group[name][:, :, lo:hi, :]
+    if member_keys is None:
+        member_keys = _group_member_keys(group, len(group_meta["members"]))
+    for short, name in member_keys[index]:
+        view[short] = group[name]
+    return view
+
+
+class _GroupMemberHandle:
+    """safe_open-like view of one group member for header-only readers (keys / get_tensor / get_slice)."""
+
+    def __init__(self, handle, group_meta: Dict[str, Any], index: int):
+        self._h, self._meta, self._i = handle, group_meta, int(index)
+        prefix = f"b{self._i}."
+        self._names = {name: name for name in group_meta["concat"]}
+        for name in handle.keys():
+            if name.startswith(prefix):
+                self._names[name[len(prefix):]] = name
+
+    def keys(self):
+        return list(self._names)
+
+    def get_tensor(self, name):
+        arr = self._h.get_tensor(self._names[name])
+        offsets = self._meta["concat"].get(name)
+        if offsets is not None:
+            arr = arr[:, :, int(offsets[self._i]):int(offsets[self._i + 1]), :]
+        return arr
+
+    def get_slice(self, name):
+        handle, real = self._h, self._names[name]
+        offsets = self._meta["concat"].get(name)
+        index = self._i
+
+        class _Slice:
+            def get_dtype(self_inner):
+                return handle.get_slice(real).get_dtype()
+
+            def get_shape(self_inner):
+                shape = list(handle.get_slice(real).get_shape())
+                if offsets is not None:
+                    shape[2] = int(offsets[index + 1]) - int(offsets[index])
+                return shape
+
+        return _Slice()
+
+
 def _restore_tq_block_entry(
     data: Dict[str, Any],
     tensor_prefix: str,
@@ -765,6 +955,18 @@ class BlockDiskStore:
         # the identity and the file is checked again.
         self._validation_entries_memo: "OrderedDict[str, Tuple[Tuple[int, int, int, int], List[Tuple]]]" = OrderedDict()
         self._validation_entries_max = 4096
+        # Group files (see _group_max): the loaded, evaluated group payload of the most recent group files, keyed by
+        # file identity (every member link shares the inode), so a reconstruct reads each group once. Model thread
+        # only; dropped by release_group_cache() after each reconstruct and at idle (RAM stays at the model's size).
+        self._group_cache: "OrderedDict[Tuple[int, int, int, int], Tuple[Dict[str, Any], Dict[str, Any]]]" = OrderedDict()
+        self._group_cache_max = 2
+        self._group_header_ok: Dict[Tuple[int, int, int, int], bool] = {}
+        self._group_meta_only: "OrderedDict[Tuple[int, int, int, int], Tuple[Dict[str, Any], Dict[str, int]]]" = OrderedDict()
+        self._group_touch_times: Dict[Tuple[int, int, int, int], float] = {}
+        self._group_staged_paths: List[Path] = []
+        self.group_files_written = 0
+        self.group_members_written = 0
+        self.group_member_reads = 0
         # LRU touches (one per block read) are recorded here and applied by the
         # background writer in one transaction (see _queue_access_update).
         self._access_pending: Dict[str, List[float]] = {}
@@ -1031,6 +1233,9 @@ class BlockDiskStore:
                     "ALTER TABLE blocks ADD COLUMN ancestry_known "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
+            if "group_size" not in columns:
+                # NULL = one file per block; N = this row's file is a hard link to an N-member group file.
+                conn.execute("ALTER TABLE blocks ADD COLUMN group_size INTEGER")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_blocks_lru ON blocks(last_accessed ASC)"
             )
@@ -1339,18 +1544,30 @@ class BlockDiskStore:
         if not hashes:
             return 0
         advised = 0
+        advised_inodes: set = set()
         for start in range(0, len(hashes), 500):
             chunk = hashes[start : start + 500]
             try:
                 rows = self._read_conn.execute(
-                    "SELECT file_name FROM blocks WHERE block_hash IN (%s)"
+                    "SELECT file_name, group_size FROM blocks WHERE block_hash IN (%s)"
                     % ",".join("?" * len(chunk)),
                     chunk,
                 ).fetchall()
             except sqlite3.Error:
                 return advised
-            for (file_name,) in rows:
-                if _advise_file_read(self.cache_dir / file_name):
+            for file_name, group_size in rows:
+                path = self.cache_dir / file_name
+                if group_size and int(group_size) > 1:
+                    # members of one group file share an inode: advise it once
+                    try:
+                        st = os.stat(path)
+                    except OSError:
+                        continue
+                    inode = (st.st_dev, st.st_ino)
+                    if inode in advised_inodes:
+                        continue
+                    advised_inodes.add(inode)
+                if _advise_file_read(path):
                     advised += 1
         return advised
 
@@ -1373,7 +1590,7 @@ class BlockDiskStore:
                 return None
             hash_hex = block_hash.hex()
             row, _ok = self._query_index_row(
-                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                "SELECT file_name, group_size FROM blocks WHERE block_hash = ?",
                 (hash_hex,),
             )
             if row is None:
@@ -1381,6 +1598,7 @@ class BlockDiskStore:
                     self.validation_metadata_read_failures += 1
                 return None
             file_path = self.cache_dir / row[0]
+            group_size = int(row[1] or 0) if len(row) > 1 else 0
             try:
                 identity = _payload_identity(file_path)
             except OSError:
@@ -1397,16 +1615,15 @@ class BlockDiskStore:
             if entries is not None:
                 with self._stats_lock:
                     self.validation_metadata_reads += 1
-                try:
-                    os.utime(file_path, None)
-                except OSError:
-                    pass
+                self._touch_payload(file_path, identity, group_size)
                 self._queue_access_update(hash_hex)
                 return entries
             try:
                 from .cache_record_validator import reject_safetensors_or_warn
 
-                if not reject_safetensors_or_warn(
+                with self._payload_check_lock:
+                    header_known_ok = group_size > 1 and bool(self._group_header_ok.get(identity))
+                if not header_known_ok and not reject_safetensors_or_warn(
                     str(file_path),
                     expected_num_layers=getattr(self, "_expected_num_layers", None),
                     source=f"L2-validation-metadata:{hash_hex[:12]}",
@@ -1421,7 +1638,18 @@ class BlockDiskStore:
                 with self._stats_lock:
                     self.validation_metadata_read_failures += 1
                 return None
-            entries = _load_block_validation_entries(file_path)
+            member = None
+            if group_size > 1:
+                with self._payload_check_lock:
+                    self._group_header_ok[identity] = True
+                found = self._group_meta_for(file_path, identity)
+                index = None if found is None else found[1].get(hash_hex)
+                if index is None:
+                    with self._stats_lock:
+                        self.validation_metadata_read_failures += 1
+                    return None
+                member = (found[0], index)
+            entries = _load_block_validation_entries(file_path, member)
             if entries is None:
                 with self._stats_lock:
                     self.validation_metadata_read_failures += 1
@@ -1434,10 +1662,7 @@ class BlockDiskStore:
                     memo.popitem(last=False)
             with self._stats_lock:
                 self.validation_metadata_reads += 1
-            try:
-                os.utime(file_path, None)
-            except OSError:
-                pass
+            self._touch_payload(file_path, identity, group_size)
             self._queue_access_update(hash_hex)
             return entries
 
@@ -1464,6 +1689,201 @@ class BlockDiskStore:
                 block_hash,
                 rotating_target_offset=rotating_target_offset,
             )
+
+    def read_group_span_for_reconstruction(
+        self,
+        block_hashes: List[bytes],
+    ) -> Optional[Tuple[List[Tuple], int]]:
+        """Read a run of reconstruction blocks that are consecutive members of ONE group file as one payload.
+
+        ``block_hashes`` are the next blocks of the table, in order. Returns ``(cache_data, n)`` covering the first
+        ``n >= 2`` of them (KV entries span all n blocks along the token axis; pending markers as in the last member),
+        or None when the first block is not a group member or the span would be shorter than 2 -- the caller then
+        reads per block. Request-local and transient, like ``read_block_for_reconstruction``. One deserialize, one
+        validation, one inode touch for the span instead of one of each per 64-token block.
+        """
+        if not block_hashes or len(block_hashes) < 2:
+            return None
+        executor = getattr(self, "_load_executor", None)
+        prefix = getattr(self, "_load_worker_prefix", "llm-worker")
+        if executor is None or threading.current_thread().name.startswith(prefix):
+            return self._read_group_span_impl(list(block_hashes))
+        try:
+            return executor.submit(self._read_group_span_impl, list(block_hashes)).result()
+        except Exception as exc:
+            logger.warning("Group span L2 worker-owned load failed; reading per block: %s", exc)
+            return None
+
+    def _read_group_span_impl(self, block_hashes: List[bytes]) -> Optional[Tuple[List[Tuple], int]]:
+        if not HAS_MLX:
+            return None
+        with self.global_budget.mutation_guard() as locked:
+            if not locked:
+                return None
+            try:
+                return self._read_group_span_guarded(block_hashes)
+            except Exception as exc:  # noqa: BLE001 - the per-block path re-reads and classifies failures
+                logger.debug("Group span read fell back to per-block reads: %s", exc)
+                return None
+
+    def _read_group_span_guarded(self, block_hashes: List[bytes]) -> Optional[Tuple[List[Tuple], int]]:
+        import numpy as np
+
+        first_hex = bytes(block_hashes[0]).hex()
+        row, _ok = self._query_index_row(
+            "SELECT file_name, dtype, group_size FROM blocks WHERE block_hash = ?",
+            (first_hex,),
+        )
+        if row is None or int(row[2] or 0) <= 1:
+            return None
+        file_name, dtype, _group_size = row
+        file_path = self.cache_dir / file_name
+        identity = _payload_identity(file_path)
+        with self._payload_check_lock:
+            header_ok = bool(self._group_header_ok.get(identity))
+        if not header_ok:
+            from .cache_record_validator import reject_safetensors_or_warn
+
+            if not reject_safetensors_or_warn(
+                str(file_path),
+                expected_num_layers=getattr(self, "_expected_num_layers", None),
+                source=f"L2-disk-group-header:{first_hex[:12]}",
+                delete_on_reject=False,
+            ):
+                return None
+            with self._payload_check_lock:
+                self._group_header_ok[identity] = True
+        self._group_member_data(file_path, identity, first_hex)      # loads + caches the group
+        group, group_meta, ordinals, member_keys = self._group_cache[identity]
+        members = group_meta["members"]
+        start = ordinals[first_hex]
+        n = 1
+        while n < len(block_hashes) and start + n < len(members) and bytes(block_hashes[n]).hex() == members[start + n]:
+            n += 1
+        if n < 2:
+            return None
+        # Every member of the span must still be indexed AS this group (a replaced or cleaned block is not used).
+        span_hex = [bytes(h).hex() for h in block_hashes[:n]]
+        placeholders = ",".join("?" for _ in span_hex)
+        rows = self._read_conn.execute(
+            f"SELECT block_hash, file_name, dtype, group_size FROM blocks WHERE block_hash IN ({placeholders})",
+            span_hex,
+        ).fetchall()
+        by_hash = {str(r[0]): r for r in rows}
+        # (Content-addressed and never replaced into a group: a member row that still says group_size > 1 with
+        # the same dtype is this block's group record; its bytes in this group file are its payload.)
+        ok = 0
+        for h in span_hex:
+            r = by_hash.get(h)
+            if r is None or int(r[3] or 0) <= 1 or r[2] != dtype:
+                break
+            ok += 1
+        n = ok
+        if n < 2:
+            return None
+        # Identical block metadata across the span (same layer tags / dtypes); shrink to the identical prefix.
+        meta0 = np.asarray(group[f"b{start}.{_BLOCK_META_KEY}"]).tobytes()
+        same = 1
+        while same < n and np.asarray(group[f"b{start + same}.{_BLOCK_META_KEY}"]).tobytes() == meta0:
+            same += 1
+        n = same
+        if n < 2:
+            return None
+        last = start + n - 1
+        span: Dict[str, Any] = {}
+        for name, offsets in group_meta["concat"].items():
+            span[name] = group[name][:, :, int(offsets[start]):int(offsets[start + n]), :]
+        for short, full in member_keys[last]:
+            arr = group[full]
+            if short != _BLOCK_META_KEY and short not in span and int(getattr(arr, "size", 0) or 0) > 64:
+                return None                   # a per-block tensor that cannot span blocks: read per block
+            span[short] = arr
+        cache_data = _deserialize_block(span, dtype)
+        from .cache_record_validator import reject_or_warn
+
+        if not reject_or_warn(
+            cache_data,
+            expected_num_layers=getattr(self, "_expected_num_layers", None),
+            source=f"L2-disk-group-span:{first_hex[:12]}x{n}",
+        ):
+            return None
+        mx.eval(*span.values())
+        self._touch_payload(file_path, identity, 2)
+        with self._stats_lock:
+            self.disk_hits += n
+            self.group_span_reads = getattr(self, "group_span_reads", 0) + 1
+            self.group_span_blocks = getattr(self, "group_span_blocks", 0) + n
+        for h in span_hex[:n]:
+            self._queue_access_update(h)
+        return cache_data, n
+
+    def _group_member_data(self, file_path: Path, identity, hash_hex: str) -> Dict[str, Any]:
+        """Member ``hash_hex``'s tensor dict from its group file, loading the group once per file identity."""
+        entry = self._group_cache.get(identity)
+        if entry is None:
+            group = mx.load(str(file_path))
+            group_meta = _decode_group_meta(group.pop(_GROUP_META_KEY, None))
+            if group_meta is None:
+                raise ValueError("group file has no valid group metadata")
+            # One read for every member; lazily loaded arrays would keep the file's
+            # reader alive across the whole reconstruct (descriptor pressure).
+            mx.eval(*group.values())
+            ordinals = {str(h): i for i, h in enumerate(group_meta["members"])}
+            entry = (group, group_meta, ordinals, _group_member_keys(group, len(group_meta["members"])))
+            self._group_cache[identity] = entry
+            while len(self._group_cache) > self._group_cache_max:
+                self._group_cache.popitem(last=False)
+        else:
+            self._group_cache.move_to_end(identity)
+        group, group_meta, ordinals, member_keys = entry
+        index = ordinals.get(hash_hex)
+        if index is None:
+            raise ValueError("block is not a member of its group file")
+        with self._stats_lock:
+            self.group_member_reads += 1
+        return _group_member_view(group, group_meta, index, member_keys)
+
+    def _touch_payload(self, file_path: Path, identity, group_size: int) -> None:
+        """mtime = the cross-process LRU signal. A group file's links share one inode, and utime on a
+        many-linked APFS inode costs ~0.6 ms (vs ~0.04 ms): touch each group inode at most once a second."""
+        if group_size > 1:
+            now = time.monotonic()
+            last = self._group_touch_times.get(identity)
+            if last is not None and now - last < 1.0:
+                return
+            self._group_touch_times[identity] = now
+            if len(self._group_touch_times) > 4096:
+                self._group_touch_times.clear()
+        try:
+            os.utime(file_path, None)
+        except OSError:
+            pass
+
+    def release_group_cache(self) -> None:
+        """Drop the loaded group payloads (after a reconstruct, and at idle)."""
+        self._group_cache.clear()
+
+    def _group_meta_for(self, file_path: Path, identity):
+        """(group meta, hash -> ordinal) of a group file, header-only and cached per file identity."""
+        entry = self._group_cache.get(identity)
+        if entry is not None:
+            return entry[1], entry[2]
+        cached = self._group_meta_only.get(identity)
+        if cached is None:
+            try:
+                from safetensors import safe_open
+
+                with safe_open(str(file_path), framework="numpy") as handle:
+                    group_meta = _decode_group_meta(handle.get_tensor(_GROUP_META_KEY))
+            except Exception:
+                return None
+            if group_meta is None:
+                return None
+            cached = (group_meta, {str(h): i for i, h in enumerate(group_meta["members"])})
+            self._group_meta_only[identity] = cached
+            while len(self._group_meta_only) > 512:
+                self._group_meta_only.popitem(last=False)
+        return cached
 
     def _read_block_impl_guarded(
         self,
@@ -1492,7 +1912,7 @@ class BlockDiskStore:
         # Connection might be stale after a writer vacuum — reconnect once, and
         # degrade to a miss rather than raising if the reconnect also fails.
         row, _ok = self._query_index_row(
-            "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
+            "SELECT file_name, dtype, group_size FROM blocks WHERE block_hash = ?",
             (hash_hex,),
         )
 
@@ -1502,7 +1922,8 @@ class BlockDiskStore:
                 self._note_miss("absent")
             return None
 
-        file_name, dtype = row
+        file_name, dtype, group_size = row
+        group_size = int(group_size or 0)
 
         file_path = self.cache_dir / file_name
 
@@ -1537,10 +1958,13 @@ class BlockDiskStore:
                 reject_or_warn = None
             with self._payload_check_lock:
                 memo = self._payload_check_memo.get(hash_hex)
+                group_header_ok = (
+                    self._group_header_ok.get(identity) if group_size > 1 else None
+                )
             if memo is not None and memo[0] != identity:
                 memo = None
             if reject_safetensors_or_warn is not None and not (
-                memo is not None and memo[1]
+                (memo is not None and memo[1]) or group_header_ok
             ):
                 if not reject_safetensors_or_warn(
                     str(file_path),
@@ -1572,9 +1996,18 @@ class BlockDiskStore:
                         self._note_miss("validation")
                     return None
 
+            if group_size > 1:
+                # Header checked once per group file (its members share it).
+                with self._payload_check_lock:
+                    if len(self._group_header_ok) > 4096:
+                        self._group_header_ok.clear()
+                    self._group_header_ok[identity] = True
             omitted_rotating_layers: set[int] = set()
             selective_payload = None
             rotating_offsets = memo[2] if memo is not None else None
+            if group_size > 1:
+                # Members never hold rotating windows (_numpy_block_group_eligible).
+                rotating_offsets = {}
             if rotating_target_offset is not None and not (
                 # Known windows all at the target offset (or no rotating layer
                 # at all): the selective reader would omit nothing and return
@@ -1593,7 +2026,9 @@ class BlockDiskStore:
                 )
                 if "rotating_offsets" in probe:
                     rotating_offsets = probe["rotating_offsets"]
-            if selective_payload is None:
+            if group_size > 1:
+                data = self._group_member_data(file_path, identity, hash_hex)
+            elif selective_payload is None:
                 data = mx.load(str(file_path))
             else:
                 data, omitted_rotating_layers = selective_payload
@@ -1662,10 +2097,7 @@ class BlockDiskStore:
             # File mtime is the non-droppable cross-process LRU signal.  The
             # SQLite update remains asynchronous for latency, but a full queue
             # can no longer make a just-read block appear old to global trim.
-            try:
-                os.utime(file_path, None)
-            except OSError:
-                pass
+            self._touch_payload(file_path, identity, group_size)
             # Queue access metadata update to background (non-blocking)
             self._queue_access_update(hash_hex)
             if omitted_rotating_layers:
@@ -3362,6 +3794,95 @@ class BlockDiskStore:
             result.compliant,
         )
 
+    def _stage_block_groups(self, batch: List[Tuple[Any, ...]]) -> None:
+        """Writer thread: stage each chain of >= 2 eligible queued blocks (same fence and dtype, every parent the
+        previous member, no replace) as ONE group file; members become ``_GroupMember`` payloads in place."""
+        group_max = _group_max()
+        if group_max < 2:
+            return
+        chain: List[int] = []
+
+        def flush() -> None:
+            if len(chain) >= 2:
+                self._stage_one_group(batch, list(chain))
+            chain.clear()
+
+        for idx, item in enumerate(batch):
+            eligible = (
+                bool(item)
+                and item[0] == "__numpy_block__"
+                and len(item) >= 10
+                and not bool(item[9])
+                and _numpy_block_group_eligible(item[2])
+            )
+            if not eligible:
+                flush()
+                continue
+            if chain:
+                prev = batch[chain[-1]]
+                if (
+                    len(chain) >= group_max
+                    or item[6] is None
+                    or bytes(item[6]) != bytes(prev[1])
+                    or item[7] != prev[7]
+                    or item[3] != prev[3]
+                ):
+                    flush()
+            chain.append(idx)
+        flush()
+
+    def _stage_one_group(self, batch: List[Tuple[Any, ...]], idxs: List[int]) -> None:
+        members = [(bytes(batch[i][1]).hex(), batch[i][2]) for i in idxs]
+        try:
+            group = _numpy_group_tensors(members)
+            staged = self._stage_numpy_safetensors_file(batch[idxs[0]][1], group)
+            size = max(1, int(staged.stat().st_size))
+        except Exception as exc:  # noqa: BLE001 - fall back to one file per block
+            logger.warning("Block group staging failed (%d blocks): %s; writing them one per file", len(idxs), exc)
+            return
+        finally:
+            group = None
+            members = None
+        self._group_staged_paths.append(staged)
+        k = len(idxs)
+        share = size // k
+        for n, i in enumerate(idxs):
+            (
+                _,
+                block_hash,
+                _tensors,
+                dtype,
+                num_layers,
+                token_count,
+                parent_hash,
+                fence_id,
+                reserved_bytes,
+                replace_existing,
+            ) = batch[i]
+            member_share = share + (size - share * k if n == k - 1 else 0)
+            if not self._resize_pending_write_reservation(reserved_bytes, member_share):
+                batch[i] = None
+                self._write_fence_completion(fence_id, failed=True)
+                with self._stats_lock:
+                    self._offthread_serialization_failures += 1
+                continue
+            batch[i] = (
+                block_hash,
+                _GroupMember(staged, n, k, member_share),
+                dtype,
+                num_layers,
+                token_count,
+                parent_hash,
+                fence_id,
+                member_share,
+                bool(replace_existing),
+            )
+            with self._stats_lock:
+                self._offthread_serializations_completed += 1
+        with self._stats_lock:
+            self.group_files_written += 1
+            self.group_members_written += k
+
     def _process_write_batch(
         self,
         write_conn: sqlite3.Connection,
@@ -3378,6 +3899,10 @@ class BlockDiskStore:
             # waiters also observe _pending_write_items, but /health must not
             # report an idle writer while it is encoding a large page.
             self._write_inflight += original_batch_count
+
+        # Group files first (see _group_max): chains of eligible queued blocks
+        # become one staged file whose members publish as hard links below.
+        self._stage_block_groups(batch)
 
         # Encode in place. The caller owns this exact list, so replacing each
         # NumPy item immediately is what releases its frozen native buffers.
@@ -3659,6 +4184,8 @@ class BlockDiskStore:
                         if reserved_now:
                             if isinstance(payload, Path):
                                 payload.unlink(missing_ok=True)
+                            # a _GroupMember's staged group file is shared; it is
+                            # unlinked once at batch end (its members keep links)
                             batch[idx] = None
                             self._release_pending_write_bytes(reserved_now)
                         # Drop loop references before eviction/fence accounting.
@@ -3884,6 +4411,11 @@ class BlockDiskStore:
                     and isinstance(pending_item[1], Path)
                 ):
                     pending_item[1].unlink(missing_ok=True)
+            # Staged group files: every member that published holds its own
+            # hard link now, so the staging name goes (the bytes stay until the
+            # last member link is removed); unpublished groups are freed here.
+            while self._group_staged_paths:
+                self._group_staged_paths.pop().unlink(missing_ok=True)
             # Blocks the write loop settled already popped their entries; this
             # covers early returns (publication lock unavailable) and batch
             # exceptions that skipped the per-item settlement.
@@ -4082,9 +4614,15 @@ class BlockDiskStore:
         )
 
     @staticmethod
-    def _write_payload_file(path: Path, payload: bytes | Path) -> None:
+    def _write_payload_file(path: Path, payload: "bytes | Path | _GroupMember") -> None:
         """Durably stage an immutable payload (writer thread only)."""
 
+        if isinstance(payload, _GroupMember):
+            # The staged group file was streamed and fsynced once; each member
+            # publishes a hard link to it under its own name. The caller
+            # performs the atomic rename and directory fsync as for a block.
+            os.link(str(payload.path), str(path))
+            return
         if isinstance(payload, Path):
             # ``payload`` was already streamed and fsynced. Move it without
             # materializing any tensor-data bytes image. The caller still
@@ -4154,7 +4692,7 @@ class BlockDiskStore:
         self,
         conn: sqlite3.Connection,
         block_hash: bytes,
-        payload: bytes | Path,
+        payload: "bytes | Path | _GroupMember",
         dtype: str,
         num_layers: int,
         token_count: int,
@@ -4243,7 +4781,9 @@ class BlockDiskStore:
             raise
 
         file_stat = file_path.stat()
-        file_size = file_stat.st_size
+        # A group member accounts for its share of the shared group file.
+        file_size = payload.share if isinstance(payload, _GroupMember) else file_stat.st_size
+        group_size = payload.size if isinstance(payload, _GroupMember) else None
         now = time.time()
 
         # A new row and its eviction pin become visible in one transaction.
@@ -4255,7 +4795,7 @@ class BlockDiskStore:
                 """UPDATE blocks
                    SET parent_hash = ?, ancestry_known = 1, file_name = ?,
                        num_tokens = ?, num_layers = ?, dtype = ?, file_size = ?,
-                       created_at = ?, last_accessed = ?
+                       created_at = ?, last_accessed = ?, group_size = ?
                    WHERE block_hash = ?""",
                 (
                     parent_hex,
@@ -4266,6 +4806,7 @@ class BlockDiskStore:
                     file_size,
                     now,
                     now,
+                    group_size,
                     hash_hex,
                 ),
             )
@@ -4275,8 +4816,8 @@ class BlockDiskStore:
                     """INSERT OR IGNORE INTO blocks
                        (block_hash, parent_hash, ancestry_known,
                         file_name, num_tokens, num_layers, dtype,
-                        file_size, created_at, last_accessed)
-                       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)""",
+                        file_size, created_at, last_accessed, group_size)
+                       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         hash_hex,
                         parent_hex,
@@ -4287,6 +4828,7 @@ class BlockDiskStore:
                         file_size,
                         now,
                         now,
+                        group_size,
                     ),
                 )
                 if pin_new:

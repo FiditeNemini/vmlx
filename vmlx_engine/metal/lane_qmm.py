@@ -414,7 +414,12 @@ class LaneQuantizedLinear(_nn.QuantizedLinear):
             y = lane_matmul(x, self["weight"], self._lane_sbt, bits=self.bits, group=self.group_size, tiled=tiled)
         else:
             weight = untile_weight(self["weight"], bits=self.bits, group=self.group_size) if tiled else self["weight"]
-            y = mx.quantized_matmul(x, weight, self["scales"], self["biases"], transpose=True,
+            if "scales" in self:
+                scales, biases = self["scales"], self["biases"]
+            else:                                      # dropped at install: rebuilt per call from the packed pairs
+                sbt = self._lane_sbt
+                scales, biases = mx.contiguous(sbt[..., 0].T), mx.contiguous(sbt[..., 1].T)
+            y = mx.quantized_matmul(x, weight, scales, biases, transpose=True,
                                     group_size=self.group_size, bits=self.bits)
         if "bias" in self:
             y = y + self["bias"]
@@ -458,6 +463,14 @@ def install(model, *, tile: bool = True) -> dict:
         object.__setattr__(module, "_lane_sbt", sbt)
         built.append(sbt)
         pending += sbt.nbytes
+        if module["biases"].dtype == mx.bfloat16 and os.environ.get("VMLX_LANE_KEEP_SCALES", "0") != "1":
+            # The packed pairs hold exactly the bf16 scales and biases, so the originals would be a second resident
+            # copy (Qwen3.8 27B JANG_4D: 1.42 GiB, JANGH2: 0.42 GiB) that only the > MAX_ROWS prefill fallback reads.
+            # SSD-only caching keeps RAM at the model's size (Eric 2026-10-12): drop them; the fallback rebuilds them
+            # per call (transient, ~1/16 of the weight bytes) and stays bit-identical. Non-bf16 biases are kept (the
+            # packed pairs are a bf16 rounding of them).
+            module.pop("scales")
+            module.pop("biases")
         w = module["weight"]
         if tile and int(w.shape[0]) % NT == 0 and (module.bits == 4 or module.group_size == 64):
             module.weight = tile_weight(w, bits=module.bits, group=module.group_size)

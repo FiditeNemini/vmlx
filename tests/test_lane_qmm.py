@@ -58,7 +58,10 @@ def test_install_routes_only_plain_affine_layers_and_wide_calls_stay_mlx_exact()
     counts = L.install(m)
     assert counts["lane"] == 1 and counts["tiled"] == 1
     assert isinstance(m.a, L.LaneQuantizedLinear) and type(m.f) is nn.Linear
-    assert mx.array_equal(m.a(wide), ref_wide)                 # untiled on the fly, MLX's own kernel
+    # the packed pairs are the only resident copy of the bf16 scales/biases (RAM at the model's size)
+    assert "scales" not in m.a and "biases" not in m.a
+    assert {k for k, _ in nn.utils.tree_flatten(m.a.parameters())} == {"weight", "bias"}
+    assert mx.array_equal(m.a(wide), ref_wide)                 # untiled + scales rebuilt on the fly, MLX's kernel
     y = m.a(x)
     assert y.shape == (1, 6, 128)
     assert L.install(m)["lane"] == 0                           # idempotent
@@ -82,3 +85,24 @@ def test_install_keeps_vocabulary_heads_on_mlx(monkeypatch):
     monkeypatch.setenv("VMLX_LANE_VOCAB_HEAD", "1")
     m2 = model()
     assert L.install(m2)["lane"] == 2
+
+
+def test_install_keeps_non_bf16_biases_and_the_keep_switch(monkeypatch):
+    """Only an exact copy is dropped: fp32 biases (packed pairs round them to bf16) keep the originals for the
+    MLX-exact wide fallback; VMLX_LANE_KEEP_SCALES=1 keeps them for A/B."""
+    def layer(bias_dtype):
+        m = nn.Sequential(nn.Linear(256, 128, bias=False))
+        nn.quantize(m, group_size=64, bits=4)
+        m.layers[0].scales = m.layers[0].scales.astype(mx.bfloat16)
+        m.layers[0].biases = m.layers[0].biases.astype(bias_dtype)
+        return m
+    wide = mx.random.normal((1, 200, 256)).astype(mx.bfloat16)
+    m = layer(mx.float32)
+    ref = m.layers[0](wide)
+    L.install(m)
+    assert "scales" in m.layers[0] and "biases" in m.layers[0]
+    assert mx.array_equal(m.layers[0](wide), ref)
+    monkeypatch.setenv("VMLX_LANE_KEEP_SCALES", "1")
+    m2 = layer(mx.bfloat16)
+    L.install(m2)
+    assert "scales" in m2.layers[0]

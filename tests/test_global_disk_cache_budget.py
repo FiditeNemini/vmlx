@@ -1127,9 +1127,44 @@ def test_writer_idle_branch_runs_the_deferred_rescan():
         assert "def _block_store_activity_probe(self) -> bool:" in src_mod, module.__name__
 
 
+def test_reconcile_after_an_eviction_needs_no_second_scan(tmp_path, monkeypatch):
+    """Something evicted -> still ONE root scan: under the root-exclusive lock the first scan's total minus the bytes
+    each eviction freed is the physical state (the second walk cost ~0.9 s of a cap-crossing reconcile, inline on the
+    publishing writer). VMLX_BUDGET_RESCAN_AFTER_EVICT=1 restores the re-measure; both report the same bytes."""
+    from vmlx_engine import global_disk_cache_budget as budget_module
+
+    def run(env, root):
+        if env:
+            monkeypatch.setenv("VMLX_BUDGET_RESCAN_AFTER_EVICT", "1")
+        else:
+            monkeypatch.delenv("VMLX_BUDGET_RESCAN_AFTER_EVICT", raising=False)
+        now = time.time()
+        _indexed_block(root / "aaaaaaaaaaaa", "aa-old", size=64_000, accessed=now - 100)
+        _indexed_block(root / "bbbbbbbbbbbb", "bb-new", size=64_000, accessed=now)
+        before = _physical_total(root)
+        budget = budget_module.GlobalDiskCacheBudget(root, before - 32_000, orphan_grace_seconds=0, reconcile_interval_seconds=3600)
+        try:
+            scans = []
+            real_scan = budget._scan_locked
+            monkeypatch.setattr(budget, "_scan_locked", lambda **kw: (scans.append(1), real_scan(**kw))[1])
+            result = budget.enforce(force=True)
+            assert result.scan_performed is True and result.evicted_entries >= 1
+            measured = budget.enforce(force=True)            # a later full scan re-measures the root
+        finally:
+            budget.close()
+        return len(scans), result.bytes_after, measured.bytes_before
+
+    scans_new, after_new, measured_new = run(False, tmp_path / "new")
+    scans_old, after_old, measured_old = run(True, tmp_path / "old")
+    assert scans_new == 2 and scans_old == 3            # (reconcile + the later re-measure) vs (+ the rescan)
+    assert after_new == after_old == measured_new == measured_old
+
+
 def test_reconcile_rescans_only_after_an_eviction(tmp_path, monkeypatch):
     """Nothing evicted -> one root scan (the first scan's totals stand under the
-    exclusive lock). Something evicted -> a second scan re-measures."""
+    exclusive lock). Something evicted -> a second scan re-measures (only with
+    VMLX_BUDGET_RESCAN_AFTER_EVICT=1 since the arithmetic ledger above)."""
+    monkeypatch.setenv("VMLX_BUDGET_RESCAN_AFTER_EVICT", "1")
     from vmlx_engine import global_disk_cache_budget as budget_module
 
     root = tmp_path / "root"

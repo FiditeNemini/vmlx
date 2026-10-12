@@ -2140,9 +2140,17 @@ class GlobalDiskCacheBudget:
                         _conn.close()
         evict_s = time.perf_counter() - evict_started
         rescan_started = time.perf_counter()
-        if evicted_entries:
-            # Physical state changed under the exclusive lock: re-measure.
+        if evicted_entries and os.environ.get("VMLX_BUDGET_RESCAN_AFTER_EVICT", "0") == "1":
+            # Old behaviour (A/B): re-walk every namespace after evicting.
             _, after, protected_after = self._scan_locked(now_ns=time.time_ns())
+        elif evicted_entries:
+            # The root-exclusive lock is still held, so the first scan's total minus the bytes each eviction actually
+            # freed (unlink sizes; a hard-linked group member that is not the inode's last link frees ~0 and is
+            # counted as 1 byte, overestimating usage) is the physical state. The second full walk this replaced cost
+            # ~0.9 s of a ~2.1 s cap-crossing reconcile, inline on the publishing writer and so on the next request's
+            # admission (27B DFlash2: a tool continuation waited 2.0 s). Residual drift (index-database page churn)
+            # is small and the owner's periodic rescan re-measures it.
+            after, protected_after = total, _protected
         else:
             # Nothing was removed and the root-exclusive lock is still held,
             # so the first scan's totals are the current physical state; a

@@ -466,3 +466,40 @@ def test_prefix_disk_identity_separates_external_drafter_paths(tmp_path):
     for draft in (first, second):
         (draft / "config.json").write_text('{"target_layer_ids":[5,14]}')
     assert GD._bundle_fingerprint(target, first) != GD._bundle_fingerprint(target, second)
+
+
+def test_stable_root_snapshot_restores_the_whole_system_turn(monkeypatch):
+    """A stop at the stable root (end of the system turn, not a 16-boundary) lets a new chat with the same system prefix
+    restore all of it: 21 cached tokens instead of the 16-boundary; tokens equal a cold run."""
+    import vmlx_engine.glm_dflash2 as GD
+    monkeypatch.setattr(GD, "PREFIX_SNAPSHOT_EVERY", 16)
+    model = _target(6)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        system = list(range(5, 26))                                     # 21-token "system turn"
+        pa, pb = system + [70, 71, 72, 73], system + [80, 81, 82, 83, 84, 85]
+        refb, _ = _ar_logits(model, pb, 16)
+        cold = list(generate_dflash2(target, ScriptedDraft(refb, 4), pb, 16, eos=set()))
+        store = GD.PrefixStore(12)
+        refa, _ = _ar_logits(model, pa, 16)
+        list(generate_dflash2(target, ScriptedDraft(refa, 4), pa, 16, eos=set(), prefix_store=store, stable_root=21))
+        assert tuple(system) in store.entries
+        st = SpecStats()
+        got = list(generate_dflash2(target, ScriptedDraft(refb, 4), pb, 16, eos=set(), stats=st, prefix_store=store,
+                                    stable_root=21))
+        assert st.cached_tokens == 21 and got == cold
+    finally:
+        target.close()
+
+
+def test_glm_stable_root_finder():
+    from types import SimpleNamespace
+
+    from vmlx_engine.glm_dflash2 import _glm_stable_root
+
+    tok = SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda t: 7 if t == "<|user|>" else 0)
+    assert _glm_stable_root(tok, [1] * 300 + [7, 2, 3]) == 300
+    assert _glm_stable_root(tok, [1] * 100 + [7]) == 0                # short system turn: 2048 boundaries suffice
+    assert _glm_stable_root(tok, [1] * 300) == 0                      # no user turn
+    bad = SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda t: 0)
+    assert _glm_stable_root(bad, [1] * 300 + [0]) == 0                # unknown token

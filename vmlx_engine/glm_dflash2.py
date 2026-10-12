@@ -728,7 +728,8 @@ class AdaptiveSpec:
 def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int, eos: set, temperature: float = 0.0,
                     top_p: float = 1.0, top_k: int = 0, block_size: int | None = None, prefill_step: int = 2048,
                     stats: SpecStats | None = None, controls=None, adaptive: bool = False,
-                    prefix_store: "PrefixStore | None" = None, key_ids=None, media: dict | None = None):
+                    prefix_store: "PrefixStore | None" = None, key_ids=None, media: dict | None = None,
+                    stable_root: int = 0):
     """Yields (new_tokens, drafted) per cycle: first the token sampled from the prompt (drafted 0), then each verify
     round's accepted drafts + bonus token (drafted = verify width - 1). Upstream dflash loop with GLM verify/rollback.
     controls: optional vmlx_engine.dflash2_sampling.DFlash2SamplingControls (min_p, logit_bias, penalties) applied to
@@ -787,6 +788,10 @@ def _dflash2_rounds(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int,
         st.vision_tower = media is not None and embeds is not None
         while pos < prompt.size:
             end = min(prompt.size, (pos // every + 1) * every) if every else prompt.size
+            # Stable root: also stop (and snapshot) at the end of the system turn (system prompt + tools), so a new
+            # chat with the same system prompt restores all of it, not just the last 2048-token boundary inside it.
+            if every and pos < stable_root < end:
+                end = stable_root
             seg = embeds[:, pos:end] if (embeds is not None and pos < media_end) else None
             logits, h = _prefill(target, prompt[pos:end], cache, prefill_step, hidden_limit, embeds=seg)
             hidden = h if hidden is None else mx.concatenate([hidden, h], axis=1)
@@ -940,12 +945,12 @@ def generate_dflash2(target: GLMDFlashTarget, draft, prompt_ids, max_tokens: int
                      top_p: float = 1.0, block_size: int | None = None, prefill_step: int = 2048,
                      stats: SpecStats | None = None, adaptive: bool = False,
                      prefix_store: "PrefixStore | None" = None, key_ids=None,
-                     media: dict | None = None) -> Iterator[int]:
+                     media: dict | None = None, stable_root: int = 0) -> Iterator[int]:
     """DFlash2 speculative generation as a token iterator. Greedy output == generate_ar's (also with adaptive=True:
     AR bursts and verify rounds both emit the target's argmax)."""
     for new, _ in _dflash2_rounds(target, draft, prompt_ids, max_tokens, eos, temperature, top_p, 0, block_size,
                                   prefill_step, stats, adaptive=adaptive, prefix_store=prefix_store,
-                                  key_ids=key_ids, media=media):
+                                  key_ids=key_ids, media=media, stable_root=stable_root):
         yield from new
 
 
@@ -965,6 +970,23 @@ def is_glm5_next(model) -> bool:
     cfg = getattr(model, "config", None)
     mt = getattr(cfg, "model_type", None) if cfg is not None and not isinstance(cfg, dict) else (cfg or {}).get("model_type")
     return mt == "glm5_next" or getattr(model, "model_type", None) == "glm5_next"
+
+
+def _glm_stable_root(tokenizer, prompt_ids) -> int:
+    """Tokens before the first `<|user|>`: GLM's system turn ([gMASK]<sop><|system|>Reasoning Effort... + the tool
+    block + the system message). A new chat with the same system prompt, tools and effort shares exactly these.
+    0 when the token is unknown, absent, or the root is shorter than 256 tokens (the 2048 boundaries cover it)."""
+    try:
+        uid = tokenizer.convert_tokens_to_ids("<|user|>")
+    except Exception:
+        return 0
+    if not isinstance(uid, int) or uid < 0 or uid == getattr(tokenizer, "unk_token_id", None):
+        return 0
+    try:
+        root = list(prompt_ids).index(uid)
+    except ValueError:
+        return 0
+    return root if root >= 256 else 0
 
 
 def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int, temperature: float, top_p: float = 1.0,
@@ -997,7 +1019,8 @@ def stream_glm_dflash2(model, tokenizer, draft, prompt: str, *, max_tokens: int,
                                         adaptive=os.environ.get("VMLX_GLM_DFLASH2_ADAPTIVE", "1") != "0",
                                         prefix_store=store,
                                         key_ids=media.get("key_tokens") if media is not None else None,
-                                        media=media):
+                                        media=media,
+                                        stable_root=_glm_stable_root(tw, prompt_tokens) if store is not None else 0):
         if n == 0:
             tic = time.perf_counter()
         for t in new:

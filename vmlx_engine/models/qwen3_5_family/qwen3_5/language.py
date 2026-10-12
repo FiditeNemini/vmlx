@@ -473,6 +473,17 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         q = (inv_scale**2) * mx.fast.rms_norm(q, None, norm_eps)
         k = inv_scale * mx.fast.rms_norm(k, None, norm_eps)
 
+        # Opt-in speculative-verify capture (DSpark): the rows' recurrence
+        # inputs, the state they started from and the raw conv window, so a
+        # rejected suffix can be undone by replaying only the accepted rows
+        # (``vmlx_engine.dspark.minicpm_target``). None by default.
+        rollback_sink = getattr(self, "_rollback_sink", None)
+        if rollback_sink is not None:
+            rollback_sink.append(
+                (q, k, v, a, b, state, mask,
+                 mx.concatenate([conv_state, mixed_qkv], axis=1), self.conv_kernel_size)
+            )
+
         fused_update = None
         if self._fused_gdn_gates and not self.training:
             fused_update = qwen35_gated_delta_decode(

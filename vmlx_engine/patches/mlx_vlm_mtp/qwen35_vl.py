@@ -641,6 +641,9 @@ def _patch_gated_delta_net(qlang: Any) -> None:
         n_confirmed: int = 0,
     ):
         batch_size, seq_len, _ = inputs.shape
+        if gdn_sink is None:
+            # Same opt-in capture as the vendored layer (DSpark verify).
+            gdn_sink = getattr(self, "_rollback_sink", None)
 
         project_inputs = getattr(self, "_project_inputs", None)
         if callable(project_inputs):

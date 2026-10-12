@@ -4431,6 +4431,59 @@ _VIDEO_FRAME_FALLBACK_MODEL_TYPES = {
 _NATIVE_VIDEO_FRAME_MODEL_TYPES = {"minicpmv4_7"}
 
 
+_DSPARK_MODEL_TYPES = {"minicpmv4_7"}
+
+
+def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
+    """DSpark drafter for a bundle that declares it, or None.
+
+    Contract: ``jang_config.json["speculative"] = {"method": "dspark",
+    "drafter_path": "dspark"}`` (path relative to the bundle; default
+    ``dspark``) with a drafter directory holding ``config.json`` +
+    ``model.safetensors`` (BF16, or pre-quantized by
+    ``vmlx_engine.dspark.write_quantized_drafter``). ``VMLX_DSPARK=0``
+    disables it. Only text requests use it (see ``_dspark_eligible``).
+    """
+    if os.environ.get("VMLX_DSPARK", "1").strip().lower() in {"0", "false", "off", "no"}:
+        return None
+    root = Path(model_path)
+    try:
+        cfg = json.loads((root / "config.json").read_text())
+    except Exception:
+        return None
+    if str(cfg.get("model_type", "")).lower() not in _DSPARK_MODEL_TYPES:
+        return None
+    stamp_path = root / "jang_config.json"
+    if not stamp_path.is_file():
+        return None
+    spec = (json.loads(stamp_path.read_text()).get("speculative") or {})
+    if str(spec.get("method", "")).lower() != "dspark":
+        return None
+    drafter_dir = root / str(spec.get("drafter_path") or "dspark")
+    if not (drafter_dir / "config.json").is_file():
+        raise FileNotFoundError(f"speculative.method=dspark but {drafter_dir}/config.json is missing")
+    from ..dspark import load_drafter
+    from ..dspark.minicpm_target import MAX_VERIFY_ROWS, MiniCPMDSparkTarget
+
+    target = MiniCPMDSparkTarget(model)
+    drafter = load_drafter(drafter_dir)
+    text_cfg = cfg.get("text_config") or {}
+    dcfg = drafter.cfg
+    if int(dcfg["hidden_size"]) != int(text_cfg.get("hidden_size", -1)):
+        raise ValueError("DSpark drafter hidden_size does not match the target")
+    if int(dcfg["vocab_size"]) > int(text_cfg.get("vocab_size", 0)):
+        raise ValueError("DSpark drafter vocabulary is larger than the target's")
+    if max(drafter.target_layer_ids) >= int(text_cfg.get("num_hidden_layers", 0)):
+        raise ValueError("DSpark drafter taps layers the target does not have")
+    max_draft = max(1, min(int(spec.get("max_draft", MAX_VERIFY_ROWS - 1)), MAX_VERIFY_ROWS - 1))
+    logger.info(
+        "DSpark drafter loaded from %s: block %d, taps %s, max draft %d per round",
+        drafter_dir, drafter.block, drafter.target_layer_ids, max_draft,
+    )
+    return {"target": target, "drafter": drafter, "path": str(drafter_dir), "max_draft": max_draft,
+            "cost_per_row": float(spec.get("cost_per_row", 0.12))}
+
+
 def _video_frames_as_native_clip(frames: list) -> "np.ndarray":
     """(T, H, W, 3) uint8 clip from SimpleEngine's sampled frame files."""
     from PIL import Image
@@ -4728,6 +4781,11 @@ class MLXMultimodalLM:
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("DFlash2 lane matmul not installed: %s", exc)
+            try:
+                self._dspark = _load_dspark_runtime(self.model, resolved_name)
+            except Exception as exc:  # noqa: BLE001
+                self._dspark = None
+                logger.warning("DSpark drafter not loaded for %s: %s", resolved_name, exc)
             self._loaded = True
 
         from .mimo_v26_contract import read_mimo_v26_contract
@@ -6502,6 +6560,14 @@ class MLXMultimodalLM:
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
 
+        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs):
+            final = None
+            text = ""
+            for final in self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs):
+                text += final.text
+            final.text = text
+            return final
+
         # Prefix caching with vision embedding support
         # Following LMCache approach: cache vision embeddings to skip encoder on hit
         from mlx_vlm.models import cache as vlm_cache
@@ -6857,6 +6923,105 @@ class MLXMultimodalLM:
             "salt": digest.hexdigest()[:32],
         }
 
+    def _dspark_eligible(self, images, videos, audio, temperature, kwargs) -> bool:
+        """Text-only requests whose sampling the DSpark loop reproduces exactly."""
+        if getattr(self, "_dspark", None) is None or images or videos or audio:
+            return False
+        from ..metal.row_exact_qmv import row_exact_qmv_requested
+
+        if not row_exact_qmv_requested():
+            # Verify rows would not be bit-equal to decode steps.
+            logger.info("DSpark skipped: row-exact verify is off (VMLX_ROW_EXACT_VERIFY_QMV); AR decode")
+            return False
+        unsupported = []
+        if kwargs.get("logit_bias"):
+            unsupported.append("logit_bias")
+        for name in ("repetition_penalty",):
+            if kwargs.get(name) not in (None, 1.0):
+                unsupported.append(name)
+        for name in ("frequency_penalty", "presence_penalty"):
+            if kwargs.get(name):
+                unsupported.append(name)
+        for name in ("stop", "thinking_budget", "prompt_cache_state"):
+            if kwargs.get(name):
+                unsupported.append(name)
+        if unsupported:
+            logger.info("DSpark skipped for this request (unsupported: %s); AR decode", ",".join(unsupported))
+            return False
+        return True
+
+    def _stream_dspark(self, formatted_prompt: str, max_tokens: int, temperature: float, kwargs: dict):
+        """DSpark generation for a text prompt, streamed as MLLMOutput chunks.
+
+        Tokenization, prefill chunking and stop tokens follow the served
+        mlx-vlm AR path, so greedy output equals AR decoding token for token.
+        """
+        import time as _time
+
+        from mlx_vlm.tokenizer_utils import make_streaming_detokenizer
+
+        from ..dspark import DSparkStats, iter_dspark
+        from ..utils.prefill_step import prefill_step_size
+
+        runtime = self._dspark
+        tokenizer = self.processor.tokenizer if hasattr(self.processor, "tokenizer") else self.processor
+        prompt_ids = list(tokenizer(formatted_prompt, add_special_tokens=True)["input_ids"])
+        criteria = getattr(tokenizer, "stopping_criteria", None)
+        eos = set(getattr(criteria, "eos_token_ids", None) or [])
+        if not eos and getattr(tokenizer, "eos_token_id", None) is not None:
+            eos = {int(tokenizer.eos_token_id)}
+        sampler = None
+        if temperature and float(temperature) > 0:
+            from ..sampling import make_sampler
+
+            sampler = make_sampler(
+                temp=float(temperature),
+                top_p=float(kwargs.get("top_p", 1.0) or 0.0),
+                min_p=float(kwargs.get("min_p", 0.0) or 0.0),
+                top_k=int(kwargs.get("top_k", 0) or 0),
+            )
+        detok = make_streaming_detokenizer(self.processor)
+        detok.reset()
+        stats = DSparkStats()
+        step = int(kwargs.get("prefill_step_size") or prefill_step_size())
+        produced = 0
+        finish = None
+        started = _time.perf_counter()
+        logger.info("DSpark text chat active for %s (prompt %d tokens)", self.model_name, len(prompt_ids))
+        with _MaybeVLMStream():
+            for chunk in iter_dspark(
+                runtime["target"], runtime["drafter"], prompt_ids, int(max_tokens), eos,
+                prefill_step=step, sampler=sampler, max_draft=runtime["max_draft"],
+                cost_per_row=runtime["cost_per_row"], stats=stats,
+            ):
+                for token in chunk:
+                    if token in eos:
+                        # Counted like the AR path, whose usage includes the stop token.
+                        finish = "stop"
+                        produced += 1
+                        break
+                    detok.add_token(token)
+                    produced += 1
+                if finish is None and produced >= int(max_tokens):
+                    finish = "length"
+                if finish is not None:
+                    break
+                yield MLLMOutput(text=detok.last_segment, prompt_tokens=len(prompt_ids), completion_tokens=produced)
+        detok.finalize()
+        elapsed = _time.perf_counter() - started
+        summary = stats.as_dict()
+        spec = {"kind": "dspark", **summary, "generation_tps": summary.get("decode_tok_s")}
+        logger.info(
+            "DSpark generation stats: prompt_tokens=%d output_tokens=%d rounds=%d tokens_per_round=%.3f "
+            "acceptance=%.1f%% decode_tps=%s widths=%s total_s=%.2f finish=%s",
+            len(prompt_ids), produced, stats.rounds, stats.tokens_per_round, 100.0 * stats.acceptance,
+            spec.get("decode_tok_s"), spec.get("widths"), elapsed, finish or "length",
+        )
+        yield MLLMOutput(
+            text=detok.last_segment, finish_reason=finish or "length", prompt_tokens=len(prompt_ids),
+            completion_tokens=produced, spec_stats=spec,
+        )
+
     def stream_chat(
         self,
         messages: list[dict],
@@ -7000,6 +7165,10 @@ class MLXMultimodalLM:
                         all_images = all_images[:_slot_count]
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
+
+        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs):
+            yield from self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs)
+            return
 
         # The server's SimpleEngine uses stream_chat(), not stream_generate().
         # Route DFlash2 requests here before mlx-vlm constructs its ordinary

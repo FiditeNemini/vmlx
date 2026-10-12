@@ -45,3 +45,18 @@ def test_empty_model_path_does_not_scan_working_directory(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     for model_path in ("", "   ", None):
         assert find_bundled_dflash2(model_path) is None
+
+
+def test_text_only_does_not_auto_select_the_bundled_drafter(tmp_path):
+    # GLM-5.3 --text-only: the bundled drafter fell to generic speculative decoding (KDA cache is not trimmable)
+    # and every request failed with HTTP 400.
+    from argparse import Namespace
+
+    from vmlx_engine.cli import _bundled_dflash2_for
+
+    bundle = tmp_path / "GLM-5.3-Flash-JANGHT2.4"
+    _write(bundle / "config.json", {"model_type": "glm5_next"})
+    _write(bundle / "dflash2" / "config.json", {"architectures": ["DFlash2DraftModel"]})
+    assert _bundled_dflash2_for(Namespace(model=str(bundle), force_text_only=False)) == str(bundle / "dflash2")
+    assert _bundled_dflash2_for(Namespace(model=str(bundle), force_text_only=True)) is None
+    assert _bundled_dflash2_for(Namespace(model=str(bundle))) == str(bundle / "dflash2")

@@ -318,6 +318,28 @@ def _speculative_incompatibility_reason(args) -> str | None:
     return None
 
 
+def _bundled_dflash2_for(args, logger=None):
+    """The bundle's own DFlash2 drafter to use by default, or None.
+
+    Not with --text-only: the DFlash2 lanes run on the multimodal path, so a text-only engine would hand the drafter
+    to generic speculative decoding, which needs a trimmable prompt cache. GLM-5.3 (KDA) and the Qwen3.8 hybrids
+    (GatedDelta) have none, and every request then failed with HTTP 400 "Speculative decoding requires a trimmable
+    prompt cache". An explicit --speculative-model is still the user's choice.
+    """
+    from .speculative import find_bundled_dflash2
+
+    drafter = find_bundled_dflash2(getattr(args, "model", ""))
+    if drafter and getattr(args, "force_text_only", False):
+        if logger is not None:
+            logger.info(
+                "Not using the bundled DFlash2 drafter with --text-only (%s): the DFlash2 lanes run on the "
+                "multimodal path; pass --speculative-model to force a drafter.",
+                drafter,
+            )
+        return None
+    return drafter
+
+
 def _apply_jangtq_mpp_nax_policy(args, logger):
     """Apply internal JANGTQ acceleration policy.
 
@@ -1743,9 +1765,7 @@ def serve_command(args):
     if not getattr(args, "speculative_model", None) and not getattr(
         args, "no_bundled_dflash2", False
     ):
-        from .speculative import find_bundled_dflash2
-
-        _bundled_drafter = find_bundled_dflash2(getattr(args, "model", ""))
+        _bundled_drafter = _bundled_dflash2_for(args, logger)
         if _bundled_drafter:
             args.speculative_model = _bundled_drafter
             logger.info(

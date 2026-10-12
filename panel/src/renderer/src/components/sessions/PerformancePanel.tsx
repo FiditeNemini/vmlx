@@ -452,7 +452,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                 label={t('sessions.performance.metalNa')}
                 value={
                   health.acceleration.kernel_type === 'jangtq2_codebook'
-                    ? 'JANGH custom decode; NAX/Steel prefill (route not observed)'
+                    ? `${health.quantization?.runtime_component_label || 'JANGH'} custom decode; NAX/Steel prefill (route not observed)`
                     : health.acceleration.metal_na_active_on_host
                     ? t('sessions.performance.statusActive')
                     : health.acceleration.kernel_type === 'turboquant_codebook'

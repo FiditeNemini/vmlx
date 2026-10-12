@@ -13,6 +13,11 @@ describe('Metal acceleration label', () => {
       metal_na_active_on_host: false } }, (key: string) => key))
       .toBe('JANGH custom decode; NAX/Steel prefill (route not observed)')
   })
+  it('names JANGHT bundles by their runtime label (GLM-5.3 / Naive N0.5 trellis + Hadamard experts)', () => {
+    expect(render({ acceleration: { kernel_type: 'jangtq2_codebook', metal_na_capable: true,
+      metal_na_active_on_host: false }, quantization: { runtime_component_label: 'JANGHT' } }, (key: string) => key))
+      .toBe('JANGHT custom decode; NAX/Steel prefill (route not observed)')
+  })
   it('retains affine active and unsupported labels', () => {
     expect(render({ acceleration: { kernel_type: 'affine_quantized_matmul',
       metal_na_active_on_host: true } }, (key: string) => key))

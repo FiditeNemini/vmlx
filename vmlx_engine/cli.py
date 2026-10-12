@@ -1284,21 +1284,6 @@ def _configure_vision_feature_ssd(args, explicit) -> None:
         logger.warning("Vision feature SSD cache unavailable", exc_info=True)
 
 
-def _apply_disable_prefix_cache_to_native_lanes(args, logger) -> None:
-    """``--disable-prefix-cache`` also turns off the DFlash2 lanes' own prefix reuse (ledger T-NAX-d).
-
-    The flag used to reach the batch scheduler's caches only: the GLM-5.3 DFlash2 prefix store
-    (VMLX_GLM_DFLASH2_PREFIX_CACHE) and the Qwen DFlash2 session reuse (VMLX_DFLASH2_PREFIX_REUSE) kept restoring
-    prefixes, so a user who disabled prefix caching (e.g. to rule a cache out while debugging) still got restored
-    state on those lanes. An explicit env setting is left untouched."""
-    if not getattr(args, "disable_prefix_cache", False):
-        return
-    for name in ("VMLX_GLM_DFLASH2_PREFIX_CACHE", "VMLX_DFLASH2_PREFIX_REUSE"):
-        if name not in os.environ:
-            os.environ[name] = "0"
-    logger.info("--disable-prefix-cache: DFlash2 lane prefix reuse off (GLM prefix store, Qwen session reuse)")
-
-
 def serve_command(args):
     """Start the OpenAI-compatible server."""
     import logging
@@ -1311,7 +1296,6 @@ def serve_command(args):
     from .server import RateLimiter, app, load_model
 
     logger = logging.getLogger(__name__)
-    _apply_disable_prefix_cache_to_native_lanes(args, logger)
     _is_image = _is_image_serve_request(args)
 
     # Engine-owned lifecycle progress: one generation per serve attempt. The

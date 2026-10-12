@@ -715,3 +715,29 @@ def test_scheduler_finds_the_openpangu_system_turn_end():
     s2 = object.__new__(Scheduler)
     s2.tokenizer, s2._actual_tokenizer = SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda t: 0), None
     assert s2._openpangu_stable_root_len([1, 2, 3]) == 0                   # unknown token -> no root
+
+
+def test_single_batch_reports_float32_logprobs_without_changing_the_sampled_token(tiny_model):
+    """Reported logprobs are a float32 log-softmax (the bf16 one rounded e.g. to exactly -1.0); sampling is unchanged."""
+    from vmlx_engine.utils import mamba_cache
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    prompt = [10 + (i * 5) % 200 for i in range(12)]
+
+    def first(capture):
+        gen = SingleBatchGenerator(tiny_model, max_tokens=1)
+        uid = gen.insert([prompt])[0]
+        key = (id(tiny_model), int(uid))
+        if capture:
+            mamba_cache._GENERATION_LOGPROBS_KEYS.add(key)
+        try:
+            responses, _ = gen.next()
+        finally:
+            mamba_cache._GENERATION_LOGPROBS_KEYS.discard(key)
+        return responses[0]
+
+    with_lp, without_lp = first(True), first(False)
+    assert with_lp.token == without_lp.token
+    lp = with_lp.logprobs
+    assert lp is not None and lp.dtype == mx.float32
+    assert abs(float(mx.logsumexp(lp))) < 1e-4                          # a proper log-distribution

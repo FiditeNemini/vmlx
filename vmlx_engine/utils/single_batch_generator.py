@@ -850,7 +850,14 @@ class SingleBatchGenerator:
         else:
             logprobs_full = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             sampled = sampler(logprobs_full)
-            logprobs = logprobs_full[0] if wants_logprobs else None
+            if wants_logprobs:
+                # Reported logprobs in float32: the bf16 log-softmax above rounds every value to bf16 (step ~0.008 near
+                # -1, 0.0625 near -10; the API returned e.g. exactly -1.0 / -0.75). The sampler keeps its existing
+                # input, so the generated tokens are byte-identical to before.
+                logits32 = logits.astype(mx.float32)
+                logprobs = (logits32 - mx.logsumexp(logits32, axis=-1, keepdims=True))[0]
+            else:
+                logprobs = None
 
         async_items = [sampled]
         if logprobs is not None:

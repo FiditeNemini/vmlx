@@ -77,3 +77,32 @@ def test_tq2_acceleration_is_capability_not_observed_dispatch():
     assert result["metal_na_active_on_host"] is False
     assert result["dispatch_observed"] is False
     assert result["prefill_backends"] == ["nax", "steel"]
+
+
+def test_janght_mixture_is_labelled_janght_not_jangh():
+    # GLM-5.3 / Naive N0.5 JANGHT bundles: trellis "jangt" experts (kbits) + Hadamard-codebook "jangtq2" experts.
+    config = {
+        "jangtq": {"version": 2, "codebook_family": "odd-cubic", "rotation": "hadamard32"},
+        "jangt": {"version": 1, "code": "v2_halfbits"},
+        "quantization": {"bits": 8, "mode": "affine", "group_size": 64,
+            "model.a.gate_proj": {"mode": "jangt", "kbits": 2},
+            "model.a.up_proj": {"mode": "jangt", "kbits": 2.5},
+            "model.a.down_proj": {"mode": "jangtq2", "bits": 3},
+            "model.b.down_proj": {"mode": "jangtq2", "bits": 4}},
+    }
+    result = status(config)
+    assert result["codec"] == "jangtq2_codebook"
+    assert result["runtime_component"] == "janght"
+    assert result["runtime_component_label"] == "JANGHT"
+    assert result["jangt_projection_count"] == 2
+    assert result["jangt_kbits"] == [2, 2.5]
+    assert result["routed_expert_bit_widths"] == [3, 4]
+    assert result["jangtq2_projection_count"] == 2
+    assert result["mixed_precision"] is True
+
+
+def test_jangh_only_bundle_keeps_its_label_and_no_trellis_fields():
+    result = status({"jangtq": {"version": 2}, "quantization": {"mode": "affine", "bits": 8,
+                     "model.a.gate_proj": {"mode": "jangtq2", "bits": 2}}})
+    assert result["runtime_component_label"] == "JANGH"
+    assert "jangt_projection_count" not in result and "jangt_kbits" not in result

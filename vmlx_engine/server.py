@@ -11022,16 +11022,23 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
             if isinstance(value, dict) and isinstance(value.get("mode"), str)
         }
         tq_modules = {key: value for key, value in modules.items() if value["mode"] == "jangtq2"}
+        # JANGHT bundles (GLM-5.3, Naive N0.5) mix trellis "jangt" experts (kbits 2/2.5/3) with the Hadamard-codebook
+        # "jangtq2" ones; labelling them JANGH hid the trellis half.
+        jangt_modules = {key: value for key, value in modules.items() if value["mode"] == "jangt"}
         if tq_modules:
             widths = sorted({value["bits"] for value in tq_modules.values()
                              if type(value.get("bits")) is int})
             modes = sorted({value["mode"] for value in modules.values()})
+            jangt_kbits = sorted({value["kbits"] for value in jangt_modules.values()
+                                  if type(value.get("kbits")) in (int, float)})
             result.update({
                 "codec": "jangtq2_codebook",
                 "weight_format": "jangtq2",
                 "backend": "vmlx_jangtq2",  # legacy machine-readable identifier
-                "runtime_component": "jangh",
-                "runtime_component_label": "JANGH",
+                "runtime_component": "janght" if jangt_modules else "jangh",
+                "runtime_component_label": "JANGHT" if jangt_modules else "JANGH",
+                "jangt_projection_count": len(jangt_modules) or None,
+                "jangt_kbits": jangt_kbits or None,
                 "serialized_weight_format": "jangtq2",
                 "target_bits": None,
                 "group_size": None,
@@ -11414,7 +11421,7 @@ def _model_acceleration_status(bundle_path: str | None = None) -> dict:
         "host": host,
     }
     if codec == "jangtq2_codebook":
-        result["runtime_component"] = "jangh"
+        result["runtime_component"] = quantization.get("runtime_component", "jangh")
         result["dispatch_observed"] = False
         result["prefill_backends"] = ["nax", "steel"]
         result["decode_backend"] = "custom_metal"

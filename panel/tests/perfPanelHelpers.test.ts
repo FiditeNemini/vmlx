@@ -44,6 +44,8 @@ describe('JANGH component labels', () => {
   it('prefers the component name while preserving legacy serialized format', () => {
     const health = {quantization:{runtime_component_label:'JANGH',weight_format:'jangtq2',mixed_precision:true,config_bits:8}} as Parameters<typeof formatWeightQuant>[0]
     expect(formatWeightQuant(health, key => key)).toBe('JANGH mixed')
+    const janght = {quantization:{runtime_component_label:'JANGHT',weight_format:'jangtq2',mixed_precision:true,config_bits:8}} as Parameters<typeof formatWeightQuant>[0]
+    expect(formatWeightQuant(janght, key => key)).toBe('JANGHT mixed')
     expect(health.quantization!.weight_format).toBe('jangtq2')
   })
 })

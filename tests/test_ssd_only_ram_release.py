@@ -210,3 +210,26 @@ def test_batched_loops_wire_the_idle_releaser():
                 inspect.getsource(mllm_scheduler.MLLMScheduler._process_loop)):
         assert "IdleMemoryReleaser()" in src and "_idle_release.note_work()" in src
         assert "_idle_release.due()" in src and "_idle_release.release" in src
+
+
+def test_glm_disk_writer_does_not_pin_the_last_snapshot(tmp_path):
+    """The writer thread must not keep the last written snapshot alive while it waits for the next one."""
+    import gc
+    import weakref
+
+    disk = G.PrefixDiskTier(tmp_path, 2 ** 30)
+    try:
+        class Snap:                                           # weakref-able stand-in; _write is stubbed below
+            pass
+
+        disk._write = lambda name, key, snap: {"outcome": "stored", "durable": True, "retained_tokens": len(key)}
+        snap = Snap()
+        ref = weakref.ref(snap)
+        receipt = disk.put((1, 2, 3), snap)
+        disk.flush()
+        assert receipt.result()["durable"]
+        del snap
+        gc.collect()
+        assert ref() is None, "writer thread still references the last snapshot"
+    finally:
+        disk.close()

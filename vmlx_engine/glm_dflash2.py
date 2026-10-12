@@ -451,19 +451,28 @@ class PrefixDiskTier:
     def _writer(self):
         while True:
             item = self._queue.get()
+            receipt = None
             try:
                 if item is None:
                     return
                 name, key, snap, receipt = item
-                receipt.set_result(self._write(name, key, snap))
+                result = self._write(name, key, snap)
+                # Drop the snapshot before publishing durability: once the receipt resolves, the RAM store releases its
+                # copy (SSD-only policy) and that must free the arrays. Loop-locals held here while blocked in get()
+                # otherwise kept the LAST snapshot resident until the next write (GLM-5.3: +1.7-2.8 GiB at idle,
+                # growing with context); the generic DFlash2 writer drops its payload the same way.
+                item = snap = key = None
+                receipt.set_result(result)
             except Exception as e:                         # never fail a generation over the SSD tier
                 self.errors += 1
                 import logging
                 logging.getLogger(__name__).warning("glm dflash2 prefix disk write failed: %s", e)
-                if not receipt.done():
+                item = snap = key = None
+                if receipt is not None and not receipt.done():
                     receipt.set_result({"outcome": "failed", "durable": False,
                                         "retained_tokens": 0, "detail": str(e)[:200]})
             finally:
+                item = snap = key = None
                 self._queue.task_done()
 
     def _write(self, name, key, snap):

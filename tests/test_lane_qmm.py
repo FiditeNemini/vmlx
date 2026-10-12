@@ -82,3 +82,17 @@ def test_install_keeps_vocabulary_heads_on_mlx(monkeypatch):
     monkeypatch.setenv("VMLX_LANE_VOCAB_HEAD", "1")
     m2 = model()
     assert L.install(m2)["lane"] == 2
+
+
+def test_untiled_single_row_takes_mlx_qmv_exactly():
+    """VMLX_LANE_QMM_TILED=0 keeps MLX layout; then 1-row calls (AR steps) use MLX qmv bit-for-bit, wider calls the lane."""
+    m = nn.Sequential(nn.Linear(256, 128, bias=False))
+    nn.quantize(m, group_size=64, bits=4)
+    m.layers[0].scales = m.layers[0].scales.astype(mx.bfloat16)
+    m.layers[0].biases = m.layers[0].biases.astype(mx.bfloat16)
+    q = m.layers[0]
+    x1 = mx.random.normal((1, 256)).astype(mx.bfloat16)
+    ref = mx.quantized_matmul(x1, q.weight, q.scales, q.biases, transpose=True, group_size=64, bits=4)
+    assert L.install(m, tile=False)["tiled"] == 0
+    assert mx.array_equal(m.layers[0](x1), ref)
+    assert m.layers[0](mx.random.normal((6, 256)).astype(mx.bfloat16)).shape == (6, 128)

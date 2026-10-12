@@ -256,7 +256,7 @@ class PrefixStore:
     ids. A request whose prompt starts with a stored prompt restores that state and prefills only the suffix. The
     drafter cache itself is rebuilt from the context rows exactly as after a cold prefill, so no drafter state is kept.
     Also snapshots every PREFIX_SNAPSHOT_EVERY (2048) absolute prompt tokens during prefill, for mid-history
-    divergence. LRU over `max_entries` snapshots (VMLX_GLM_DFLASH2_PREFIX_ENTRIES, default 12) and a total cap
+    divergence. LRU over `max_entries` snapshots (VMLX_GLM_DFLASH2_PREFIX_ENTRIES, default 4) and a total cap
     (VMLX_GLM_DFLASH2_PREFIX_MAX_GB, default 3; shared KDA arrays are counted per snapshot, so this over-counts)."""
 
     def __init__(self, max_entries: int = 4, max_bytes: float = 3 * 2 ** 30, disk: "PrefixDiskTier | None" = None):
@@ -507,6 +507,7 @@ class PrefixDiskTier:
 
 _PREFIX_STORES: dict = {}
 PREFIX_SNAPSHOT_EVERY = int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_EVERY", "2048"))
+PREFIX_RAM_ENTRIES_DEFAULT = 4
 _PREFIX_DISK = {"root": None, "max_bytes": 0.0, "model_key": None}
 
 
@@ -621,7 +622,11 @@ def prefix_store_for(target) -> "PrefixStore":
     if st is None:
         disk = PrefixDiskTier(_PREFIX_DISK["root"], _PREFIX_DISK["max_bytes"],
                               _PREFIX_DISK["model_key"]) if _PREFIX_DISK["root"] else None
-        st = _PREFIX_STORES[key] = PrefixStore(int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_ENTRIES", "12")),
+        # Default 4 (was 12): resident snapshots cost the next prefill. GLM-5.3 JANGHT2.4, 8-turn chat, request 8 with
+        # 11,147 cached: ENTRIES 12 -> 3.68 s, 4 -> 3.46 s, 2 -> 3.39 s (3 alternating rounds each, box 2026-10-11);
+        # after a RAM clear an engine that served 7 turns is exactly as fast as a fresh one. Linear chats only need
+        # the newest snapshot; older branch points restore from the SSD tier, which keeps every snapshot.
+        st = _PREFIX_STORES[key] = PrefixStore(int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_ENTRIES", str(PREFIX_RAM_ENTRIES_DEFAULT))),
                                                 float(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_MAX_GB", "3")) * 2 ** 30,
                                                 disk=disk)
     return st

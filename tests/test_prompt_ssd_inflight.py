@@ -120,3 +120,18 @@ def test_terminal_flush_switch_defaults_off(monkeypatch):
     assert _prompt_ssd_terminal_flush() is False
     monkeypatch.setenv("VMLX_PROMPT_SSD_TERMINAL_FLUSH", "1")
     assert _prompt_ssd_terminal_flush() is True
+
+
+def test_store_hands_the_writer_zero_copy_views(held_writer):
+    """The standard store path no longer copies the payload on the scheduler thread: the queued arrays are buffer
+    views of the evaluated MLX arrays (bf16 as uint16 bits), and the round trip is still exact."""
+    manager, gate = held_writer
+    tokens = list(range(40))
+    assert manager.store(tokens, _cache(6))
+    entry = next(iter(manager._inflight.values()))
+    arrays = [v for v in entry["arrays"].values() if hasattr(v, "dtype")]
+    assert arrays and all(isinstance(v.base, memoryview) for v in arrays)
+    gate.set()
+    assert manager.flush_pending_writes(tokens)
+    restored = manager.fetch(tokens)
+    assert restored[0].keys.dtype == mx.bfloat16 and mx.all(restored[0].keys == 6).item()

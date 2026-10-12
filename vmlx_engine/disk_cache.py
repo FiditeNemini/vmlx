@@ -1470,7 +1470,15 @@ class DiskCacheManager:
                 if arrays_to_eval:
                     mx.eval(*arrays_to_eval)
                 for k, arr in pending_arrays:
-                    np_cache[k] = np.array(arr)
+                    # Zero-copy NumPy view of the evaluated array (buffer protocol). The view keeps `arr` alive until the
+                    # writer and the in-flight map drop it, and the writer thread only reads plain memory (no MLX or
+                    # Metal call there, which is what the copy existed to avoid). This removed the ~0.25 s, ~3 GB CPU
+                    # copy an openPangu terminal store made while the next request waited (2026-10-11). A dtype the
+                    # buffer protocol rejects falls back to the copy.
+                    try:
+                        np_cache[k] = np.asarray(memoryview(arr))
+                    except (TypeError, ValueError, BufferError):
+                        np_cache[k] = np.array(arr)
                 cache_data_flat = np_cache
 
         except Exception as e:

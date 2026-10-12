@@ -1618,6 +1618,52 @@ def _drop_contentless_assistant_turns(messages: list) -> list:
     ]
 
 
+_PRIOR_REASONING_PROBE: dict = {}
+
+
+def _template_keeps_prior_reasoning(request_thinking: bool) -> bool:
+    """Whether the loaded chat template itself renders an earlier turn's reasoning for this request's thinking mode.
+
+    Read-only probe of the template: it renders a three-message history with the request's own thinking value and
+    checks whether the prior turn's reasoning survives. Templates that keep it on Off turns (Naive N0.5:
+    keep_all_reasoning defaults to true; GLM-5.3: clear_thinking defaults to false) change only the generation suffix
+    for Off, so stripping prior reasoning rewrote every earlier assistant turn and one thinking toggle in a long chat
+    re-prefilled the whole history (Naive N0.5, 41k-token chat: cached 0, ~70 s TTFT, 2026-10-12). For templates
+    that drop prior reasoning themselves the strip changes nothing. Cached per loaded template; a failed probe keeps
+    the strip (the previous behaviour).
+    """
+    tok = getattr(_engine, "tokenizer", None) if _engine is not None else None
+    template = getattr(tok, "chat_template", None)
+    if tok is None or not isinstance(template, str) or not template:
+        return False
+    key = (id(tok), hash(template), bool(request_thinking))
+    cached = _PRIOR_REASONING_PROBE.get(key)
+    if cached is not None:
+        return cached
+    marker = "vmlxpriorreasoningprobe"
+    probe = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b", "reasoning_content": marker},
+        {"role": "user", "content": "c"},
+    ]
+    keeps = False
+    try:
+        from .utils.chat_template_kwargs import build_chat_template_kwargs, model_type_of
+
+        kwargs = build_chat_template_kwargs(
+            enable_thinking=request_thinking,
+            model_type=model_type_of(getattr(_engine, "model", None)),
+        )
+        rendered = tok.apply_chat_template(probe, **kwargs)
+        keeps = isinstance(rendered, str) and marker in rendered
+    except Exception as exc:  # noqa: BLE001 - read-only probe; a failure keeps the existing strip
+        logger.debug("prior-reasoning template probe failed: %s", exc)
+    _PRIOR_REASONING_PROBE[key] = keeps
+    logger.info("Chat template %s prior reasoning when thinking=%s",
+                "keeps" if keeps else "drops", bool(request_thinking))
+    return keeps
+
+
 def _strip_prior_reasoning_for_thinking_off(
     messages: list[dict],
 ) -> list[dict]:
@@ -1631,6 +1677,10 @@ def _strip_prior_reasoning_for_thinking_off(
     if read_mimo_v26_contract(_model_path or _model_name) is not None:
         # MiMo's native template retains past reasoning even when the next
         # turn is thinking-off. The flag changes only the generation suffix.
+        return messages
+    if _template_keeps_prior_reasoning(request_thinking=False):
+        # The same contract, read from the loaded template rather than one family's name: this function only runs
+        # for Off requests, so the probe renders the template in that same mode.
         return messages
     cleaned: list[dict] = []
     for original in messages:

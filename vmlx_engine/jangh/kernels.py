@@ -533,6 +533,23 @@ def h32_rows(x, out_dtype=None):
 
 
 # ------------------------------------------------------------------ decode (qmv)
+def slot_fastest_enabled() -> bool:
+    """Multi-row decode MoE kernels schedule the expert slot as the FASTEST grid axis (VMLX_MOE_SLOT_FASTEST, default
+    on, read per call for in-process A/B). With the slot on the slowest axis (z) the GPU ran every row tile of slot 0
+    before slot 1, so an expert chosen by several rows of a speculative verify block was fetched from DRAM once per
+    row; with the slot on y, consecutive threadgroups compute the same weight rows for different slots and repeated
+    experts hit the cache. Per-threadgroup arithmetic is unchanged: outputs are bit-identical. 1-row decode keeps
+    the original order."""
+    return os.environ.get("VMLX_MOE_SLOT_FASTEST", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def swap_grid_yz(src: str) -> str:
+    """Kernel source with threadgroup grid axes y and z exchanged (row tile <-> slot)."""
+    return (src.replace("threadgroup_position_in_grid.y", "__TGP_Y__")
+               .replace("threadgroup_position_in_grid.z", "threadgroup_position_in_grid.y")
+               .replace("__TGP_Y__", "threadgroup_position_in_grid.z"))
+
+
 def _qdot(bits: int, wr: str, acc: str) -> str:
     """Metal: accumulate dot(xt[0..15], level(q)) over one row's 16-value lane chunk at byte pointer `wr`.
     Wide loads: the lane chunk is 2*bits bytes, 4-byte aligned for 2/4/6/8-bit (uint32 words) and 2-byte aligned for
@@ -641,9 +658,9 @@ def _k_loop(mode: str, rotate: bool, body_al: str, body_gd: str, advance: str) -
 
 
 @functools.lru_cache(maxsize=None)
-def _qmv_kernel(bits: int, fused: bool, xname: str, aligned, rotate: bool = False):
+def _qmv_kernel(bits: int, fused: bool, xname: str, aligned, rotate: bool = False, yz: bool = False):
     mode = aligned if isinstance(aligned, str) else ("al" if aligned else "gd")
-    return _qmv_kernel_mode(bits, fused, xname, mode, rotate)
+    return _qmv_kernel_mode(bits, fused, xname, mode, rotate, yz)
 
 
 def _qmv_rows(bits: int, fused: bool, guard: str) -> str:
@@ -662,7 +679,7 @@ def _qmv_rows(bits: int, fused: bool, guard: str) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _qmv_kernel_mode(bits: int, fused: bool, xname: str, mode: str, rotate: bool = False):
+def _qmv_kernel_mode(bits: int, fused: bool, xname: str, mode: str, rotate: bool = False, yz: bool = False):
     aligned = mode == "al"
     guard_rows = "if (!active) continue;" if mode == "tl" else "if (row0 + r >= N || !active) continue;"
     loop = _k_loop(mode, rotate, _qmv_rows(bits, fused, ""), _qmv_rows(bits, fused, guard_rows),
@@ -711,13 +728,13 @@ def _qmv_kernel_mode(bits: int, fused: bool, xname: str, mode: str, rotate: bool
     {store}
 '''
     return mx.fast.metal_kernel(
-        name=f"jangtq2t_qmv_b{bits}_{'fused' if fused else 'single'}_{xname}_{mode}{'_h32' if rotate else ''}",
+        name=f"jangtq2t_qmv_b{bits}_{'fused' if fused else 'single'}_{xname}_{mode}{'_h32' if rotate else ''}{'_yz' if yz else ''}",
         input_names=["x", "wg", "sg", "wu", "su", "idx", "meta", "lim"],
-        output_names=["out"], header=_cb_header(), source=src)
+        output_names=["out"], header=_cb_header(), source=swap_grid_yz(src) if yz else src)
 
 
 def gather_qmv(x, packed, scales, cb_unused, idx, bits, *, x_per_dispatch: bool, packed_u=None, scales_u=None, limit=0.0,
-               rotate: bool = False):
+               rotate: bool = False, slot_fastest: bool = False):
     """Decode: x (n_x, K) any float dtype. idx (ndisp,) expert per dispatch.
     x row for dispatch d = d if x_per_dispatch else d // (ndisp // n_x).  Returns float32 (ndisp, N).
     Single: W_e x.  Fused (packed_u given): act(Wg x, Wu x) with clamped SwiGLU."""
@@ -728,11 +745,13 @@ def gather_qmv(x, packed, scales, cb_unused, idx, bits, *, x_per_dispatch: bool,
         raise ValueError("jangtq2 requires K % 32 == 0")
     xdiv = 1 if x_per_dispatch else ndisp // nx
     fused = packed_u is not None
-    k = _qmv_kernel(bits, fused, _TNAME[x.dtype], _tail_mode(K, N) if TAIL_SPLIT else (K % BLOCK == 0 and N % (NSG * RPS) == 0), rotate)
+    yz = bool(slot_fastest) and slot_fastest_enabled()      # callers pass it only for multi-row calls
+    k = _qmv_kernel(bits, fused, _TNAME[x.dtype], _tail_mode(K, N) if TAIL_SPLIT else (K % BLOCK == 0 and N % (NSG * RPS) == 0), rotate, yz)
+    tiles = (N + NSG * RPS - 1) // (NSG * RPS)
     return k(inputs=[x, packed, scales, packed_u if fused else packed, scales_u if fused else scales,
                      idx.astype(mx.uint32).reshape(-1), _consts(K, N, xdiv, dtype=mx.uint32),
                      _consts(float(limit), dtype=mx.float32)],
-             grid=(NSG * 32, (N + NSG * RPS - 1) // (NSG * RPS), ndisp), threadgroup=(NSG * 32, 1, 1),
+             grid=(NSG * 32, ndisp, tiles) if yz else (NSG * 32, tiles, ndisp), threadgroup=(NSG * 32, 1, 1),
              output_shapes=[(ndisp, N)], output_dtypes=[mx.float32])[0]
 
 
@@ -747,7 +766,7 @@ def _wdown_rows(bits: int, guard: str) -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned, rotate: bool = False):
+def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned, rotate: bool = False, yz: bool = False):
     """Decode down projection fused with the router-weighted sum over the k selected experts:
     y[t, r] = sum_k w[t,k] * scale[e_k, r] * dot(h[t,k,:], level(q[e_k, r, :]))."""
     mode = aligned if isinstance(aligned, str) else ("al" if aligned else "gd")
@@ -776,21 +795,24 @@ def _qmv_weighted_down_kernel(bits: int, tname: str, xname: str, aligned, rotate
     {UNROLL} for (uint r = 0; r < {RPS}u; r++)
       if (lane == 0 && row0 + r < N) out[(size_t)t * N + row0 + r] = static_cast<{tname}>(out_acc[r]);
 '''
-    return mx.fast.metal_kernel(name=f"jangtq2t_qmv_wdown_b{bits}_{tname}_{xname}_{mode}{'_h32' if rotate else ''}",
+    return mx.fast.metal_kernel(name=f"jangtq2t_qmv_wdown_b{bits}_{tname}_{xname}_{mode}{'_h32' if rotate else ''}{'_yz' if yz else ''}",
                                 input_names=["x", "wg", "sg", "idx", "wts", "meta"],
-                                output_names=["out"], header=_cb_header(), source=src)
+                                output_names=["out"], header=_cb_header(), source=swap_grid_yz(src) if yz else src)
 
 
-def gather_qmv_weighted_down(h, packed, scales, cb_unused, idx, weights, bits, out_dtype, rotate: bool = False):
+def gather_qmv_weighted_down(h, packed, scales, cb_unused, idx, weights, bits, out_dtype, rotate: bool = False,
+                             slot_fastest: bool = False):
     """Decode: h (T*k, K) activations per dispatch, idx/weights (T, k). Returns (T, N) = sum_k w * (W_e h)."""
     T, kt = idx.shape
     K = h.shape[-1]
     N = packed.shape[1]
+    yz = bool(slot_fastest) and T > 1 and slot_fastest_enabled()
     k = _qmv_weighted_down_kernel(bits, _TNAME[out_dtype], _TNAME[h.dtype],
-                                  _tail_mode(K, N) if TAIL_SPLIT else (K % BLOCK == 0 and N % (NSG * RPS) == 0), rotate)
+                                  _tail_mode(K, N) if TAIL_SPLIT else (K % BLOCK == 0 and N % (NSG * RPS) == 0), rotate, yz)
+    tiles = (N + NSG * RPS - 1) // (NSG * RPS)
     return k(inputs=[h, packed, scales, idx.astype(mx.uint32).reshape(-1), weights.astype(mx.float32).reshape(-1),
                      _consts(K, N, kt, dtype=mx.uint32)],
-             grid=(NSG * 32, (N + NSG * RPS - 1) // (NSG * RPS), T), threadgroup=(NSG * 32, 1, 1),
+             grid=(NSG * 32, T, tiles) if yz else (NSG * 32, tiles, T), threadgroup=(NSG * 32, 1, 1),
              output_shapes=[(T, N)], output_dtypes=[out_dtype])[0]
 
 

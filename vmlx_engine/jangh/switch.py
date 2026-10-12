@@ -93,7 +93,8 @@ class TQSwitchGLU(nn.Module):
         if g.rotated and not in_kernel:
             xf = rotate_rows(xf, g)
         return K.gather_qmv(xf, g.tq2_packed, g.tq2_scales, g._cb, idx, g.bits, x_per_dispatch=False,
-                            packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit, rotate=in_kernel)
+                            packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit, rotate=in_kernel,
+                            slot_fastest=xf.shape[0] > 1)
 
     def _down_in(self, h):
         """(h, rotate_in_kernel) for the down projection."""
@@ -183,7 +184,8 @@ class TQSwitchGLU(nn.Module):
         idx = indices.reshape(-1).astype(mx.uint32)
         if not self._use_sorted(idx.size, kk):
             h, rk = self._down_in(self._decode_h(xf, idx))
-            y = K.gather_qmv(h, d.tq2_packed, d.tq2_scales, d._cb, idx, d.bits, x_per_dispatch=True, rotate=rk)
+            y = K.gather_qmv(h, d.tq2_packed, d.tq2_scales, d._cb, idx, d.bits, x_per_dispatch=True, rotate=rk,
+                             slot_fastest=xf.shape[0] > 1)
             return y.astype(x.dtype).reshape(*lead, kk, D)
         return self._prefill(xf, idx, kk).reshape(*lead, kk, D)
 
@@ -212,5 +214,5 @@ class TQSwitchGLU(nn.Module):
         idx2 = indices.reshape(-1, kk).astype(mx.uint32)
         h, rk = self._down_in(self._decode_h(x.reshape(-1, D), idx2.reshape(-1)))
         y = K.gather_qmv_weighted_down(h, d.tq2_packed, d.tq2_scales, d._cb, idx2, scores.reshape(-1, kk), d.bits,
-                                       x.dtype, rotate=rk)
+                                       x.dtype, rotate=rk, slot_fastest=idx2.shape[0] > 1)
         return y.reshape(*lead, D)

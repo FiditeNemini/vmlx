@@ -464,7 +464,7 @@ def _xload3(guard: bool = True) -> str:
 
 @functools.lru_cache(maxsize=None)
 def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, limit: float = 0.0, rot_out: bool = False,
-           guard: bool = True):
+           guard: bool = True, yz: bool = False):
     mu, isd = VL.code_stats(L, K); PL, adv, _ = _lane_geom(K)
     # outlier columns: lane j < n_out owns column j for the simdgroup's 4 rows, one simd_sum per row (the first
     # version looped them on lane 0: -21 us per layer, 515 -> 389 GB/s)
@@ -527,11 +527,13 @@ def _gu_v3(kin: int, N: int, K, L: int, n_out: int, W: int, xdt: str, odt: str, 
     ins = ["xr", "x", "idx", "kslots", "wg", "sg", "wu", "su_"] + (["ocol", "woutg", "woutu"] if n_out else [])
     lim = "" if not limit > 0 else f"_lim{str(float(limit)).replace('.', 'p')}"
     ro = "_ro" if rot_out else ""
-    return mx.fast.metal_kernel(name=f"jt4_gu_k{kin}_n{N}_K{_kname(K)}_o{n_out}_w{W}_{xdt}_{odt}{lim}{ro}{'' if guard else '_ng'}", input_names=ins, output_names=["out"], source=src)
+    from vmlx_engine.jangh.kernels import swap_grid_yz
+    return mx.fast.metal_kernel(name=f"jt4_gu_k{kin}_n{N}_K{_kname(K)}_o{n_out}_w{W}_{xdt}_{odt}{lim}{ro}{'' if guard else '_ng'}{'_yz' if yz else ''}",
+                                input_names=ins, output_names=["out"], source=swap_grid_yz(src) if yz else src)
 
 
 @functools.lru_cache(maxsize=None)
-def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: str, guard: bool = True):
+def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: str, guard: bool = True, yz: bool = False):
     mu, isd = VL.code_stats(L, K); PL, adv, _ = _lane_geom(K)
     outl_pre = "" if n_out == 0 else f"""
       float od[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -571,28 +573,37 @@ def _down_v3(kin: int, N: int, K, L: int, n_out: int, kslots: int, W: int, hdt: 
     if (lane == 0u) {{ {_UNROLL} for (uint r = 0; r < 4u; r++) out[(size_t)t * {N}u + row0 + r] = acc[r]; }}
     """
     ins = ["hr", "h", "idx", "rw", "wd", "sd"] + (["ocol", "wout"] if n_out else [])
-    return mx.fast.metal_kernel(name=f"jt4_dn_k{kin}_n{N}_K{_kname(K)}_o{n_out}_s{kslots}_w{W}_{hdt}{'' if guard else '_ng'}", input_names=ins, output_names=["out"], source=src)
+    from vmlx_engine.jangh.kernels import swap_grid_yz
+    return mx.fast.metal_kernel(name=f"jt4_dn_k{kin}_n{N}_K{_kname(K)}_o{n_out}_s{kslots}_w{W}_{hdt}{'' if guard else '_ng'}{'_yz' if yz else ''}",
+                                input_names=ins, output_names=["out"], source=swap_grid_yz(src) if yz else src)
 
 
-def gather_gate_up_swiglu_v3(xr, x, idx, U, out_dtype=mx.bfloat16, limit: float = 0.0, rot_out: bool = False):
-    """rot_out: return the activations already Hadamard-32 rotated (input basis of a JANGH down unit); N % 32 == 0."""
+def gather_gate_up_swiglu_v3(xr, x, idx, U, out_dtype=mx.bfloat16, limit: float = 0.0, rot_out: bool = False,
+                             slot_fastest: bool = False):
+    """rot_out: return the activations already Hadamard-32 rotated (input basis of a JANGH down unit); N % 32 == 0.
+    slot_fastest: put the slot on grid axis y for multi-row calls (jangh.kernels.slot_fastest_enabled)."""
+    from vmlx_engine.jangh.kernels import slot_fastest_enabled
     T, kin = x.shape; k = idx.shape[1]; N = U["gate"]["scale"].shape[1]; n_out = U["gate"]["n_out"]; W = int(U["gate"]["packed"].shape[-1])
     rot_out = bool(rot_out) and N % 32 == 0
+    yz = bool(slot_fastest) and T > 1 and slot_fastest_enabled()
     ins = [xr, x, idx.reshape(-1).astype(mx.uint32), mx.array([k], dtype=mx.uint32), U["gate"]["packed"], U["gate"]["scale"],
            U["up"]["packed"], U["up"]["scale"]] + ([U["gate"]["ocol"], U["gate"]["wout"], U["up"]["wout"]] if n_out else [])
     kern = _gu_v3(kin, N, U["K"], U["L"], n_out, W, _dt(x), {mx.bfloat16: "bfloat16_t", mx.float16: "half", mx.float32: "float"}[out_dtype], float(limit), rot_out,
-                   _fp16_guard())
-    if rot_out:
-        return kern(inputs=ins, grid=(256, N // 32, T * k), threadgroup=(256, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
-    return kern(inputs=ins, grid=(64, N // 8, T * k), threadgroup=(64, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
+                   _fp16_guard(), yz)
+    tiles = N // 32 if rot_out else N // 8
+    grid = (256 if rot_out else 64, T * k, tiles) if yz else (256 if rot_out else 64, tiles, T * k)
+    return kern(inputs=ins, grid=grid, threadgroup=(256 if rot_out else 64, 1, 1), output_shapes=[(T * k, N)], output_dtypes=[out_dtype])[0]
 
 
-def gather_down_weighted_v3(hr, h, idx, rw, U):
+def gather_down_weighted_v3(hr, h, idx, rw, U, slot_fastest: bool = False):
+    from vmlx_engine.jangh.kernels import slot_fastest_enabled
     T, k = idx.shape; kin = h.shape[1]; N = U["down"]["scale"].shape[1]; n_out = U["down"]["n_out"]; W = int(U["down"]["packed"].shape[-1])
+    yz = bool(slot_fastest) and T > 1 and slot_fastest_enabled()
     ins = [hr, h, idx.reshape(-1).astype(mx.uint32), rw.reshape(-1).astype(mx.float32), U["down"]["packed"], U["down"]["scale"]] + \
           ([U["down"]["ocol"], U["down"]["wout"]] if n_out else [])
-    kern = _down_v3(kin, N, U["K_dn"], U["L"], n_out, k, W, _dt(h), _fp16_guard())
-    return kern(inputs=ins, grid=(64, N // 8, T), threadgroup=(64, 1, 1), output_shapes=[(T, N)], output_dtypes=[mx.float32])[0]
+    kern = _down_v3(kin, N, U["K_dn"], U["L"], n_out, k, W, _dt(h), _fp16_guard(), yz)
+    return kern(inputs=ins, grid=(64, T, N // 8) if yz else (64, N // 8, T), threadgroup=(64, 1, 1),
+                output_shapes=[(T, N)], output_dtypes=[mx.float32])[0]
 
 
 # ------------------------------------------------------------------------------------------- prefill (bring-up)

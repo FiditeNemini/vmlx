@@ -137,16 +137,18 @@ class JTMixedSwitchGLU(nn.Module):
         if self.gu_fmt == "jangt":
             U = self._unit()
             return MK.gather_gate_up_swiglu_v3(MK.rotate_rows(x2, U["su_gu"]), x2, idx2, U, out_dtype=mx.float32, limit=self.limit,
-                                               rot_out=rot_out)
+                                               rot_out=rot_out, slot_fastest=x2.shape[0] > 1)
         from vmlx_engine.jangh import kernels as K
         g, u = self.gate_proj, self.up_proj
         return K.gather_qmv(K.h32_rows(x2, mx.float32), g.tq2_packed, g.tq2_scales, g._cb, idx2.reshape(-1).astype(mx.uint32),
-                            g.bits, x_per_dispatch=False, packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit)
+                            g.bits, x_per_dispatch=False, packed_u=u.tq2_packed, scales_u=u.tq2_scales, limit=self.limit,
+                            slot_fastest=x2.shape[0] > 1)
 
     def _decode_down(self, h, idx2, w2, out_dtype, h_rotated: bool = False):
         if self.dn_fmt == "jangt":
             U = self._unit()
-            return MK.gather_down_weighted_v3(MK.rotate_rows(h, U["sv_dn"], idx2.reshape(-1)), h, idx2, w2, U).astype(out_dtype)
+            return MK.gather_down_weighted_v3(MK.rotate_rows(h, U["sv_dn"], idx2.reshape(-1)), h, idx2, w2, U,
+                                              slot_fastest=idx2.shape[0] > 1).astype(out_dtype)
         from vmlx_engine.jangh import kernels as K
         d = self.down_proj
         # JANGT_DN_ROT_KERNEL=1: the JANGH down kernel rotates each lane pair's 32 inputs itself (one dispatch less);
@@ -154,7 +156,7 @@ class JTMixedSwitchGLU(nn.Module):
         in_kernel = not h_rotated and os.environ.get("JANGT_DN_ROT_KERNEL", "0") == "1"
         hr = h if (h_rotated or in_kernel) else K.h32_rows(h, mx.float32)
         return K.gather_qmv_weighted_down(hr, d.tq2_packed, d.tq2_scales, d._cb, idx2.astype(mx.uint32), w2,
-                                          d.bits, out_dtype, rotate=in_kernel)
+                                          d.bits, out_dtype, rotate=in_kernel, slot_fastest=idx2.shape[0] > 1)
 
     def _jt_mm(self, xs_rot, xs_raw, idx_s, P, plan=None):
         """Expert-sorted JANGT projection: NAX trellis tiles (jangt.prefill) + outlier columns. fp32 out."""

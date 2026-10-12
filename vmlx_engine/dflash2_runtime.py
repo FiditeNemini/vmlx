@@ -411,11 +411,46 @@ class _DFlash2SessionStore:
         self.max_entries = int(max_entries)
         self._entries: list[dict] = []
         self._lock = threading.Lock()
+        # SSD write receipts of entries that also went to the SSD tier, keyed by id(entry) (the entry dict itself is
+        # serialized by the SSD writer thread, so the receipt is kept beside it, not in it).
+        self._receipts: dict[int, tuple[dict, Any]] = {}
+        self.ram_released = 0
+
+    def attach_receipt(self, entry: dict, receipt) -> None:
+        with self._lock:
+            if any(e is entry for e in self._entries):
+                self._receipts[id(entry)] = (entry, receipt)
+
+    def release_durable(self) -> tuple[int, int]:
+        """SSD-only policy (glm_dflash2.ssd_only_ram_release_enabled): drop entries whose SSD copy is durable; a later
+        request restores them from the SSD tier. Returns (released, still_pending)."""
+        from .glm_dflash2 import _receipt_durable, ssd_only_ram_release_enabled
+        if not ssd_only_ram_release_enabled():
+            return 0, 0
+        released = pending = 0
+        with self._lock:
+            keep = []
+            for entry in self._entries:
+                pair = self._receipts.get(id(entry))
+                if pair is not None and pair[0] is entry and _receipt_durable(pair[1]):
+                    self._receipts.pop(id(entry), None)
+                    released += 1
+                    continue
+                if pair is not None and pair[0] is entry and not pair[1].done():
+                    pending += 1
+                keep.append(entry)
+            self._entries = keep
+            live = {id(e) for e in keep}
+            for k in [k for k in self._receipts if k not in live]:
+                self._receipts.pop(k, None)
+            self.ram_released += released
+        return released, pending
 
     def take_matching(self, model_key: Any, prompt_tokens: list[int]) -> Optional[dict]:
         """Pop and return the entry covering the most cached positions whose
         tokens are a prefix of ``prompt_tokens`` and whose cache leaves a
         non-empty delta to prefill. Ownership transfers to the caller."""
+        self.release_durable()
         with self._lock:
             best_i = -1
             best_cached = 0
@@ -431,13 +466,16 @@ class _DFlash2SessionStore:
                     best_cached = cached
             if best_i < 0:
                 return None
-            return self._entries.pop(best_i)
+            taken = self._entries.pop(best_i)
+            self._receipts.pop(id(taken), None)
+            return taken
 
     def put(self, entry: dict) -> None:
         with self._lock:
             self._entries.append(entry)
             while len(self._entries) > self.max_entries:
-                self._entries.pop(0)
+                dropped = self._entries.pop(0)
+                self._receipts.pop(id(dropped), None)
 
     def describe_misses(self, model_key: Any, prompt_tokens: list[int]) -> list[str]:
         """Diagnostics for a failed match: how far each stored entry agrees
@@ -467,6 +505,7 @@ class _DFlash2SessionStore:
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
+            self._receipts.clear()
 
     def stats(self) -> dict:
         # Metadata only: never evaluate or copy model/cache arrays for polling.
@@ -476,6 +515,7 @@ class _DFlash2SessionStore:
                 "max_entries": self.max_entries,
                 "tokens": sum(int(e["cache_len"]) for e in self._entries),
                 "tokens_note": "sum_across_entries; prefixes_may_overlap",
+                "ram_released_after_ssd": self.ram_released,
             }
 
 
@@ -534,7 +574,10 @@ def _store_session(entry: dict, ram_only: bool = False):
             # The RAM store above already serves the next lookup of this
             # entry, so the next request need not wait for the SSD copy
             # (SimpleEngine still settles it before teardown and cache clears).
+            # SSD-only policy: once the copy is durable the RAM entry is dropped
+            # (release_durable_session_ram) and the SSD tier serves it instead.
             receipt.vmlx_lookup_served_from_ram = True
+            _SESSION_STORE.attach_receipt(entry, receipt)
             return receipt
         except Exception:
             logger.warning("DFlash2 SSD snapshot failed; RAM entry kept", exc_info=True)
@@ -542,6 +585,13 @@ def _store_session(entry: dict, ram_only: bool = False):
             receipt.set_result({"outcome": "failed", "durable": False,
                                 "retained_tokens": 0, "detail": "DFlash2 SSD snapshot failed"})
             return receipt
+
+
+def release_durable_session_ram() -> tuple[int, int]:
+    """Model thread: drop RAM session entries whose SSD copy is durable. Returns (released, still_pending)."""
+    if _SESSION_SSD is None:
+        return 0, 0
+    return _SESSION_STORE.release_durable()
 
 
 def clear_sessions(include_ssd: bool) -> int:

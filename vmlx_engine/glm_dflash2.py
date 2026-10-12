@@ -216,10 +216,31 @@ def generate_ar(target: GLMDFlashTarget, prompt_ids, max_tokens: int, eos: set, 
 
 
 class _PrefixSnapshot:
-    __slots__ = ("cache", "hidden", "logits")
+    __slots__ = ("cache", "hidden", "logits", "receipt")
 
     def __init__(self, cache, hidden, logits):
         self.cache, self.hidden, self.logits = cache, hidden, logits
+        self.receipt = None                     # SSD write receipt (concurrent Future) while the copy is in flight
+
+
+def ssd_only_ram_release_enabled() -> bool:
+    """SSD caching means RAM holds the model, not the conversation (2026-10-12).
+
+    With an SSD tier configured, a RAM snapshot is kept only until its SSD copy is durable, then dropped; a later
+    turn restores from SSD. Before this the GLM lane kept up to 4 snapshots (3 GiB cap) and the generic DFlash2 lane
+    up to 4 (no byte cap) resident while idle: GLM-5.3 JANGHT2.4 sat at +7 GiB above its weights after a 17k chat.
+    VMLX_SSD_ONLY_RAM_RELEASE=0 keeps the RAM copies (A/B and diagnostics)."""
+    return os.environ.get("VMLX_SSD_ONLY_RAM_RELEASE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _receipt_durable(receipt) -> bool:
+    if receipt is None or not receipt.done():
+        return False
+    try:
+        result = receipt.result()
+    except Exception:
+        return False
+    return bool(isinstance(result, dict) and result.get("durable"))
 
 
 def _detached_copy(v):
@@ -265,11 +286,30 @@ class PrefixStore:
         self.max_bytes = float(max_bytes)
         self.entries = OrderedDict()
         self.hits = self.misses = self.evictions = 0
+        self.ram_released = 0
         self.disk = disk
         self.last_persistence = None
         self.last_source = ""                   # "ram" | "disk" | "" (miss) for the latest lookup
 
+    def release_durable_ram(self) -> tuple[int, int]:
+        """Model thread only. Drop RAM snapshots whose SSD copy is durable (SSD-only policy).
+
+        Returns (released, still_pending): pending = SSD writes not finished yet, whose RAM copy is still needed."""
+        if self.disk is None or not ssd_only_ram_release_enabled():
+            return 0, 0
+        released = pending = 0
+        for key in [k for k, snap in self.entries.items() if snap.receipt is not None]:
+            snap = self.entries[key]
+            if _receipt_durable(snap.receipt):
+                del self.entries[key]
+                released += 1
+            elif not snap.receipt.done():
+                pending += 1
+        self.ram_released += released
+        return released, pending
+
     def lookup(self, ids):
+        self.release_durable_ram()
         best = None
         for key in self.entries:
             n = len(key)
@@ -281,10 +321,11 @@ class PrefixStore:
             if found is not None:
                 n, snap = found
                 key = tuple(int(t) for t in ids[:n])
-                self.entries[key] = snap
-                self._evict()
-                if key in self.entries:
-                    self.entries.move_to_end(key)
+                if not ssd_only_ram_release_enabled():      # SSD-only: a snapshot read from SSD is not kept in RAM
+                    self.entries[key] = snap
+                    self._evict()
+                    if key in self.entries:
+                        self.entries.move_to_end(key)
                 self.hits += 1
                 self.last_source = "disk"
                 return n, snap
@@ -305,6 +346,8 @@ class PrefixStore:
         self._evict()
         if self.disk is not None:
             self.last_persistence = self.disk.put(key, snap)
+            snap.receipt = self.last_persistence
+            self.release_durable_ram()
 
     def _evict(self):
         while len(self.entries) > self.max_entries or (len(self.entries) > 1 and self.nbytes() > self.max_bytes):
@@ -630,6 +673,16 @@ def prefix_store_for(target) -> "PrefixStore":
                                                 float(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_MAX_GB", "3")) * 2 ** 30,
                                                 disk=disk)
     return st
+
+
+def release_durable_prefix_ram() -> tuple[int, int]:
+    """Model thread only: SSD-only release across every GLM prefix store. Returns (released, still_pending)."""
+    released = pending = 0
+    for store in list(_PREFIX_STORES.values()):
+        r, p = store.release_durable_ram()
+        released += r
+        pending += p
+    return released, pending
 
 
 class AdaptiveSpec:

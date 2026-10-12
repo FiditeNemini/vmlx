@@ -1,0 +1,175 @@
+"""SSD caching keeps RAM at the model's size: DFlash2 RAM snapshots go once their SSD copy is durable, and an idle
+SimpleEngine returns MLX's allocator free list (2026-10-12).
+
+Measured before: GLM-5.3 JANGHT2.4 (93.75 GiB with its drafter) idled at 100.6-101.4 GiB after 17k/67k chats -- its
+lane's RAM prefix snapshots (<= 3 GiB) plus the 4 GB allocator free list.
+"""
+
+import asyncio
+from concurrent.futures import Future
+
+import pytest
+
+mx = pytest.importorskip("mlx.core")
+
+from vmlx_engine import dflash2_runtime as D  # noqa: E402
+from vmlx_engine import glm_dflash2 as G  # noqa: E402
+from vmlx_engine import mlx_memory  # noqa: E402
+
+
+def _receipt(durable=None):
+    f = Future()
+    if durable is not None:
+        f.set_result({"outcome": "stored" if durable else "refused", "durable": bool(durable)})
+    return f
+
+
+class _Disk:
+    def __init__(self, snap=None):
+        self.snap, self.lookups = snap, 0
+
+    def lookup(self, ids, min_len=0):
+        self.lookups += 1
+        return None if self.snap is None else (3, self.snap)
+
+
+def _snap(receipt):
+    s = G._PrefixSnapshot([], None, None)
+    s.receipt = receipt
+    return s
+
+
+def test_glm_prefix_store_drops_ram_copy_once_durable(monkeypatch):
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
+    st = G.PrefixStore(4, 3 * 2 ** 30, disk=_Disk())
+    pending, failed = _receipt(), _receipt(False)
+    st.entries[(1, 2, 3)] = _snap(pending)
+    st.entries[(1, 2)] = _snap(failed)
+    assert st.release_durable_ram() == (0, 1)                 # write in flight: RAM copy still needed
+    pending.set_result({"outcome": "stored", "durable": True})
+    assert st.release_durable_ram() == (1, 0)
+    assert list(st.entries) == [(1, 2)]                       # a refused SSD write keeps its RAM copy
+    assert st.ram_released == 1
+
+
+def test_glm_disk_hit_is_not_kept_in_ram(monkeypatch):
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
+    disk_snap = _snap(None)
+    st = G.PrefixStore(4, 3 * 2 ** 30, disk=_Disk(disk_snap))
+    n, snap = st.lookup([1, 2, 3, 4])
+    assert (n, snap) == (3, disk_snap) and st.last_source == "disk"
+    assert not st.entries
+
+
+def test_glm_release_switch_off_keeps_ram_tier(monkeypatch):
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "0")
+    disk_snap = _snap(None)
+    st = G.PrefixStore(4, 3 * 2 ** 30, disk=_Disk(disk_snap))
+    st.entries[(9,)] = _snap(_receipt(True))
+    assert st.release_durable_ram() == (0, 0) and (9,) in st.entries
+    st.lookup([1, 2, 3, 4])
+    assert (1, 2, 3) in st.entries                            # old behaviour: disk hits cached in RAM
+
+
+def test_glm_put_attaches_receipt_and_releases_already_durable(monkeypatch):
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
+    monkeypatch.setattr(G, "_clone_caches", lambda cache, detach_mla=False: cache)
+
+    class Disk(_Disk):
+        def __init__(self):
+            super().__init__()
+            self.receipts = []
+
+        def put(self, key, snap):
+            r = _receipt(True if len(key) == 2 else None)     # (5, 6) already on SSD; (7, 8, 9) in flight
+            self.receipts.append(r)
+            return r
+
+    disk = Disk()
+    st = G.PrefixStore(4, 3 * 2 ** 30, disk=disk)
+    st.put([5, 6], [], None, None)
+    assert not st.entries and st.last_persistence is disk.receipts[0]
+    st.put([7, 8, 9], [], None, None)
+    assert list(st.entries) == [(7, 8, 9)] and st.entries[(7, 8, 9)].receipt is disk.receipts[1]
+
+
+def test_generic_session_store_releases_durable_entries(monkeypatch):
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
+    store = D._DFlash2SessionStore(4)
+    a = {"model_key": "m", "tokens": [1, 2], "cache_len": 2}
+    b = {"model_key": "m", "tokens": [1, 2, 3], "cache_len": 3}
+    c = {"model_key": "m", "tokens": [4], "cache_len": 1}
+    for e in (a, b, c):
+        store.put(e)
+    ra, rb = _receipt(), _receipt()
+    store.attach_receipt(a, ra)
+    store.attach_receipt(b, rb)                               # c: media entry, RAM only (no receipt)
+    assert store.release_durable() == (0, 2)
+    rb.set_result({"outcome": "stored", "durable": True})
+    ra.set_result({"outcome": "failed", "durable": False})
+    assert store.release_durable() == (1, 0)
+    assert [e["tokens"] for e in store._entries] == [[1, 2], [4]]
+    assert store.take_matching("m", [1, 2, 3, 4]) is a        # the durable [1,2,3] entry now restores from SSD
+    assert store.stats()["ram_released_after_ssd"] == 1
+
+
+def test_release_idle_memory_consults_loaded_lanes_and_clears(monkeypatch):
+    calls = []
+
+    class FakeMx:
+        cache = 5 << 30
+
+        def get_cache_memory(self):
+            return self.cache
+
+        def clear_cache(self):
+            calls.append("clear")
+            self.cache = 0
+
+    monkeypatch.setattr(G, "release_durable_prefix_ram", lambda: (calls.append("glm") or (2, 1)))
+    monkeypatch.setattr(D, "release_durable_session_ram", lambda: (calls.append("generic") or (1, 0)))
+    out = mlx_memory.release_idle_memory(mx=FakeMx())
+    assert calls == ["glm", "generic", "clear"]
+    assert out == {"released_snapshots": 3, "pending_snapshots": 1, "freed_bytes": 5 << 30}
+
+
+def test_simple_engine_idle_lock_releases_after_grace_only_when_idle(monkeypatch):
+    from vmlx_engine.engine import simple as S
+
+    monkeypatch.setenv("VMLX_IDLE_ALLOCATOR_RELEASE_S", "0.05")
+    fired = []
+    pending = {"n": 1}
+
+    def fake_release():
+        fired.append(time_now())
+        p = pending["n"]
+        pending["n"] = 0
+        return {"released_snapshots": 0, "pending_snapshots": p, "freed_bytes": 1 << 30}
+
+    import time
+    time_now = time.monotonic
+    monkeypatch.setattr(S, "release_idle_memory", fake_release)
+
+    async def scenario():
+        from concurrent.futures import ThreadPoolExecutor
+
+        eng = S.SimpleEngine.__new__(S.SimpleEngine)
+        eng._loaded = True
+        eng._model_executor = ThreadPoolExecutor(max_workers=1)   # not the process-wide one other tests replace
+        lock = S._IdleReleaseLock(eng)
+        eng._generation_lock = lock
+        async with lock:
+            pass
+        await asyncio.sleep(0.02)
+        async with lock:                                      # re-taken inside the grace: no release yet
+            pass
+        assert fired == []
+        await asyncio.sleep(0.12)
+        assert len(fired) == 1                                # idle for the grace: one release
+        await asyncio.sleep(1.2)
+        assert len(fired) == 2                                # a pending SSD write re-arms it (>= 1 s backoff)
+        await asyncio.sleep(1.2)
+        assert len(fired) == 2
+        eng._model_executor.shutdown(wait=True)
+
+    asyncio.run(scenario())

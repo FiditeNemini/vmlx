@@ -334,8 +334,12 @@ def test_prefix_disk_tier_restores_after_restart(tmp_path):
         second = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))      # restart: empty RAM, same directory
         got, st = _run(model, target, p2, 20, second)
         assert st.cached_tokens == len(p1) and second.disk.hits == 1 and st.cache_source == "disk"
-        _, st_ram = _run(model, target, p2, 20, second)                       # now held in RAM
-        assert st_ram.cached_tokens == len(p2) and st_ram.cache_source == "ram"
+        _, st_ram = _run(model, target, p2, 20, second)                       # the p2 snapshot `second` stored
+        # SSD caching (default): the RAM copy is dropped once its SSD copy is durable, so the repeat restores from SSD;
+        # VMLX_SSD_ONLY_RAM_RELEASE=0 keeps the old RAM tier.
+        from vmlx_engine.glm_dflash2 import ssd_only_ram_release_enabled
+        assert st_ram.cached_tokens == len(p2)
+        assert st_ram.cache_source == ("disk" if ssd_only_ram_release_enabled() else "ram")
         assert got == cold
         second.disk.close()
         third = PrefixStore(4, disk=PrefixDiskTier(tmp_path, 2 ** 30))

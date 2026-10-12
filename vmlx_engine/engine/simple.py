@@ -12,6 +12,7 @@ import functools
 import logging
 import threading
 import time
+import weakref
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -19,7 +20,7 @@ from typing import Any
 from ..api.tool_calling import check_and_inject_fallback_tools, convert_tools_for_template
 from ..api.utils import clean_output_text, is_mllm_model
 from ..errors import PromptTooLongError
-from ..mlx_memory import clear_mlx_memory_cache
+from ..mlx_memory import clear_mlx_memory_cache, idle_allocator_release_seconds, release_idle_memory
 from ..utils.terminal_persistence import (
     log_admission_wait,
     settle_terminal_persistence,
@@ -70,6 +71,51 @@ def _dflash2_enabled() -> bool:
     return is_dflash2_enabled()
 
 
+class _IdleReleaseLock(asyncio.Lock):
+    """SimpleEngine's generation lock, which also notices when the engine goes idle (2026-10-12).
+
+    When it is released and not taken again within mlx_memory.idle_allocator_release_seconds() (2 s), the engine
+    hands memory back on its model thread (mlx_memory.release_idle_memory): the DFlash2 lanes' RAM snapshots whose
+    SSD copy is durable, then MLX's allocator free list. Every acquire bumps ``epoch`` and cancels the timer, so a
+    request that arrives first keeps every warm buffer; an idle engine falls back to the model's own size."""
+
+    def __init__(self, engine):
+        super().__init__()
+        self._engine_ref = weakref.ref(engine)
+        self.epoch = 0
+        self._timer = None
+
+    async def acquire(self):
+        self.epoch += 1
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        return await super().acquire()
+
+    def release(self):
+        super().release()
+        self.arm(self.epoch)
+
+    def arm(self, epoch: int, delay: float | None = None) -> None:
+        grace = idle_allocator_release_seconds() if delay is None else float(delay)
+        if grace < 0 or epoch != self.epoch:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = loop.call_later(grace, self._fire, epoch, grace)
+
+    def _fire(self, epoch: int, delay: float) -> None:
+        self._timer = None
+        engine = self._engine_ref()
+        if engine is None or self.locked() or epoch != self.epoch:
+            return
+        asyncio.ensure_future(engine._release_idle_memory(epoch, delay))
+
+
 class SimpleEngine(BaseEngine):
     """
     Simple engine for direct model calls.
@@ -105,8 +151,9 @@ class SimpleEngine(BaseEngine):
         self._model = None
         self._loaded = False
 
-        # Lock to serialize MLX operations (prevents Metal command buffer conflicts)
-        self._generation_lock = asyncio.Lock()
+        # Lock to serialize MLX operations (prevents Metal command buffer conflicts);
+        # when it stays free for the idle grace, memory goes back (_release_idle_memory).
+        self._generation_lock = _IdleReleaseLock(self)
         # Abort flag — checked between tokens in stream_generate
         self._abort_requested = False
         self._current_request_id: str | None = None
@@ -599,6 +646,25 @@ class SimpleEngine(BaseEngine):
         waited = time.perf_counter() - started
         log_admission_wait(request_id, waited)
         return waited
+
+    async def _release_idle_memory(self, epoch: int, delay: float) -> None:
+        """Idle: SSD-durable snapshots and MLX's allocator free list back (model thread). Retries while SSD writes of
+        the finished request are still in flight, backing off to 30 s."""
+        lock = self._generation_lock
+        if not self._loaded or lock.locked() or getattr(lock, "epoch", epoch) != epoch:
+            return
+        try:
+            result = await self._run_model_call(release_idle_memory)
+        except Exception as e:  # noqa: BLE001 - idle housekeeping never fails serving
+            logger.debug("Idle memory release skipped: %s", e)
+            return
+        if result.get("released_snapshots") or result.get("freed_bytes", 0) >= (64 << 20):
+            logger.info(
+                "Idle: released %d SSD-durable RAM snapshot(s) and %.2f GB of MLX allocator cache",
+                int(result.get("released_snapshots", 0)), result.get("freed_bytes", 0) / (1024**3),
+            )
+        if result.get("pending_snapshots") and isinstance(lock, _IdleReleaseLock):
+            lock.arm(epoch, delay=min(30.0, max(0.5, float(delay)) * 2))
 
     async def stop(self) -> None:
         """Stop the engine and cleanup resources."""

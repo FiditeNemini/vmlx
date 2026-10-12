@@ -58,6 +58,52 @@ def clear_mlx_memory_cache(
 
 
 
+def idle_allocator_release_seconds() -> float:
+    """Grace before an idle SimpleEngine hands memory back (``VMLX_IDLE_ALLOCATOR_RELEASE_S``, default 2.0 s;
+    negative = never). Back-to-back requests (a tool continuation sent at once) still reuse warm buffers."""
+    raw = os.environ.get("VMLX_IDLE_ALLOCATOR_RELEASE_S", "2.0")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def release_idle_memory(*, mx: Any | None = None, log: logging.Logger | None = None) -> dict:
+    """Idle engine, model thread only: RAM back to the model's size (2026-10-12).
+
+    1. Drop the DFlash2 lanes' RAM snapshots whose SSD copy is durable (SSD-only policy, see
+       glm_dflash2.ssd_only_ram_release_enabled); snapshots whose SSD write is still in flight stay and are counted
+       as pending so the caller can try again.
+    2. Return MLX's allocator free list to the OS. Buffers a finished request freed stay in it for reuse (up to the
+       serving cache limit, 4 GB) and are charged to the process: GLM-5.3 idled at +3.7 GiB from this alone.
+    Only modules already imported are consulted. Returns released/pending snapshot counts and freed bytes."""
+    import sys
+
+    active_log = log or logger
+    released = pending = 0
+    for name, fn in (("vmlx_engine.glm_dflash2", "release_durable_prefix_ram"),
+                     ("vmlx_engine.dflash2_runtime", "release_durable_session_ram")):
+        module = sys.modules.get(name)
+        if module is None or not callable(getattr(module, fn, None)):
+            continue
+        try:
+            r, p = getattr(module, fn)()
+            released += int(r)
+            pending += int(p)
+        except Exception as exc:  # noqa: BLE001 - idle housekeeping never fails serving
+            active_log.warning("Idle RAM release via %s.%s failed: %s", name, fn, exc)
+    if mx is None:
+        try:
+            import mlx.core as mx  # type: ignore[no-redef]
+        except Exception:  # noqa: BLE001
+            return {"released_snapshots": released, "pending_snapshots": pending, "freed_bytes": 0}
+    getter = getattr(mx, "get_cache_memory", None)
+    before = int(getter()) if callable(getter) else 0
+    clear_mlx_memory_cache(mx=mx, log=active_log)
+    after = int(getter()) if callable(getter) else 0
+    return {"released_snapshots": released, "pending_snapshots": pending, "freed_bytes": max(0, before - after)}
+
+
 class TerminalCollectionGate:
     """Whether the post-terminal full ``gc.collect()`` has anything to reclaim.
 

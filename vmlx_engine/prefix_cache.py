@@ -7833,6 +7833,7 @@ class BlockAwarePrefixCache:
             # are consecutive members of one group file is read as ONE payload
             # spanning them; the loop then skips the blocks it covered.
             _span_skip = 0
+            _span_reads = _span_blocks = 0
             for _block_index, block_id in enumerate(block_table.block_ids):
                 if _span_skip:
                     _span_skip -= 1
@@ -7905,6 +7906,8 @@ class BlockAwarePrefixCache:
                                 disk_backed_block_ids.add(_span_id)
                             all_block_data.append(_span_data)
                             _span_skip = _span_n - 1
+                            _span_reads += 1
+                            _span_blocks += _span_n
                             continue
                     if _disk is not None and block.block_hash is not None:
                         try:
@@ -7997,6 +8000,11 @@ class BlockAwarePrefixCache:
 
             if not all_block_data:
                 return None
+            if _span_reads:
+                logger.info(
+                    "Reconstruct read %d of %d blocks as %d group-file span(s) (%d tokens)",
+                    _span_blocks, len(block_table.block_ids), _span_reads, block_table.num_tokens,
+                )
 
             # Diagnostic only, off by default. Reconstructing a long chain has
             # aborted the PROCESS on weight-heavy boxes with an uncatchable

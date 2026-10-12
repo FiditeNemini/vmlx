@@ -43,6 +43,20 @@ COST / TRADE-OFFS
 * Up to three writes per turn (system + boundary + turn entry). They are needed: reasoning
   templates strip <think> from history, so the next USER turn only matches
   the boundary entry, while a TOOL continuation matches the turn entry.
+
+DELTA ENTRIES (v4, 2026-10-12)
+------------------------------
+Full-attention KV is append-only, so an entry whose cache was built ON an entry that is already on SSD (the
+request's previous snapshot, or the entry it resumed from) stores only the KV rows its parent does not have,
+``[parent_len, cache_len)``, plus the fixed-size state (GatedDeltaNet conv/recurrent, the drafter's rotating
+window, the drafter context rows) whole. Before this every entry held its whole prefix: Qwen3.8 27B JANGH2 wrote
+5.8 GB per entry at 84.7k tokens, three per cold turn and two (11.6 GB) for a 31-token continuation, and each
+write made a contiguous copy of the live KV. ``meta["parent"]`` names the parent's signature and length; a restore
+loads the chain root-first, compares every link's token ids with the prompt, and assembles each KV layer once, with
+headroom so the first append is in place. A missing or failed parent makes the child a miss (the writer refuses to
+publish a child whose parent did not become durable), never wrong state. Chains are cut to a full entry every
+``MAX_CHAIN`` links. Delta rows are COPIED when packed: a view would keep the live KV buffer referenced, and MLX's
+copy-on-write would then duplicate the whole buffer on the next decode append.
 * Size is bounded by the same aggregate SSD budget as every other managed
   cache (``--block-disk-cache-max-gb`` / ``--block-disk-cache-max-percent``),
   with LRU eviction by the pool.  ``--disable-block-disk-cache`` turns it off.
@@ -72,8 +86,11 @@ logger = logging.getLogger(__name__)
 # v3 (2026-10-08): v2 drafter caches rebuilt on resume were written with a
 # forced absolute offset over a physical buffer and could hold up to 255 zero
 # K/V rows (dflash2_runtime._patch_rotating_cache_resume_math). Never read v2.
-SCHEMA = "dflash2_session_v3"
-LEGACY_SCHEMAS = ("dflash2_session_v1", "dflash2_session_v2")
+# v4 (2026-10-12): delta entries (``meta["parent"]``); v3 readers would restore a delta as a full cache. Never read v3.
+SCHEMA = "dflash2_session_v4"
+LEGACY_SCHEMAS = ("dflash2_session_v1", "dflash2_session_v2", "dflash2_session_v3")
+MAX_CHAIN = 8                   # links before a full entry is written again (bounds restore reads and dependencies)
+_DELTA_CLASSES = ("KVCache",)   # append-only caches whose state is (keys, values) with the token axis at dim 2
 
 
 def _token_digest(tokens: list[int]) -> str:
@@ -101,21 +118,39 @@ def _has_meta_setter(cache: Any) -> bool:
     return isinstance(prop, property) and prop.fset is not None
 
 
-def _pack(prefix: str, caches: list, arrays: dict, layers: list) -> None:
+def _detached(a):
+    """A new buffer with identical bits (x * 1 keeps -0.0; bool via logical_and)."""
+    import mlx.core as mx
+
+    return mx.logical_and(a, True) if a.dtype == mx.bool_ else a * 1
+
+
+def _delta_layer(c, state, base: int) -> bool:
+    return (base > 0 and type(c).__name__ in _DELTA_CLASSES and isinstance(state, (list, tuple)) and len(state) == 2
+            and all(a is not None and a.ndim == 4 for a in state) and int(state[0].shape[2]) > base
+            and int(getattr(c, "offset", -1)) == int(state[0].shape[2]))
+
+
+def _pack(prefix: str, caches: list, arrays: dict, layers: list, base: int = 0) -> None:
+    """base > 0: KV layers keep only rows [base, offset) (copied, see DELTA ENTRIES); other layers whole."""
     for i, c in enumerate(caches):
         state = list(c.state) if isinstance(c.state, (list, tuple)) else [c.state]
         nones = []
+        delta = _delta_layer(c, state, base)
         for j, a in enumerate(state):
             if a is None:
                 nones.append(j)
             else:
-                arrays[f"{prefix}{i}.{j}"] = a
+                arrays[f"{prefix}{i}.{j}"] = _detached(a[:, :, base:, :]) if delta else a
         meta = None
         if _has_meta_setter(c):
             m = c.meta_state
             meta = list(m) if isinstance(m, (list, tuple)) else m
-        layers.append({"cls": type(c).__name__, "n": len(state), "none": nones,
-                       "tuple": isinstance(c.state, (list, tuple)), "meta": meta})
+        info = {"cls": type(c).__name__, "n": len(state), "none": nones,
+                "tuple": isinstance(c.state, (list, tuple)), "meta": meta}
+        if delta:
+            info["delta"] = int(base)
+        layers.append(info)
 
 
 def _unpack(prefix: str, factory: Callable[[], list], arrays: dict, layers: list) -> Optional[list]:
@@ -126,6 +161,64 @@ def _unpack(prefix: str, factory: Callable[[], list], arrays: dict, layers: list
         if type(dst).__name__ != info["cls"]:
             return None
         state = [None if j in info["none"] else arrays[f"{prefix}{i}.{j}"] for j in range(info["n"])]
+        dst.state = state if info["tuple"] else state[0]
+        if info["meta"] is not None:
+            dst.meta_state = tuple(info["meta"]) if isinstance(info["meta"], list) else info["meta"]
+    return fresh
+
+
+def _assemble_kv(pieces: list, step: int):
+    """Concatenate one KV layer's chain pieces (root first) along the token axis into ONE buffer with headroom up to
+    the next ``step`` multiple, so the first append after the restore writes in place instead of copying the whole
+    buffer to grow it. Evaluated per layer so the loaded pieces are freed before the next layer is read."""
+    import mlx.core as mx
+
+    n = sum(int(p.shape[2]) for p in pieces)
+    pad = (-n) % step if step > 0 else 0
+    if pad == 0 and step > 0:
+        pad = step
+    parts = list(pieces)
+    if pad:
+        b, h, _, d = pieces[0].shape
+        parts.append(mx.zeros((b, h, pad, d), dtype=pieces[0].dtype))
+    out = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=2)
+    mx.eval(out)
+    return out, n
+
+
+def _unpack_chain(prefix: str, key: str, factory: Callable[[], list], links: list) -> Optional[list]:
+    """Rebuild a cache list from a root-first chain of (arrays, meta) links: append-only KV layers concatenate the
+    root's rows and every delta; every other layer comes whole from the leaf. Layout mismatches are misses."""
+    fresh = factory()
+    leaf_arrays, leaf_meta = links[-1]
+    leaf_layers = leaf_meta[key]
+    if len(fresh) != len(leaf_layers):
+        return None
+    for i, (dst, info) in enumerate(zip(fresh, leaf_layers)):
+        if type(dst).__name__ != info["cls"]:
+            return None
+        kv_layer = type(dst).__name__ in _DELTA_CLASSES and info["n"] == 2 and not info["none"]
+        if kv_layer:
+            pieces_k, pieces_v, expect = [], [], 0
+            for arrays, meta in links:
+                linfo = meta[key][i]
+                if linfo["cls"] != info["cls"]:
+                    return None
+                base = int(linfo.get("delta", 0))
+                if base != expect:                          # a gap or overlap in the chain: never guess
+                    return None
+                k, v = arrays[f"{prefix}{i}.0"], arrays[f"{prefix}{i}.1"]
+                pieces_k.append(k); pieces_v.append(v)
+                expect = base + int(k.shape[2])
+            step = int(getattr(dst, "step", 256) or 256)
+            keys, n = _assemble_kv(pieces_k, step)
+            values, _ = _assemble_kv(pieces_v, step)
+            del pieces_k, pieces_v
+            dst.keys, dst.values, dst.offset = keys, values, n
+            continue
+        if "delta" in info:
+            return None
+        state = [None if j in info["none"] else leaf_arrays[f"{prefix}{i}.{j}"] for j in range(info["n"])]
         dst.state = state if info["tuple"] else state[0]
         if info["meta"] is not None:
             dst.meta_state = tuple(info["meta"]) if isinstance(info["meta"], list) else info["meta"]
@@ -163,8 +256,8 @@ class DFlash2SessionSSD:
         if self.legacy_cleared:
             logger.info("DFlash2 SSD: cleared %d bytes of legacy session entries (schema %s)",
                         self.legacy_cleared, ",".join(LEGACY_SCHEMAS))
-        self.stats = {"writes": 0, "write_bytes": 0, "write_s": 0.0, "write_errors": 0,
-                      "dropped": 0, "hits": 0, "hit_tokens": 0, "load_s": 0.0, "misses": 0}
+        self.stats = {"writes": 0, "write_bytes": 0, "write_s": 0.0, "write_errors": 0, "delta_writes": 0,
+                      "dropped": 0, "hits": 0, "hit_tokens": 0, "load_s": 0.0, "misses": 0, "chain_misses": 0}
         # Two prefill snapshots plus a reserved final-turn slot. Requests
         # settle their terminal receipt before releasing the generation lock.
         self._q: "queue.Queue[tuple]" = queue.Queue(maxsize=self.queue_depth + 1)
@@ -172,13 +265,39 @@ class DFlash2SessionSSD:
         self._worker.start()
 
     # ---- write ---------------------------------------------------------------
+    @staticmethod
+    def _usable_parent(entry: dict) -> Optional[dict]:
+        """``entry["ssd_parent"]`` (``{"sig", "len", "depth", "receipt"}``: the SSD entry this cache was built on)
+        when a delta against it is sound: a strict prefix by signature, chain not too deep, its write not failed."""
+        parent = entry.get("ssd_parent")
+        if not parent:
+            return None
+        n, tokens = int(parent.get("len", 0)), entry["tokens"]
+        if not 0 < n < int(entry["cache_len"]) or n > len(tokens) or int(parent.get("depth", 0)) + 1 > MAX_CHAIN:
+            return None
+        if signature_for([int(t) for t in tokens[:n]]) != parent.get("sig"):
+            return None
+        receipt = parent.get("receipt")
+        if receipt is not None and receipt.done():
+            try:
+                if not (receipt.result() or {}).get("durable"):
+                    return None
+            except Exception:
+                return None
+        return parent
+
     def put(self, entry: dict) -> Future:
-        """Snapshot ``entry`` (a RAM-store dict) and queue it for SSD."""
+        """Snapshot ``entry`` (a RAM-store dict) and queue it for SSD (a delta when ``entry["ssd_parent"]`` allows).
+
+        The receipt carries ``vmlx_ssd_ref`` = this entry's ``{"sig", "len", "depth"}`` for a later child."""
         import mlx.core as mx
 
         arrays: dict = {}
         target_layers: list = []
-        _pack("t", entry["target_cache"], arrays, target_layers)
+        parent = self._usable_parent(entry)
+        _pack("t", entry["target_cache"], arrays, target_layers, int(parent["len"]) if parent else 0)
+        if parent is not None and not any("delta" in info for info in target_layers):
+            parent = None                       # no append-only layer used it: a whole entry, no dependency
         draft_layers = None
         if entry.get("draft_cache") is not None:
             # A drafter cache that never ran (e.g. a max_tokens=1 request) has empty layers whose
@@ -200,16 +319,20 @@ class DFlash2SessionSSD:
         arrays["tokens"] = mx.array(tokens, dtype=mx.uint32)
         # Evaluate on the generation thread; the writer only copies bytes.
         mx.eval(list(arrays.values()))
+        depth = int(parent.get("depth", 0)) + 1 if parent else 0
         meta = {"kind": entry.get("kind", "turn"), "cache_len": int(entry["cache_len"]),
                 "rope_delta": entry.get("rope_delta"),
-                "target": target_layers, "draft": draft_layers}
+                "target": target_layers, "draft": draft_layers,
+                "parent": {"sig": parent["sig"], "len": int(parent["len"]), "depth": depth} if parent else None}
         receipt = Future()
+        receipt.vmlx_ssd_ref = {"sig": signature_for(tokens), "len": int(entry["cache_len"]), "depth": depth}
         # Cancelling an HTTP consumer must not cancel an already-owned write.
         receipt.set_running_or_notify_cancel()
         try:
             if meta["kind"] != "turn" and self._q.qsize() >= self.queue_depth:
                 raise queue.Full
-            self._q.put_nowait((signature_for(tokens), arrays, meta, receipt))
+            self._q.put_nowait((signature_for(tokens), arrays, meta, receipt,
+                                (parent or {}).get("receipt")))
         except queue.Full:
             self.stats["dropped"] += 1
             logger.info("DFlash2 SSD write skipped (writer busy); entry stays in RAM only")
@@ -221,11 +344,19 @@ class DFlash2SessionSSD:
         import mlx.core as mx
 
         while True:
-            sig, arrays, meta, receipt = self._q.get()
+            item = self._q.get()
+            sig, arrays, meta, receipt = item[:4]
+            parent_receipt = item[4] if len(item) > 4 else None
+            del item
             t0 = time.perf_counter()
             outcome = {"outcome": "failed", "durable": False,
                        "retained_tokens": 0, "detail": "DFlash2 SSD write failed"}
             try:
+                parent = meta.get("parent")
+                if parent is not None and not self._parent_durable(parent["sig"], parent_receipt):
+                    # FIFO: the parent was queued first, so it is settled by now. A child of a failed or evicted
+                    # parent would restore nothing; refuse it (its RAM entry stays, see dflash2_runtime).
+                    raise OSError("DFlash2 SSD parent entry is not durable")
                 path = self.store.save(
                     sig,
                     lambda tmp: mx.save_safetensors(str(tmp), arrays, {"dflash2": json.dumps(meta)}),
@@ -233,9 +364,13 @@ class DFlash2SessionSSD:
                 self.stats["writes"] += 1
                 self.stats["write_bytes"] += path.stat().st_size
                 self.stats["write_s"] += time.perf_counter() - t0
-                logger.info("DFlash2 SSD stored %s entry: %s tokens, %.0f MB, %.2fs",
+                if parent is not None:
+                    self.stats["delta_writes"] = self.stats.get("delta_writes", 0) + 1
+                    self._touch(parent["sig"])  # the pool's LRU must not evict a parent before its new child
+                logger.info("DFlash2 SSD stored %s entry: %s tokens, %.0f MB, %.2fs%s",
                             meta["kind"], sig.split(":")[0], path.stat().st_size / 1e6,
-                            time.perf_counter() - t0)
+                            time.perf_counter() - t0,
+                            "" if parent is None else " (delta from %d tokens, chain %d)" % (parent["len"], parent["depth"]))
                 outcome = {"outcome": "stored", "durable": True,
                            "retained_tokens": meta["cache_len"],
                            "detail": "DFlash2 SSD " + meta["kind"] + " snapshot"}
@@ -246,10 +381,31 @@ class DFlash2SessionSSD:
                 # A daemon waiting in get() otherwise retains the last full
                 # snapshot indefinitely through these loop-local references.
                 # Release completed payloads before signalling the write done.
-                del arrays, meta
+                del arrays, meta, parent_receipt
                 self._q.task_done()
                 if not receipt.cancelled():
                     receipt.set_result(outcome)
+
+    def _parent_durable(self, sig: str, parent_receipt) -> bool:
+        if parent_receipt is not None:
+            if not parent_receipt.done():
+                return False
+            try:
+                if not (parent_receipt.result() or {}).get("durable"):
+                    return False
+            except Exception:
+                return False
+        data, side = self.store.paths(sig)
+        return data.is_file() and side.is_file()
+
+    def _touch(self, sig: str) -> None:
+        import os
+
+        try:
+            for path in self.store.paths(sig):
+                os.utime(path, None)
+        except OSError:
+            pass
 
     def flush(self, timeout: float = 60.0) -> bool:
         """Wait for queued writes (tests / shutdown)."""
@@ -278,13 +434,18 @@ class DFlash2SessionSSD:
                 meta = json.loads(metadata["dflash2"])
                 if arrays["tokens"].tolist() != prefix or int(meta["cache_len"]) >= len(prompt):
                     continue
-                target = _unpack("t", make_target, arrays, meta["target"])
+                links = self._load_chain(arrays, meta, prefix)
+                if links is None:
+                    self.stats["chain_misses"] += 1
+                    continue
+                target = _unpack_chain("t", "target", make_target, links)
+                del links
                 if target is None:
                     continue
                 draft = None
                 if meta.get("draft") is not None:
                     draft = _unpack("d", make_draft, arrays, meta["draft"])
-                mx.eval([a for a in arrays.values()])
+                mx.eval([a for k, a in arrays.items() if not k.startswith("t")])
             except Exception:
                 logger.warning("DFlash2 SSD entry unreadable; treating as a miss", exc_info=True)
                 continue
@@ -297,9 +458,35 @@ class DFlash2SessionSSD:
                     "target_cache": target, "draft_cache": draft,
                     "draft_hidden_gap": arrays.get("gap") if draft is not None else None,
                     "draft_context": arrays.get("draft_context"),
-                    "load_s": dt}
+                    "load_s": dt,
+                    # this entry is on SSD: a cache built on it can be stored as a delta against it
+                    "ssd_ref": {"sig": signature_for(prefix), "len": int(meta["cache_len"]),
+                                "depth": int((meta.get("parent") or {}).get("depth", 0))}}
         self.stats["misses"] += 1
         return None
+
+    def _load_chain(self, arrays: dict, meta: dict, prefix: list[int]) -> Optional[list]:
+        """Root-first (arrays, meta) links of a (delta) entry; None if any parent is missing, unreadable, not a token
+        prefix of this entry, or the chain is longer than its own depth says."""
+        import mlx.core as mx
+
+        links = [(arrays, meta)]
+        cur = meta
+        while cur.get("parent"):
+            parent = cur["parent"]
+            if len(links) > MAX_CHAIN + 1:
+                return None
+            n = int(parent["len"])
+            loaded = self.store.load(parent["sig"], lambda p: mx.load(str(p), return_metadata=True))
+            if loaded is None:
+                return None
+            p_arrays, p_metadata = loaded
+            p_meta = json.loads(p_metadata["dflash2"])
+            if int(p_meta["cache_len"]) != n or p_arrays["tokens"].tolist() != prefix[:n]:
+                return None
+            links.insert(0, (p_arrays, p_meta))
+            cur = p_meta
+        return links
 
     def clear(self) -> int:
         # A timed-out writer can still publish its atomic rename. Deleting

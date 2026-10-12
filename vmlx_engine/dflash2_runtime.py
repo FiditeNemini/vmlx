@@ -467,7 +467,9 @@ class _DFlash2SessionStore:
             if best_i < 0:
                 return None
             taken = self._entries.pop(best_i)
-            self._receipts.pop(id(taken), None)
+            pair = self._receipts.pop(id(taken), None)
+            if pair is not None and pair[0] is taken:
+                taken["_ssd_receipt"] = pair[1]        # its SSD copy (if any) can parent a delta entry
             return taken
 
     def put(self, entry: dict) -> None:
@@ -560,17 +562,40 @@ def configure_session_ssd(*, root, max_size_bytes: int, target_path: str, draft_
     )
 
 
-def _store_session(entry: dict, ram_only: bool = False):
+def _store_session(entry: dict, ram_only: bool = False, parent: Optional[dict] = None):
     """RAM store + SSD write-behind (when configured).
 
     ``ram_only``: media-request entries. The SSD tier matches by token ids
     alone, and media placeholder ids are identical for different images, so
     those entries live only in the RAM store under a media-salted key.
+
+    ``parent``: the SSD entry this cache was built on (``{"sig", "len", "depth", "receipt"}``), so the SSD tier
+    stores only the KV rows it adds (dflash2_session_disk DELTA ENTRIES).
+
+    SSD-only (an SSD tier + glm_dflash2.ssd_only_ram_release_enabled, 2026-10-12): a text entry is NOT kept in the
+    RAM store. Its cache objects hold views of the live KV buffer; while any view lives, MLX copies the whole buffer
+    on the next in-place append (27B JANGH2 at 84.7k: +5.4 GB per held snapshot, ~+16 GiB per long turn). The
+    terminal receipt then reports ``vmlx_lookup_served_from_ram = False`` so SimpleEngine settles it before the next
+    prefix lookup, which restores from SSD. A write the SSD tier refuses on the spot keeps the RAM entry.
     """
-    _SESSION_STORE.put(entry)
+    from .glm_dflash2 import ssd_only_ram_release_enabled
+
+    ssd_only = _SESSION_SSD is not None and not ram_only and ssd_only_ram_release_enabled()
+    if not ssd_only:
+        _SESSION_STORE.put(entry)
     if _SESSION_SSD is not None and not ram_only:
+        if parent:
+            entry["ssd_parent"] = parent
         try:
             receipt = _SESSION_SSD.put(entry)
+            entry.pop("ssd_parent", None)
+            if ssd_only:
+                refused = receipt.done() and not (receipt.result() or {}).get("durable")
+                if refused:
+                    _SESSION_STORE.put(entry)
+                    _SESSION_STORE.attach_receipt(entry, receipt)
+                receipt.vmlx_lookup_served_from_ram = bool(refused)
+                return receipt
             # The RAM store above already serves the next lookup of this
             # entry, so the next request need not wait for the SSD copy
             # (SimpleEngine still settles it before teardown and cache clears).
@@ -581,6 +606,9 @@ def _store_session(entry: dict, ram_only: bool = False):
             return receipt
         except Exception:
             logger.warning("DFlash2 SSD snapshot failed; RAM entry kept", exc_info=True)
+            entry.pop("ssd_parent", None)
+            if ssd_only:
+                _SESSION_STORE.put(entry)
             receipt = Future()
             receipt.set_result({"outcome": "failed", "durable": False,
                                 "retained_tokens": 0, "detail": "DFlash2 SSD snapshot failed"})
@@ -799,6 +827,14 @@ def _stream_generate_resumable(
                 "; ".join(misses),
             )
 
+    # The SSD entry this request's cache is built on: a later snapshot of it is stored as a delta against it.
+    _ssd_parent = None
+    if resume is not None:
+        if resume.get("ssd_ref"):
+            _ssd_parent = dict(resume["ssd_ref"], receipt=None)               # read from SSD: durable
+        elif getattr(resume.get("_ssd_receipt"), "vmlx_ssd_ref", None):
+            _r = resume["_ssd_receipt"]
+            _ssd_parent = dict(_r.vmlx_ssd_ref, receipt=_r)
     if resume is not None:
         target_cache = resume["target_cache"]
         cache_len = int(resume["cache_len"])
@@ -991,7 +1027,10 @@ def _stream_generate_resumable(
                 prefill_elapsed,
             )
 
-        for kind, cut, shells, draft_state in snapshots:
+        # Drop each snapshot's cache objects once stored: they hold views of the live KV buffer, and while one lives
+        # the next in-place append copies the whole buffer (copy-on-write). The list kept them for the whole decode.
+        while snapshots:
+            kind, cut, shells, draft_state = snapshots.pop(0)
             if shells is None:
                 logger.info("DFlash2 %s snapshot skipped: cache clone failed", kind)
                 continue
@@ -1004,7 +1043,7 @@ def _stream_generate_resumable(
             text_only_cut = (
                 media is None or per_item_media or int(cut) <= int(media["first_media_index"])
             )
-            _store_session(
+            _snap_receipt = _store_session(
                 {
                     "model_key": base_key if text_only_cut else model_key,
                     "kind": kind,
@@ -1015,7 +1054,11 @@ def _stream_generate_resumable(
                     **draft_state,
                 },
                 ram_only=not text_only_cut,
+                parent=_ssd_parent,
             )
+            if getattr(_snap_receipt, "vmlx_ssd_ref", None):
+                _ssd_parent = dict(_snap_receipt.vmlx_ssd_ref, receipt=_snap_receipt)
+            del shells
             logger.info(
                 "DFlash2 %s snapshot stored: %d of %d prompt tokens",
                 kind,
@@ -1043,7 +1086,7 @@ def _stream_generate_resumable(
         cycle_kept = 0
 
         def _checkpoint() -> None:
-            nonlocal _terminal_write
+            nonlocal _terminal_write, _ssd_parent
             if not _prefix_reuse_enabled():
                 return
             correction = _checkpoint_correction(cycle_committed, cycle_kept)
@@ -1091,6 +1134,7 @@ def _stream_generate_resumable(
                     "draft_context": hidden if n == 1 else None,
                 },
                 ram_only=media is not None and not per_item_media,
+                parent=_ssd_parent,
             )
             logger.info(
                 "DFlash2 session stored: %d confirmed tokens (draft cache %s)",

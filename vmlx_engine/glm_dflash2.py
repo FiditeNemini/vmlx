@@ -216,11 +216,51 @@ def generate_ar(target: GLMDFlashTarget, prompt_ids, max_tokens: int, eos: set, 
 
 
 class _PrefixSnapshot:
-    __slots__ = ("cache", "hidden", "logits", "receipt")
+    __slots__ = ("cache", "hidden", "logits", "receipt", "parent", "depth")
 
     def __init__(self, cache, hidden, logits):
         self.cache, self.hidden, self.logits = cache, hidden, logits
         self.receipt = None                     # SSD write receipt (concurrent Future) while the copy is in flight
+        self.parent = None                      # delta snapshots: {"name", "n", "depth"} of the snapshot they extend
+        self.depth = 0
+
+
+# Delta snapshots (2026-10-12). The lane snapshots the prompt every PREFIX_SNAPSHOT_EVERY tokens, at the stable root
+# and at the prompt end, and every snapshot held the WHOLE MLA prefix: GLM-5.3 JANGHT2.4 wrote 35 GB for one cold
+# 64.7k-token prompt (33 snapshots; ~10.6 KB/token of MLA + ~454 MB of KDA state each) and 0.63 GB for a 35-token
+# continuation. The MLA layers' state is append-only along each slot's token axis, so a snapshot that extends the
+# request's previous snapshot (or the one it restored) stores only the new rows of every MLA slot, COPIED (a view would
+# pin the live buffer), and the KDA layers whole. ``parent`` names that snapshot; a restore loads the chain root first,
+# compares every link's token ids, and concatenates each slot. A missing parent is a miss, never wrong state; the
+# writer refuses a child whose parent did not become durable; every GLM_PREFIX_MAX_CHAIN links a whole snapshot is
+# written. Used with an SSD tier under the SSD-only policy (no RAM copies to keep whole).
+GLM_PREFIX_MAX_CHAIN = max(1, int(os.environ.get("VMLX_GLM_DFLASH2_PREFIX_CHAIN", "16")))
+
+
+def _mla_seq_axes(absorbed: bool) -> tuple:
+    """Token axis of each Glm5MLACache state slot (None = not sequence-shaped)."""
+    # absorbed: latent [B,1,T,R], packed DSA history [B,T,2D], pool keys [B,T//kpool,D], reserved (empty)
+    # materialized: keys/values [B,H,T,D], packed [B,T,.], pool keys [B,T//kpool,D]
+    return (2, 1, 1, None) if absorbed else (2, 2, 1, 1)
+
+
+def _layer_seq_lens(c) -> "list[int] | None":
+    """Per-slot logical lengths of an MLA cache (KDA layers: None)."""
+    if type(c).__name__ != "Glm5MLACache":
+        return None
+    axes = _mla_seq_axes(bool(getattr(c, "absorbed", False)))
+    state = list(c.state)
+    return [0 if (a is None or v is None) else int(v.shape[a]) for v, a in zip(state, axes)]
+
+
+class _MLADelta:
+    """Disk-only stand-in for one Glm5MLACache snapshot holding only the rows its parent snapshot lacks."""
+
+    type_name = "Glm5MLACache"
+    __slots__ = ("state", "meta_state", "delta")
+
+    def __init__(self, state, meta_state, delta):
+        self.state, self.meta_state, self.delta = state, meta_state, delta
 
 
 def ssd_only_ram_release_enabled() -> bool:
@@ -282,6 +322,8 @@ class PrefixStore:
 
     def __init__(self, max_entries: int = 4, max_bytes: float = 3 * 2 ** 30, disk: "PrefixDiskTier | None" = None):
         from collections import OrderedDict
+        self._chain = None                      # delta snapshots: the snapshot this request's cache extends
+        self.delta_writes = 0
         self.max_entries = max(1, int(max_entries))
         self.max_bytes = float(max_bytes)
         self.entries = OrderedDict()
@@ -308,8 +350,16 @@ class PrefixStore:
         self.ram_released += released
         return released, pending
 
+    def _delta_mode(self) -> bool:
+        return self.disk is not None and ssd_only_ram_release_enabled()
+
+    def _note_chain(self, key, snap) -> None:
+        self._chain = {"name": PrefixDiskTier.digest(key), "n": len(key), "depth": int(getattr(snap, "depth", 0) or 0),
+                       "lens": [_layer_seq_lens(c) for c in snap.cache], "receipt": getattr(snap, "receipt", None)}
+
     def lookup(self, ids):
         self.release_durable_ram()
+        self._chain = None                      # a new request: its cache extends what this lookup restores
         best = None
         for key in self.entries:
             n = len(key)
@@ -328,6 +378,7 @@ class PrefixStore:
                         self.entries.move_to_end(key)
                 self.hits += 1
                 self.last_source = "disk"
+                self._note_chain(key, snap)
                 return n, snap
         if best is None:
             self.misses += 1
@@ -335,10 +386,65 @@ class PrefixStore:
             return None
         self.entries.move_to_end(best); self.hits += 1
         self.last_source = "ram"
+        self._note_chain(best, self.entries[best])
         return len(best), self.entries[best]
+
+    def _delta_snapshot(self, key, cache, hidden, logits):
+        """A snapshot of ``cache`` storing, per MLA layer, only the rows past the chain parent (copied); None when it
+        cannot extend the parent (no parent, chain too deep, not a token prefix, or a slot did not grow)."""
+        chain = self._chain
+        if (
+            chain is None
+            or not 0 < int(chain["n"]) < len(key)
+            or int(chain["depth"]) + 1 > GLM_PREFIX_MAX_CHAIN
+            or PrefixDiskTier.digest(key[: int(chain["n"])]) != chain["name"]
+            or len(chain["lens"]) != len(cache)
+        ):
+            return None
+        receipt = chain.get("receipt")
+        if receipt is not None and receipt.done() and not _receipt_durable(receipt):
+            return None
+        from vmlx_engine.models.glm5_next.glm5_next import clone_glm5_next_layer_cache
+        layers = []
+        for c, base in zip(cache, chain["lens"]):
+            if type(c).__name__ != "Glm5MLACache":
+                layers.append(clone_glm5_next_layer_cache(c, copy_fn=lambda v: v))   # KDA: whole (immutable arrays)
+                continue
+            cur = _layer_seq_lens(c)
+            if base is None or len(base) != len(cur) or any(b > n for b, n in zip(base, cur)):
+                return None
+            axes = _mla_seq_axes(bool(getattr(c, "absorbed", False)))
+            state = []
+            for v, a, b in zip(list(c.state), axes, base):
+                if v is None or a is None:
+                    state.append(v)
+                    continue
+                index = [slice(None)] * v.ndim
+                index[a] = slice(int(b), None)
+                state.append(_detached_copy(v[tuple(index)]))
+            layers.append(_MLADelta(state, c.meta_state, list(base)))
+        snap = _PrefixSnapshot(layers, hidden, logits)
+        snap.parent = {"name": chain["name"], "n": int(chain["n"]), "depth": int(chain["depth"])}
+        snap.depth = int(chain["depth"]) + 1
+        return snap
 
     def put(self, ids, cache, hidden, logits):
         key = tuple(int(t) for t in ids)
+        if self._delta_mode():
+            # SSD-only + SSD tier: no RAM copy at all; the snapshot goes to SSD (a delta when it extends the chain).
+            snap = self._delta_snapshot(key, cache, hidden, logits)
+            parent_receipt = (self._chain or {}).get("receipt") if snap is not None else None
+            if snap is None:
+                snap = _PrefixSnapshot(_clone_caches(cache, detach_mla=True), hidden, logits)
+            else:
+                self.delta_writes += 1
+            mx.eval([v for c in snap.cache for v in list(c.state) if v is not None])
+            self.last_persistence = self.disk.put(key, snap, parent_receipt=parent_receipt)
+            snap.receipt = self.last_persistence
+            lens = [_layer_seq_lens(c) for c in cache]
+            self._chain = {"name": PrefixDiskTier.digest(key), "n": len(key), "depth": snap.depth, "lens": lens,
+                           "receipt": self.last_persistence}
+            return
         snap = _PrefixSnapshot(_clone_caches(cache, detach_mla=True), hidden, logits)
         mx.eval([c.state for c in snap.cache])
         self.entries[key] = snap
@@ -366,7 +472,7 @@ class PrefixDiskTier:
     compared token by token before use. Each bundle has a namespace within the shared pool;
     aggregate LRU and process-safe publication are owned by its budget coordinator."""
 
-    FORMAT = "glm-dflash2-prefix-v1"
+    FORMAT = "glm-dflash2-prefix-v2"      # v2: delta snapshots (layers carry their delta bases, meta a parent)
 
     def __init__(self, root, max_bytes: float, model_key: str = "glm-prefix"):
         import math
@@ -380,6 +486,7 @@ class PrefixDiskTier:
         )
         self.dir = self._catalog.directory
         self.hits = self.misses = self.writes = self.evictions = self.errors = 0
+        self.chain_misses = 0
         self._lock = threading.Lock()
         self.index: dict[str, dict] = {}
         self._load_index()
@@ -403,7 +510,7 @@ class PrefixDiskTier:
         with self._lock:
             return sum(e["bytes"] for e in self.index.values())
 
-    def put(self, key: tuple, snap: "_PrefixSnapshot"):
+    def put(self, key: tuple, snap: "_PrefixSnapshot", parent_receipt=None):
         from concurrent.futures import Future
 
         receipt = Future()
@@ -423,7 +530,7 @@ class PrefixDiskTier:
             receipt.set_result({"outcome": "already_durable", "durable": True,
                                 "retained_tokens": len(key), "detail": "glm-dflash2-prefix-disk"})
             return receipt
-        self._queue.put((name, key, snap, receipt))
+        self._queue.put((name, key, snap, receipt, parent_receipt))
         return receipt
 
     def flush(self) -> None:
@@ -455,7 +562,14 @@ class PrefixDiskTier:
             try:
                 if item is None:
                     return
-                name, key, snap, receipt = item
+                name, key, snap, receipt = item[:4]
+                parent_receipt = item[4] if len(item) > 4 else None
+                parent = getattr(snap, "parent", None)
+                if parent is not None and not self._parent_durable(parent, parent_receipt):
+                    # FIFO: the parent was queued first and is settled now. A child of a failed or evicted parent
+                    # would restore nothing: refuse it.
+                    raise OSError("parent prefix snapshot is not durable")
+                parent_receipt = None
                 result = self._write(name, key, snap)
                 # Drop the snapshot before publishing durability: once the receipt resolves, the RAM store releases its
                 # copy (SSD-only policy) and that must free the arrays. Loop-locals held here while blocked in get()
@@ -475,6 +589,15 @@ class PrefixDiskTier:
                 item = snap = key = None
                 self._queue.task_done()
 
+    def _parent_durable(self, parent: dict, parent_receipt) -> bool:
+        if parent_receipt is not None:
+            if not parent_receipt.done() or not _receipt_durable(parent_receipt):
+                return False
+        try:
+            return bool(self._catalog.contains(parent["name"], int(parent["n"])))
+        except Exception:
+            return False
+
     def _write(self, name, key, snap):
         import json
         # int64: image prefixes are keyed with per-item ids above the int32 range (_dflash2_rounds key_ids).
@@ -482,12 +605,15 @@ class PrefixDiskTier:
         layers = []
         for i, c in enumerate(snap.cache):
             state = list(c.state)
-            layers.append([type(c).__name__, [str(m) for m in c.meta_state], [v is not None for v in state]])
+            layers.append([getattr(c, "type_name", type(c).__name__), [str(m) for m in c.meta_state],
+                           [v is not None for v in state], getattr(c, "delta", None)])
             for j, v in enumerate(state):
                 if v is not None:
                     arrays[f"c{i}.{j}"] = v
+        parent = getattr(snap, "parent", None)
         self._catalog.save(name, len(key), lambda tmp: mx.save_safetensors(
-            str(tmp), arrays, metadata={"format": self.FORMAT, "layers": json.dumps(layers)},
+            str(tmp), arrays, metadata={"format": self.FORMAT, "layers": json.dumps(layers),
+                                        "parent": json.dumps(parent)},
         ))
         self._load_index()
         with self._lock:
@@ -523,37 +649,110 @@ class PrefixDiskTier:
         self.misses += 1
         return None
 
-    def _read(self, name, ids):
+    def _read_link(self, name, ids):
+        """One materialized link: (arrays, layers, parent) of snapshot ``name`` for exactly ``ids``, + its file identity."""
         import json
 
-        from vmlx_engine.models.glm5_next import glm5_next as G
-        failed_identity = None
+        seen = {}
+
         def read(path):
-            nonlocal failed_identity
-            failed_identity = self._catalog.file_identity(path)
+            seen["identity"] = self._catalog.file_identity(path)
             arrays, meta = mx.load(str(path), return_metadata=True)
             if meta.get("format") != self.FORMAT or arrays["ids"].tolist() != [int(t) for t in ids]:
                 raise ValueError("prefix snapshot does not match")
-            cache = []
-            for i, (cls_name, meta_state, present) in enumerate(json.loads(meta["layers"])):
-                cls = {"Glm5KDACache": G.Glm5KDACache, "Glm5MLACache": G.Glm5MLACache}[cls_name]
-                state = [arrays[f"c{i}.{j}"] if p else None for j, p in enumerate(present)]
-                cache.append(cls.from_state(state, tuple(meta_state)))
             # MLX loads lazily. Keep the eviction lock through materialization,
             # not merely until the file's header has been read.
             mx.eval(list(arrays.values()))
-            return _PrefixSnapshot(cache, arrays["hidden"], arrays["logits"])
+            return arrays, json.loads(meta["layers"]), json.loads(meta.get("parent") or "null")
+
         try:
-            return self._catalog.load(name, len(ids), read)
+            return self._catalog.load(name, len(ids), read), seen.get("identity")
+        except Exception as e:
+            e.vmlx_failed_identity = seen.get("identity")   # the caller removes the unreadable file
+            raise
+
+    @staticmethod
+    def _assemble(links):
+        """Root-first links -> a _PrefixSnapshot: MLA slots concatenated along their token axes (each delta must start
+        exactly where the chain so far ends), every other layer whole from the leaf."""
+        from vmlx_engine.models.glm5_next import glm5_next as G
+        classes = {"Glm5KDACache": G.Glm5KDACache, "Glm5MLACache": G.Glm5MLACache}
+        leaf_arrays, leaf_layers, _ = links[-1]
+        if any(len(layers) != len(leaf_layers) for _, layers, _ in links):
+            raise ValueError("prefix snapshot chain layer count differs")
+        cache = []
+        for i, entry in enumerate(leaf_layers):
+            cls_name, meta_state, present = entry[0], entry[1], entry[2]
+            cls = classes[cls_name]
+            chained = cls_name == "Glm5MLACache" and any(layers[i][3] is not None for _, layers, _ in links[1:])
+            if not chained:
+                state = [leaf_arrays[f"c{i}.{j}"] if p else None for j, p in enumerate(present)]
+                cache.append(cls.from_state(state, tuple(meta_state)))
+                continue
+            if links[0][1][i][3] is not None or any(layers[i][0] != cls_name for _, layers, _ in links):
+                raise ValueError("prefix snapshot chain does not start from a whole MLA layer")
+            absorbed = tuple(meta_state[:2]) == ("glm5_next_native_v2", "mla_absorbed")
+            axes = _mla_seq_axes(absorbed)
+            state = []
+            for j, axis in enumerate(axes):
+                if axis is None:
+                    state.append(leaf_arrays[f"c{i}.{j}"] if present[j] else None)
+                    continue
+                pieces, length = [], 0
+                for k, (arrays, layers, _) in enumerate(links):
+                    layer = layers[i]
+                    if k > 0 and layer[3] is not None and int(layer[3][j]) != length:
+                        raise ValueError("prefix snapshot delta does not continue its parent")
+                    if layer[2][j]:
+                        piece = arrays[f"c{i}.{j}"]
+                        pieces.append(piece)
+                        length += int(piece.shape[axis])
+                state.append(None if not pieces else pieces[0] if len(pieces) == 1 else mx.concatenate(pieces, axis=axis))
+            cache.append(cls.from_state(state, tuple(meta_state)))      # validates every length against the offset
+        mx.eval([v for c in cache for v in list(c.state) if v is not None])
+        snap = _PrefixSnapshot(cache, leaf_arrays["hidden"], leaf_arrays["logits"])
+        snap.depth = len(links) - 1
+        return snap
+
+    def _read(self, name, ids):
+        failed = None                                  # (name, n, identity) of the link that could not be used
+        try:
+            links = []
+            cur_name, cur_ids = name, [int(t) for t in ids]
+            while True:
+                failed = (cur_name, len(cur_ids), None)
+                link, identity = self._read_link(cur_name, cur_ids)
+                if link is None:
+                    if links:
+                        self.chain_misses += 1        # parent gone (evicted): the leaf alone restores nothing
+                    return None
+                failed = (cur_name, len(cur_ids), identity)
+                links.insert(0, link)
+                parent = link[2]
+                if not parent:
+                    break
+                if len(links) > GLM_PREFIX_MAX_CHAIN + 1:
+                    raise ValueError("prefix snapshot chain is longer than its limit")
+                n = int(parent["n"])
+                if not 0 < n < len(cur_ids):
+                    raise ValueError("prefix snapshot parent length is invalid")
+                cur_ids = cur_ids[:n]
+                cur_name = str(parent["name"])
+                if self.digest(cur_ids) != cur_name:
+                    raise ValueError("prefix snapshot parent is not a prefix of it")
+            return self._assemble(links)
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("glm dflash2 prefix snapshot %s unusable (%s); ignored", name, e)
             self.errors += 1
-            if failed_identity is not None:
-                try:
-                    self._catalog.remove(name, len(ids), failed_identity)
-                except OSError:
-                    logging.getLogger(__name__).warning("glm dflash2 failed snapshot cleanup deferred", exc_info=True)
+            if failed is not None:
+                bad_name, bad_n, identity = failed
+                identity = identity or getattr(e, "vmlx_failed_identity", None)
+                if identity is not None:
+                    try:
+                        self._catalog.remove(bad_name, bad_n, identity)
+                    except OSError:
+                        logging.getLogger(__name__).warning("glm dflash2 failed snapshot cleanup deferred", exc_info=True)
             return None
 
 

@@ -71,26 +71,30 @@ def test_glm_release_switch_off_keeps_ram_tier(monkeypatch):
     assert (1, 2, 3) in st.entries                            # old behaviour: disk hits cached in RAM
 
 
-def test_glm_put_attaches_receipt_and_releases_already_durable(monkeypatch):
+def test_glm_put_under_ssd_only_keeps_no_ram_copy_and_chains_deltas(monkeypatch):
+    """SSD-only + SSD tier: put() writes the snapshot to SSD only (no RAM entry) and a later snapshot of the same
+    request is a delta whose parent is the previous one."""
     monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
     monkeypatch.setattr(G, "_clone_caches", lambda cache, detach_mla=False: cache)
 
     class Disk(_Disk):
         def __init__(self):
             super().__init__()
-            self.receipts = []
+            self.puts = []
 
-        def put(self, key, snap):
-            r = _receipt(True if len(key) == 2 else None)     # (5, 6) already on SSD; (7, 8, 9) in flight
-            self.receipts.append(r)
+        def put(self, key, snap, parent_receipt=None):
+            r = _receipt(True)
+            self.puts.append((key, snap, parent_receipt))
             return r
 
     disk = Disk()
     st = G.PrefixStore(4, 3 * 2 ** 30, disk=disk)
     st.put([5, 6], [], None, None)
-    assert not st.entries and st.last_persistence is disk.receipts[0]
-    st.put([7, 8, 9], [], None, None)
-    assert list(st.entries) == [(7, 8, 9)] and st.entries[(7, 8, 9)].receipt is disk.receipts[1]
+    st.put([5, 6, 7, 8], [], None, None)
+    assert not st.entries
+    (k1, s1, _), (k2, s2, pr2) = disk.puts
+    assert s1.parent is None and s2.parent == {"name": G.PrefixDiskTier.digest((5, 6)), "n": 2, "depth": 0}
+    assert s2.depth == 1 and pr2 is s1.receipt and st.delta_writes == 1
 
 
 def test_generic_session_store_releases_durable_entries(monkeypatch):

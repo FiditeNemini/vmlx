@@ -507,3 +507,43 @@ def test_glm_stable_root_finder():
     assert _glm_stable_root(tok, [1] * 300) == 0                      # no user turn
     bad = SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda t: 0)
     assert _glm_stable_root(bad, [1] * 300 + [0]) == 0                # unknown token
+
+
+@pytest.mark.parametrize("absorbed", [True, False])
+def test_prefix_disk_delta_chain_restores_lossless_after_restart(tmp_path, monkeypatch, absorbed):
+    """SSD-only + SSD tier (2026-10-12): a 70-token prompt snapshots at 16/32/48/64 and its end; every snapshot after
+    the first is a DELTA (only its new MLA rows) of the previous one. A restarted store restores the whole chain
+    (root first, token ids checked per link) and the tokens equal a cold run; the delta files are smaller than the
+    root; a broken chain (parent removed) is a miss, never wrong state."""
+    import vmlx_engine.glm_dflash2 as GD
+    from vmlx_engine.models.glm5_next import glm5_next as G5
+    monkeypatch.setattr(GD, "PREFIX_SNAPSHOT_EVERY", 16)
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
+    monkeypatch.setattr(G5, "glm5_mla_absorb_enabled", lambda: absorbed)
+    model = _target(11)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        prompt = list(range(5, 75))
+        follow = prompt + list(range(90, 99))
+        cold, _ = _run(model, target, follow, 12, None)
+        first = GD.PrefixStore(4, disk=GD.PrefixDiskTier(tmp_path, 2 ** 30))
+        _run(model, target, prompt, 12, first)
+        first.disk.flush()
+        assert first.delta_writes >= 3 and not first.entries            # no RAM copies under SSD-only
+        files = sorted(first.disk.dir.glob("*.safetensors"), key=lambda p: p.stat().st_size)
+        assert len(files) >= 4 and files[0].stat().st_size < files[-1].stat().st_size
+        first.disk.close()
+        second = GD.PrefixStore(4, disk=GD.PrefixDiskTier(tmp_path, 2 ** 30))   # restart
+        got, st = _run(model, target, follow, 12, second)
+        assert st.cached_tokens == len(prompt) and st.cache_source == "disk" and got == cold
+        # break the chain: remove the root (the oldest, shortest snapshot); the longest is now unrestorable
+        root = min(second.disk.dir.glob("*.safetensors"), key=lambda p: p.stat().st_mtime)
+        root.unlink()
+        root.with_suffix(".json").unlink(missing_ok=True)
+        second.disk.close()
+        third = GD.PrefixStore(4, disk=GD.PrefixDiskTier(tmp_path, 2 ** 30))
+        got3, st3 = _run(model, target, follow, 12, third)
+        assert got3 == cold                                              # whatever restored (or nothing), exact tokens
+        third.disk.close()
+    finally:
+        target.close()

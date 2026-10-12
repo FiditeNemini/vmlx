@@ -109,7 +109,8 @@ from vmlx_engine.metal.glm5_dsa_select import (
     glm5_dsa_select_requested,
 )
 from vmlx_engine.metal.glm5_kda_fused_decode import (
-    fused_kda_decode_requested, glm5_kda_fused_decode, glm5_kda_fused_verify,
+    REPLAY_MIN_ROWS as KDA_REPLAY_MIN_ROWS, ReplayedKDAStates, fused_kda_decode_requested, glm5_kda_fused_decode,
+    glm5_kda_fused_verify, glm5_kda_fused_verify_records, kda_verify_replay_requested,
 )
 from vmlx_engine.metal.glm5_mla_decode_attn import glm5_mla_decode_attn, mla_decode_attn_requested
 from vmlx_engine.metal.glm5_mhc_prefill_fused import (
@@ -1142,7 +1143,9 @@ class KDAAttention(nn.Module):
 
     def _fused_verify(self, x, cache, conv_q, conv_k, conv_v, state):
         """Speculative-verify slab in one KDA dispatch (metal/glm5_kda_fused_decode._kernel_verify): per-row conv,
-        l2norm, gates, recurrent update (state after every row) and gated norm. None -> the vectorized MLX path."""
+        l2norm, gates, recurrent update (state after every row) and gated norm. None -> the vectorized MLX path.
+        Slabs of KDA_REPLAY_MIN_ROWS+ rows write replay records instead of every row's state; a rollback replays the
+        accepted rows (bit-identical states, ReplayedKDAStates)."""
         if (not fused_kda_decode_requested() or self._exact_output_norm or conv_q is None or state is None
                 or x.shape[0] != 1):
             return None
@@ -1154,18 +1157,24 @@ class KDAAttention(nn.Module):
                                       self.lowrank_group.beta(x))
         else:
             f_raw, gate_raw, b_raw = self.f_b_proj(self.f_a_proj(x)), self.g_b_proj(self.g_a_proj(x)), self.b_proj(x)
-        out = glm5_kda_fused_verify(q, k, v, conv_q, conv_k, conv_v, self.q_conv1d, self.k_conv1d, self.v_conv1d,
-                                    f_raw, self.dt_bias, self.A_log, b_raw, gate_raw, self.o_norm, state,
-                                    heads=H, key_dim=K, lower_bound=self.lower_bound, rms_eps=self.rms_eps)
+        replay = T >= KDA_REPLAY_MIN_ROWS and kda_verify_replay_requested()
+        kernel = glm5_kda_fused_verify_records if replay else glm5_kda_fused_verify
+        out = kernel(q, k, v, conv_q, conv_k, conv_v, self.q_conv1d, self.k_conv1d, self.v_conv1d,
+                     f_raw, self.dt_bias, self.A_log, b_raw, gate_raw, self.o_norm, state,
+                     heads=H, key_dim=K, lower_bound=self.lower_bound, rms_eps=self.rms_eps)
         if out is None:
             return None
-        gated, states = out
         W = int(self.q_conv1d.reshape(self.q_conv1d.shape[0], -1).shape[1])
 
         def tails(raw, st):        # == short_conv_with_states: the conv tail after every row
             padded = mx.concatenate([st.astype(raw.dtype), raw], axis=1)
             return [mx.array(padded[:, t + 1: t + W]) for t in range(T)]
         cq_s, ck_s, cv_s = tails(q, conv_q), tails(k, conv_k), tails(v, conv_v)
+        if replay:
+            gated, records, final = out
+            cache.set_speculative_states(ReplayedKDAStates(cq_s, ck_s, cv_s, state, records, final))
+            return self.o_proj(gated.reshape(B, T, H * K)), cq_s[-1], ck_s[-1], cv_s[-1], final
+        gated, states = out
         rec = [states[t] for t in range(T)]
         cache.set_speculative_states(list(zip(cq_s, ck_s, cv_s, rec)))
         return self.o_proj(gated.reshape(B, T, H * K)), cq_s[-1], ck_s[-1], cv_s[-1], rec[-1]

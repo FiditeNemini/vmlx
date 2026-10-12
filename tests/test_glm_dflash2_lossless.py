@@ -31,11 +31,12 @@ TAPS = (1, 3, 4)
 TOL = 0.05
 
 
-def _target(seed=0):
+def _target(seed=0, linear_head_dim=32):
     mx.random.seed(seed)
     args = ModelArgs(
         hidden_size=128, num_hidden_layers=6, vocab_size=VOCAB, num_attention_heads=2, q_lora_rank=64, kv_lora_rank=64,
-        qk_nope_head_dim=32, v_head_dim=32, index_n_heads=2, index_head_dim=32, linear_num_heads=2, linear_head_dim=32,
+        qk_nope_head_dim=32, v_head_dim=32, index_n_heads=2, index_head_dim=32, linear_num_heads=2,
+        linear_head_dim=linear_head_dim,
         n_routed_experts=8, num_experts_per_tok=8, moe_intermediate_size=64, intermediate_size=128, first_k_dense_replace=1,
         layer_types=["linear_attention", "linear_attention", "linear_attention", "deepseek_sparse_attention",
                      "linear_attention", "deepseek_sparse_attention"],
@@ -144,6 +145,45 @@ def test_scripted_partial_rejections_are_lossless(block, plen):
         assert len(seen) >= min(block, 3), f"acceptance counts not exercised: {st.accepted}"
     finally:
         target.close()
+
+
+@pytest.mark.parametrize("block", [8, 12])
+def test_wide_verify_replay_rollback_is_lossless_and_identical(block, monkeypatch):
+    """K=128 KDA heads run the fused verify kernels (the K=32 fixture above takes the vectorized path). Slabs of 8+
+    rows write replay records and roll back by replaying accepted rows: the emitted stream must be the target's greedy
+    stream AND token-identical to the per-row-state kernel under scripted partial rejections at every draft index."""
+    from vmlx_engine.metal import glm5_kda_fused_decode as F
+    monkeypatch.setenv("VMLX_GLM5_FUSED_KDA_DECODE", "1")
+    model = _target(7, linear_head_dim=128)
+    model.set_dtype(mx.bfloat16)                                       # the fused kernels take bf16/fp16 activations
+    mx.eval(model.parameters())
+    prompt = list(range(5, 5 + 41))
+    ref, rows = _ar_logits(model, prompt, 40)
+    import vmlx_engine.models.glm5_next.glm5_next as G
+    records_calls = []
+    real = G.glm5_kda_fused_verify_records
+
+    def counting(*args, **kwargs):
+        out = real(*args, **kwargs)
+        records_calls.append(out is not None)
+        return out
+    monkeypatch.setattr(G, "glm5_kda_fused_verify_records", counting)
+    got = {}
+    for mode in ("0", "1"):
+        monkeypatch.setenv("VMLX_GLM5_KDA_VERIFY_REPLAY", mode)
+        target = GLMDFlashTarget(model, TAPS)
+        try:
+            n0, r0 = F._OBSERVED, sum(records_calls)
+            st = SpecStats()
+            got[mode] = list(generate_dflash2(target, ScriptedDraft(ref, block), prompt, 40, eos=set(), stats=st))
+            assert F._OBSERVED > n0                                    # fail closed: fused verify kernels ran
+            assert (sum(records_calls) > r0) == (mode == "1")         # ... and the records kernel exactly when on
+            assert len(set(st.accepted)) >= 3, st.accepted              # several partial-acceptance counts exercised
+        finally:
+            target.close()
+    assert got["1"] == got["0"]
+    _check_vs_ar(got["1"], ref, rows)
+    _check_teacher_forced(model, prompt, got["1"])
 
 
 def test_real_dflash2_drafter_runs_and_is_target_consistent():

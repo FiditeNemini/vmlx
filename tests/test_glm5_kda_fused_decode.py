@@ -105,3 +105,88 @@ def test_fused_verify_slab_matches_vectorized(monkeypatch, T):
     for i in range(4):
         assert np.allclose(np.array(cs.cache[i].astype(mx.float32)), np.array(cf.cache[i].astype(mx.float32)),
                            rtol=1e-5, atol=1e-6)
+
+
+def _raw_inputs(T, Hh, seed, W=4):
+    mx.random.seed(seed)
+    C, bf = Hh * K, mx.bfloat16
+    q, k, v = (mx.random.normal((1, T, C)).astype(bf) for _ in range(3))
+    cq, ck, cv = (mx.random.normal((1, W - 1, C)).astype(bf) for _ in range(3))
+    wq, wk, wv = ((mx.random.normal((C, W)) * 0.5).astype(bf) for _ in range(3))
+    f_raw = mx.random.normal((1, T, C)).astype(bf)
+    dt_bias, A_log = mx.random.normal((C,)) * 0.1, mx.random.normal((Hh,)) * 0.3
+    b_raw, gate_raw = mx.random.normal((1, T, Hh)).astype(bf), mx.random.normal((1, T, C)).astype(bf)
+    o_norm = (1 + 0.1 * mx.random.normal((K,))).astype(bf)
+    state = mx.random.normal((1, Hh, K, K)) * 0.05
+    arrs = [q, k, v, cq, ck, cv, wq, wk, wv, f_raw, dt_bias, A_log, b_raw, gate_raw, o_norm, state]
+    mx.eval(arrs)
+    return arrs
+
+
+@pytest.mark.parametrize("T,Hh,seed", [(8, 4, 1), (16, 4, 2), (11, 4, 3), (16, 64, 4)])
+def test_replay_records_give_bit_identical_rows(T, Hh, seed):
+    """Records variant (no per-row state stores) == per-row-state kernel: gated, final state, and the state replayed
+    after EVERY row prefix, bit for bit."""
+    from vmlx_engine.metal import glm5_kda_fused_decode as F
+    arrs = _raw_inputs(T, Hh, seed)
+    kw = dict(heads=Hh, key_dim=K, lower_bound=-5.0, rms_eps=1e-6)
+    gated, states = F.glm5_kda_fused_verify(*arrs, **kw)
+    g2, records, final = F.glm5_kda_fused_verify_records(*arrs, **kw)
+    assert mx.array_equal(g2, gated).item() and mx.array_equal(final, states[T - 1]).item()
+    for rows in range(1, T + 1):
+        assert mx.array_equal(F.glm5_kda_replay(arrs[15], records, rows), states[rows - 1]).item(), rows
+
+
+def test_per_row_state_kernel_source_is_unchanged():
+    """The records variant is generated from the same text; the per-row kernel's source must stay byte-identical (its
+    bits are what the AR decode kernel and earlier evidence were qualified against)."""
+    import hashlib
+    from vmlx_engine.metal import glm5_kda_fused_decode as F
+    src = F._verify_source(64, 128, 4, -5.0, 1e-6, records=False)
+    assert hashlib.sha256(src.encode()).hexdigest()[:16] == "0ecd5350eb15b373"
+
+
+@pytest.mark.parametrize("T", [8, 10])
+def test_wide_verify_slab_replays_bit_identical_rollback_states(monkeypatch, T):
+    from vmlx_engine.metal import glm5_kda_fused_decode as F
+    a = _layer(30 + T)
+    xs = (mx.random.normal((1, 6 + T, D)) * 2).astype(mx.bfloat16)
+    c0 = Glm5KDACache()
+    _run(a, xs[:, :6], c0, False, monkeypatch)
+    monkeypatch.setenv("VMLX_GLM5_FUSED_KDA_DECODE", "1")
+    outs = {}
+    for mode in ("0", "1"):
+        monkeypatch.setenv("VMLX_GLM5_KDA_VERIFY_REPLAY", mode)
+        c = _copy(c0)
+        n0 = F._OBSERVED
+        y = a(xs[:, 6:], cache=c, n_confirmed=1)
+        mx.eval(y, c.cache)
+        assert F._OBSERVED == n0 + 1                                   # fail closed: a fused verify kernel ran
+        assert isinstance(c._speculative_states, F.ReplayedKDAStates) == (mode == "1")
+        outs[mode] = (y, c)
+    (y0, c0_), (y1, c1_) = outs["0"], outs["1"]
+    assert mx.array_equal(y0, y1).item()
+    for i in range(4):
+        assert mx.array_equal(c0_.cache[i], c1_.cache[i]).item()
+    for t in range(T):
+        for i in range(4):
+            assert mx.array_equal(c0_._speculative_states[t][i], c1_._speculative_states[t][i]).item(), (t, i)
+    for rejected in (0, 3, T - 1):
+        r0, r1 = _copy(c0_), _copy(c1_)
+        r0._speculative_states, r1._speculative_states = c0_._speculative_states, c1_._speculative_states
+        assert r0.rollback_speculative(rejected) and r1.rollback_speculative(rejected)
+        mx.eval(r0.cache, r1.cache)
+        for i in range(4):
+            assert mx.array_equal(r0.cache[i], r1.cache[i]).item(), (rejected, i)
+
+
+def test_narrow_slabs_keep_per_row_states(monkeypatch):
+    from vmlx_engine.metal import glm5_kda_fused_decode as F
+    a = _layer(41)
+    xs = (mx.random.normal((1, 6 + 5, D)) * 2).astype(mx.bfloat16)
+    c = Glm5KDACache()
+    _run(a, xs[:, :6], c, False, monkeypatch)
+    monkeypatch.setenv("VMLX_GLM5_FUSED_KDA_DECODE", "1")
+    monkeypatch.setenv("VMLX_GLM5_KDA_VERIFY_REPLAY", "1")
+    a(xs[:, 6:], cache=c, n_confirmed=1)
+    assert isinstance(c._speculative_states, list) and F.REPLAY_MIN_ROWS > 5

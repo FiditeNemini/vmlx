@@ -530,6 +530,16 @@ def _patch_attention_text_rope(qlang: Any) -> None:
     cls._vmlx_text_rope_patched = True
 
 
+def _qk_norm_eps(module: Any, head_dim: int) -> float:
+    """Mean-epsilon for the q/k l2norm (see the vendored GatedDeltaNet).
+
+    Default 1e-6 on the mean (historical); a module that sets
+    ``qk_l2norm_eps`` (MiniCPM-V-4.7) gets torch/FLA's epsilon on the sum.
+    """
+    qk_eps = getattr(module, "qk_l2norm_eps", None)
+    return 1e-6 if qk_eps is None else float(qk_eps) / int(head_dim)
+
+
 def _patch_gated_delta_net(qlang: Any) -> None:
     cls = qlang.Qwen3_5GatedDeltaNet
     if "_vmlx_mtp_patched" in cls.__dict__:
@@ -584,8 +594,9 @@ def _patch_gated_delta_net(qlang: Any) -> None:
             )
         ]
         inv_scale = k.shape[-1] ** -0.5
-        q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-        k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+        norm_eps = _qk_norm_eps(self, k.shape[-1])
+        q = (inv_scale**2) * mx.fast.rms_norm(q, None, norm_eps)
+        k = inv_scale * mx.fast.rms_norm(k, None, norm_eps)
 
         fused_gates = getattr(self, "_fused_gdn_gates", None)
         if fused_gates is None:
@@ -686,8 +697,9 @@ def _patch_gated_delta_net(qlang: Any) -> None:
                 )
             ]
             inv_scale = k.shape[-1] ** -0.5
-            q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-            k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+            norm_eps = _qk_norm_eps(self, k.shape[-1])
+            q = (inv_scale**2) * mx.fast.rms_norm(q, None, norm_eps)
+            k = inv_scale * mx.fast.rms_norm(k, None, norm_eps)
             gdn_sink.append(
                 (
                     q,

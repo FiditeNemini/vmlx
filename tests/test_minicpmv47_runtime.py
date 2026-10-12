@@ -331,6 +331,29 @@ def test_gdn_qk_eps_on_mean_equals_l2norm_eps_on_sum():
     assert float(mx.abs(legacy - l2).max()) > 1e-3
 
 
+def test_native_mtp_patch_gdn_honours_qk_l2norm_eps():
+    """JANG loads apply the native-MTP patch suite, whose GatedDeltaNet replaces
+    the vendored one; it must keep the exact q/k epsilon (eps / d on the mean)."""
+    from vmlx_engine.patches.mlx_vlm_mtp import qwen35_vl as patch
+
+    assert patch._qk_norm_eps(SimpleNamespace(), 128) == 1e-6
+    assert patch._qk_norm_eps(SimpleNamespace(qk_l2norm_eps=1e-6), 128) == pytest.approx(1e-6 / 128)
+    patch.apply()
+    model = _tiny_model()
+    _randomize(model, seed=5)
+    gdn = model.language_model.model.layers[0].linear_attn
+    assert type(gdn).__call__.__module__ == patch.__name__
+    x = mx.random.normal((1, 6, 16), key=mx.random.key(11))
+    d = gdn.head_k_dim
+    exact = gdn(x)
+    gdn.qk_l2norm_eps = 1e-6 * d          # == the historical 1e-6 on the mean
+    as_default = gdn(x)
+    del gdn.qk_l2norm_eps
+    default = gdn(x)
+    assert bool(mx.array_equal(as_default, default).item())
+    assert not bool(mx.array_equal(exact, default).item())
+
+
 def test_exact_numerics_installed_on_every_layer():
     model = _tiny_model()
     lm = model.language_model

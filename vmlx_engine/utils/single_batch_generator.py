@@ -143,6 +143,11 @@ class _Request:
     # Mixed-SWA: (boundary, {layer_idx: RotatingKVCache snapshot}) captured at
     # the exact N-1 prompt boundary before the final prompt token is consumed.
     mixed_swa_boundary: Any = None
+    # Stable root (exact typed lanes, e.g. openPangu): prefill splits after this many of THIS request's prompt
+    # tokens (the end of the system turn) and keeps an exact typed snapshot there, so a new conversation with the
+    # same system prompt and tools restores it instead of re-prefilling them. 0 = no split.
+    stable_root_split: int = 0
+    stable_root_snapshot: Optional[list[Any]] = None
 
 
 @dataclass
@@ -158,6 +163,7 @@ class Response:
     prompt_cache_snapshot: Optional[list[Any]] = None
     prefill_usage: Optional[dict] = None
     mixed_swa_boundary: Any = None
+    stable_root_snapshot: Optional[list[Any]] = None
 
 
 class SingleBatchGenerator:
@@ -593,9 +599,11 @@ class SingleBatchGenerator:
         pixel_values_videos: Optional[list[Any]] = None,
         video_grid_thw: Optional[list[Any]] = None,
         gen_prompt_lens: Optional[list[int]] = None,
+        stable_root_splits: Optional[list[int]] = None,
     ):
         max_tokens = max_tokens or [self.max_tokens] * len(prompts)
         gen_prompt_lens = gen_prompt_lens or [0] * len(prompts)
+        stable_root_splits = stable_root_splits or [0] * len(prompts)
         caches = caches or [None] * len(prompts)
         # M3 VL (additive): per-prompt vision tensors, default None == text path.
         pixel_values = pixel_values or [None] * len(prompts)
@@ -628,6 +636,7 @@ class SingleBatchGenerator:
             pv_video,
             video_grid,
             gen_prompt_len,
+            stable_root_split,
         ) in zip(
             prompts,
             max_tokens,
@@ -641,6 +650,7 @@ class SingleBatchGenerator:
             pixel_values_videos,
             video_grid_thw,
             gen_prompt_lens,
+            stable_root_splits,
         ):
             prompt_tokens = list(prompt)
             if not prompt_tokens:
@@ -665,6 +675,7 @@ class SingleBatchGenerator:
                 pixel_values_videos=pv_video,
                 video_grid_thw=video_grid,
                 gen_prompt_len=int(gen_prompt_len or 0),
+                stable_root_split=int(stable_root_split or 0),
             )
             self._unprocessed.append(req)
             uids.append(uid)
@@ -1069,6 +1080,7 @@ class SingleBatchGenerator:
             prompt_cache_snapshot=prompt_cache_snapshot or req.prompt_cache_snapshot,
             prefill_usage=req.prefill_usage,
             mixed_swa_boundary=req.mixed_swa_boundary,
+            stable_root_snapshot=req.stable_root_snapshot,
         )
         if req.finish_reason is not None:
             self._request = None
@@ -1189,6 +1201,14 @@ class SingleBatchGenerator:
             # scripts/cache_fidelity_check.py before it could become a default.
             _tail = _cold_prefill_tail_split(req.gen_prompt_len)
             _cold_tokens = req.prompt_tokens[:-1]
+            _root = int(getattr(req, "stable_root_split", 0) or 0)
+            if 0 < _root < len(_cold_tokens) and self._cache_uses_openpangu(req.cache):
+                # Stable root: prefill exactly the system turn, keep its exact typed state (the clone is deep, like
+                # the N-1 snapshot: prefill continues on the live cache), then prefill the rest. The scheduler
+                # stores it as its own SSD record keyed by the system turn + the next token.
+                self._prefill(_cold_tokens[:_root], req)
+                req.stable_root_snapshot = self._clone_admissible_prompt_cache_snapshot(req.cache)
+                _cold_tokens = _cold_tokens[_root:]
             if _tail > 0 and len(_cold_tokens) > _tail:
                 # Log so an A/B can PROVE the path engaged. A guard that
                 # silently declines makes the comparison stock-vs-stock.

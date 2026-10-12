@@ -3665,6 +3665,51 @@ class Scheduler:
             return False
         return SequenceStateMachine.current_state(state) == "reasoning"
 
+    def _insert_accepts_stable_root_splits(self) -> bool:
+        """Does the ACTIVE generator's insert() take stable_root_splits? (SingleBatchGenerator only.)"""
+        gen = self.batch_generator
+        cached = getattr(self, "_stable_root_supported_for", None)
+        if cached is not None and cached[0] is gen:
+            return cached[1]
+        import inspect
+
+        try:
+            supported = "stable_root_splits" in inspect.signature(gen.insert).parameters
+        except (TypeError, ValueError):
+            supported = False
+        self._stable_root_supported_for = (gen, supported)
+        return supported
+
+    def _openpangu_stable_root_len(self, prompt_ids) -> int:
+        """Tokens in openPangu's system turn: everything through the first <|message_end|>.
+
+        The template always opens with `<|pangu_text_start|><|message_start|>system\n` + system message + the tool
+        block and closes that turn with `<|message_end|>`, even with no system message. A new conversation with the
+        same system prompt and tools shares exactly these tokens (and the next `<|message_start|>`), but the
+        whole-prompt typed lane only stored full-prompt snapshots, so every new chat re-prefilled them (box tw rows
+        2026-10-11: check b1 never hit). 0 when the token is unknown or absent.
+        """
+        end_id = getattr(self, "_openpangu_message_end_id", None)
+        if end_id is None:
+            end_id = -1
+            tok = getattr(self, "_actual_tokenizer", None) or self.tokenizer
+            for t in (tok, getattr(tok, "tokenizer", None)):
+                try:
+                    v = t.convert_tokens_to_ids("<|message_end|>")
+                except Exception:
+                    continue
+                unk = getattr(t, "unk_token_id", None)
+                if isinstance(v, int) and v >= 0 and v != unk:
+                    end_id = v
+                    break
+            self._openpangu_message_end_id = end_id
+        if end_id < 0:
+            return 0
+        try:
+            return list(prompt_ids).index(end_id) + 1
+        except ValueError:
+            return 0
+
     def _insert_accepts_gen_prompt_lens(self) -> bool:
         """Does the ACTIVE generator's insert() take gen_prompt_lens?
 
@@ -9121,6 +9166,20 @@ class Scheduler:
                             insert_kwargs["logits_processors"] = [
                                 request_processors
                             ]
+                    # openPangu stable root: split the prefill at the end of the system turn when that boundary is
+                    # not already restored, so the terminal store can also keep the system turn as its own record.
+                    request._stable_root_len = 0
+                    if (
+                        getattr(self, "_uses_openpangu_cache", False)
+                        and self.disk_cache is not None
+                        and not getattr(request, "_bypass_prefix_cache", False)
+                        and self._insert_accepts_stable_root_splits()
+                    ):
+                        _root_len = self._openpangu_stable_root_len(request.prompt_token_ids or [])
+                        _root_rel = _root_len - int(getattr(request, "cached_tokens", 0) or 0)
+                        if _root_len >= 64 and 0 < _root_rel < len(tokens_to_process) - 1:
+                            insert_kwargs["stable_root_splits"] = [_root_rel]
+                            request._stable_root_len = _root_len
                     # Where a warm turn would re-feed after restoring. Lets
                     # the cold prefill split at the same boundary so the two
                     # arms are numerically equivalent. CAPABILITY-PROBED:
@@ -9708,6 +9767,8 @@ class Scheduler:
                             pass
 
                 # Extract cache for future reuse
+                if getattr(response, "stable_root_snapshot", None) is not None:
+                    request._stable_root_snapshot = response.stable_root_snapshot
                 if self._terminal_cache_capture_enabled(request, response):
                     try:
                         # CLEAN PROMPT-BOUNDARY SNAPSHOT (DSV4 fast path).
@@ -11859,6 +11920,29 @@ class Scheduler:
                                                 None,
                                             ),
                                         )
+                                        _root_snap = getattr(request, "_stable_root_snapshot", None)
+                                        _root_len = int(getattr(request, "_stable_root_len", 0) or 0)
+                                        if (
+                                            disk_accepted
+                                            and _root_snap is not None
+                                            and 0 < _root_len < prompt_len - 1
+                                        ):
+                                            # Payload = the system turn (root_len tokens); key = root + the next
+                                            # token, the same N-1 convention as the full-prompt record above.
+                                            _root_ok = _call_with_optional_cache_extra(
+                                                self.disk_cache.store,
+                                                list(prompt_tokens[: _root_len + 1]),
+                                                _root_snap,
+                                                cache_type="system",
+                                                cache_extra_keys=getattr(request, "_cache_extra_keys", None),
+                                            )
+                                            logger.info(
+                                                "openPangu stable root %s for %s: %d-token system turn",
+                                                "stored" if _root_ok else "not stored",
+                                                request_id,
+                                                _root_len,
+                                            )
+                                        request._stable_root_snapshot = None
                                         if disk_accepted and not _prompt_ssd_terminal_flush():
                                             # The next request's admission waits
                                             # for this cleanup frame. The record

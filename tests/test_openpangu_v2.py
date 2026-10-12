@@ -658,3 +658,60 @@ def test_native_mtp_status_accepts_openpangu_included_layers_runtime_unwired(tmp
     assert status["status"] == "weights_present_runtime_unwired"
     assert status["runtime_mtp_mode"] == "included_but_dropped_for_runtime"
     assert status["issues"] == []
+
+
+def test_single_batch_stable_root_snapshot_is_the_exact_system_turn_state(tiny_model):
+    """The prefill splits at the stable root (end of the system turn) and keeps an exact typed snapshot there: equal,
+    tensor for tensor, to an independent cold prefill of the same tokens. The N-1 snapshot is unchanged."""
+    from mlx.utils import tree_flatten
+
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    prompt = [10 + (i * 7) % 200 for i in range(21)]
+    root = 9
+    generator = SingleBatchGenerator(tiny_model, max_tokens=1)
+    generator.insert([prompt], stable_root_splits=[root])
+    prompt_responses, _ = generator.next()
+    response = prompt_responses[0]
+    snap = response.stable_root_snapshot
+    assert snap is not None and {layer.offset for layer in snap} == {root}
+    assert {layer.offset for layer in response.prompt_cache_snapshot} == {len(prompt) - 1}
+
+    reference = tiny_model.make_cache()
+    tiny_model(mx.array([prompt[:root]]), cache=reference)
+    for got, want in zip(snap, reference):
+        assert got.meta_state == want.meta_state
+        a, b = dict(tree_flatten(got.state)), dict(tree_flatten(want.state))
+        assert a.keys() == b.keys()
+        for key in a:
+            if isinstance(a[key], mx.array):
+                assert mx.array_equal(a[key], b[key]).item(), key
+
+
+def test_single_batch_without_split_keeps_no_stable_root(tiny_model):
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    generator = SingleBatchGenerator(tiny_model, max_tokens=1)
+    generator.insert([[10, 11, 12, 13, 14, 15]])
+    prompt_responses, _ = generator.next()
+    assert prompt_responses[0].stable_root_snapshot is None
+
+
+def test_scheduler_finds_the_openpangu_system_turn_end():
+    from types import SimpleNamespace
+
+    from vmlx_engine.scheduler import Scheduler
+
+    class Tok:
+        unk_token_id = 0
+
+        def convert_tokens_to_ids(self, tok):
+            return 99 if tok == "<|message_end|>" else 0
+
+    s = object.__new__(Scheduler)
+    s.tokenizer, s._actual_tokenizer = Tok(), None
+    assert s._openpangu_stable_root_len([5, 6, 7, 99, 8, 99, 9]) == 4   # first <|message_end|> closes the system turn
+    assert s._openpangu_stable_root_len([5, 6, 7]) == 0
+    s2 = object.__new__(Scheduler)
+    s2.tokenizer, s2._actual_tokenizer = SimpleNamespace(unk_token_id=0, convert_tokens_to_ids=lambda t: 0), None
+    assert s2._openpangu_stable_root_len([1, 2, 3]) == 0                   # unknown token -> no root

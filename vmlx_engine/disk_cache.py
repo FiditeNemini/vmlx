@@ -254,6 +254,18 @@ def _restore_bitcast_dtypes(
     return restored
 
 
+# Sidecar schema for whole-prompt records kept in the managed SSD pool (--disk-cache-pool).
+PROMPT_POOL_SCHEMA = "prompt_disk_record_v1"
+
+
+def _load_materialized(path: Path):
+    """mx.load + eval inside the pool's eviction lock (OmniSessionDiskStore.load): a lazy load would read the file
+    after the lock is released, when pool eviction may already have removed it."""
+    arrays, metadata = mx.load(str(path), return_metadata=True)
+    mx.eval(*[v for v in arrays.values() if isinstance(v, mx.array)])
+    return arrays, metadata
+
+
 class _ConnectionPool:
     """Simple SQLite connection pool (thread-safe).
 
@@ -327,10 +339,29 @@ class DiskCacheManager:
         required_cache_class: Optional[str] = None,
         required_cache_classes: Optional[Iterable[str]] = None,
         allow_tq_native: Optional[bool] = None,
+        pool_root: Optional[str] = None,
+        pool_max_size_gb: float = 0.0,
+        pool_model_key: Optional[str] = None,
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_size_bytes = int(max_size_gb * 1024 * 1024 * 1024) if max_size_gb > 0 else 0
+        # Pool mode (--disk-cache-pool): record files live in the managed aggregate SSD pool (the block store's root),
+        # published and accounted through OmniSessionDiskStore and evicted oldest-first by the pool across every cache;
+        # the app's SSD pool notice sees them. The SQLite index stays here and only maps token hashes to pool files.
+        # This manager then never deletes a pool file itself (that would bypass the pool's accounting): a record it
+        # rejects is dropped from the index and left to pool eviction.
+        self._pool_store = None
+        if pool_root:
+            from .utils.omni_session_disk_store import OmniSessionDiskStore
+
+            self._pool_store = OmniSessionDiskStore(
+                root=pool_root,
+                model_key=pool_model_key or self.cache_dir.name,
+                max_size_bytes=int(pool_max_size_gb * 1024 ** 3) if pool_max_size_gb > 0 else 0,
+                schema=PROMPT_POOL_SCHEMA,
+            )
+            self.max_size_bytes = 0
 
         # Expected layer count from model config. Used by the safetensors
         # header validator to reject wrong-model L2 files.
@@ -355,6 +386,10 @@ class DiskCacheManager:
         # incompatible TQ record is evicted to let the Off run write a standard
         # replacement after its clean prefill.
         self._allow_tq_native = bool(allow_tq_native)
+        if self._pool_store is not None:
+            # TQ-native stores write their own file into cache_dir, outside the pool's accounting; pool records are
+            # full-precision standard payloads (stored caches are not quantized; TQ is live-KV only).
+            self._allow_tq_native = False
 
         # SQLite index for fast token hash → file lookup
         self._db_path = str(self.cache_dir / "cache_index.db")
@@ -397,11 +432,21 @@ class DiskCacheManager:
         # Clean up orphaned .tmp files from crashed writes
         self._cleanup_orphaned_tmp()
 
-        logger.info(
-            f"Disk cache initialized: dir={self.cache_dir}, "
-            f"max_size={'unlimited' if not self.max_size_bytes else f'{max_size_gb:.1f}GB'}, "
-            f"entries={self._count_entries()}"
-        )
+        if self._pool_store is not None:
+            logger.info(
+                "Disk cache initialized in the managed SSD pool: index=%s records=%s "
+                "pool budget=%s, entries=%d",
+                self.cache_dir,
+                self._pool_store.directory,
+                "unlimited" if pool_max_size_gb <= 0 else f"{pool_max_size_gb:.1f}GB",
+                self._count_entries(),
+            )
+        else:
+            logger.info(
+                f"Disk cache initialized: dir={self.cache_dir}, "
+                f"max_size={'unlimited' if not self.max_size_bytes else f'{max_size_gb:.1f}GB'}, "
+                f"entries={self._count_entries()}"
+            )
 
     def _init_db(self) -> None:
         """Create the SQLite index if it doesn't exist."""
@@ -673,7 +718,7 @@ class DiskCacheManager:
                         str(file_path),
                         expected_num_layers=getattr(self, "_expected_num_layers", None),
                         source=f"L2-prompt-disk-header:{token_hash[:12]}",
-                        delete_on_reject=True,
+                        delete_on_reject=self._pool_store is None,
                     ):
                         # File deleted on reject; clear index too.
                         conn.execute(
@@ -688,9 +733,20 @@ class DiskCacheManager:
                 # ─── Step 1: Load raw safetensors + metadata header ───
                 # Always load raw first so we can check for TQ-native format
                 # before falling back to mlx-lm's load_prompt_cache().
-                raw_arrays, file_metadata = mx.load(
-                    str(file_path), return_metadata=True
-                )
+                if self._pool_store is not None:
+                    loaded = self._pool_store.load(token_hash, _load_materialized)
+                    if loaded is None:
+                        # Evicted by the pool (or its sidecar no longer matches): an ordinary miss.
+                        conn.execute("DELETE FROM cache_entries WHERE token_hash = ?", (token_hash,))
+                        conn.commit()
+                        with self._stats_lock:
+                            self.misses += 1
+                        return None
+                    raw_arrays, file_metadata = loaded
+                else:
+                    raw_arrays, file_metadata = mx.load(
+                        str(file_path), return_metadata=True
+                    )
                 cache_classes = _metadata_cache_classes(file_metadata)
                 required_classes = set(
                     getattr(self, "_required_cache_classes", ()) or ()
@@ -701,7 +757,7 @@ class DiskCacheManager:
                 missing_classes = sorted(required_classes - set(cache_classes))
                 if missing_classes:
                     try:
-                        file_path.unlink(missing_ok=True)
+                        self._discard_record_file(file_path)
                     except OSError:
                         pass
                     conn.execute(
@@ -723,7 +779,7 @@ class DiskCacheManager:
                 current_runtime = _runtime_cache_fingerprint()
                 if stored_runtime != current_runtime:
                     try:
-                        file_path.unlink(missing_ok=True)
+                        self._discard_record_file(file_path)
                     except OSError:
                         pass
                     conn.execute(
@@ -760,7 +816,7 @@ class DiskCacheManager:
                             (token_hash,),
                         )
                         conn.commit()
-                        file_path.unlink(missing_ok=True)
+                        self._discard_record_file(file_path)
                     except Exception as exc:
                         logger.warning(
                             "Failed to evict incompatible TQ-native disk cache %s: %s",
@@ -949,12 +1005,18 @@ class DiskCacheManager:
                     )
                     conn.commit()
                     if file_path.exists():
-                        file_path.unlink()
+                        self._discard_record_file(file_path)
                 except Exception:
                     pass
                 return None
         finally:
             self._pool.put(conn)
+
+    def _discard_record_file(self, file_path: Path) -> None:
+        """Delete a rejected record file — except in pool mode, where only the pool deletes (and accounts) its files;
+        the index row is already gone, so the orphan is unreachable and pool eviction reclaims it."""
+        if self._pool_store is None:
+            file_path.unlink(missing_ok=True)
 
     def _cache_from_inflight(self, entry: Dict[str, Any]) -> Optional[List[Any]]:
         """Rebuild cache objects from an in-flight record exactly as a file hit would.
@@ -1528,86 +1590,7 @@ class DiskCacheManager:
                 continue
 
             try:
-                # ─── Dispatch based on queue item format ───
-                if isinstance(item[0], str) and item[0] == "__tq_native__":
-                    # TQ-native: file already written, just rename + DB update.
-                    # 6-tuple includes cache_type (F3); fall back to 5-tuple
-                    # for any in-flight items enqueued before this upgrade.
-                    if len(item) >= 7:
-                        (
-                            _,
-                            token_hash,
-                            tokens,
-                            tmp_path_str,
-                            file_name,
-                            cache_type,
-                            cache_extra_marker,
-                        ) = item
-                    elif len(item) >= 6:
-                        _, token_hash, tokens, tmp_path_str, file_name, cache_type = item
-                        cache_extra_marker = None
-                    else:
-                        _, token_hash, tokens, tmp_path_str, file_name = item
-                        cache_type = "assistant"
-                        cache_extra_marker = None
-                    if cache_extra_marker is None:
-                        self._finalize_tq_native(
-                            token_hash,
-                            tokens,
-                            tmp_path_str,
-                            file_name,
-                            cache_type,
-                        )
-                    else:
-                        self._finalize_tq_native(
-                            token_hash,
-                            tokens,
-                            tmp_path_str,
-                            file_name,
-                            cache_type,
-                            cache_extra_marker,
-                        )
-                else:
-                    # Standard: write from pre-serialized numpy arrays.
-                    # 5-tuple includes cache_type; fall back to 4-tuple legacy.
-                    if len(item) >= 6:
-                        (
-                            token_hash,
-                            tokens,
-                            cache_data_flat,
-                            cache_metadata_flat,
-                            cache_type,
-                            cache_extra_marker,
-                        ) = item
-                    elif len(item) >= 5:
-                        token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type = item
-                        cache_extra_marker = None
-                    else:
-                        token_hash, tokens, cache_data_flat, cache_metadata_flat = item
-                        cache_type = "assistant"
-                        cache_extra_marker = None
-                    try:
-                        if cache_extra_marker is None:
-                            self._write_cache(
-                                token_hash,
-                                tokens,
-                                cache_data_flat,
-                                cache_metadata_flat,
-                                cache_type,
-                            )
-                        else:
-                            self._write_cache(
-                                token_hash,
-                                tokens,
-                                cache_data_flat,
-                                cache_metadata_flat,
-                                cache_type,
-                                cache_extra_marker,
-                            )
-                    finally:
-                        # The index row (if the write succeeded) is committed before this release, so a reader moves
-                        # from the in-flight copy to the file without a gap.
-                        self._release_inflight(token_hash, cache_data_flat)
+                self._process_write_item(item)
             except OSError as e:
                 if e.errno == errno.ENOSPC:
                     logger.warning(
@@ -1631,6 +1614,90 @@ class DiskCacheManager:
                     self._write_queue.task_done()
                 except ValueError:
                     pass
+
+    def _process_write_item(self, item) -> None:
+        """Persist one queued write (standard or TQ-native). Shared by the writer thread and shutdown's drain so both
+        handle every tuple shape the same way and release in-flight entries."""
+        # ─── Dispatch based on queue item format ───
+        if isinstance(item[0], str) and item[0] == "__tq_native__":
+            # TQ-native: file already written, just rename + DB update.
+            # 6-tuple includes cache_type (F3); fall back to 5-tuple
+            # for any in-flight items enqueued before this upgrade.
+            if len(item) >= 7:
+                (
+                    _,
+                    token_hash,
+                    tokens,
+                    tmp_path_str,
+                    file_name,
+                    cache_type,
+                    cache_extra_marker,
+                ) = item
+            elif len(item) >= 6:
+                _, token_hash, tokens, tmp_path_str, file_name, cache_type = item
+                cache_extra_marker = None
+            else:
+                _, token_hash, tokens, tmp_path_str, file_name = item
+                cache_type = "assistant"
+                cache_extra_marker = None
+            if cache_extra_marker is None:
+                self._finalize_tq_native(
+                    token_hash,
+                    tokens,
+                    tmp_path_str,
+                    file_name,
+                    cache_type,
+                )
+            else:
+                self._finalize_tq_native(
+                    token_hash,
+                    tokens,
+                    tmp_path_str,
+                    file_name,
+                    cache_type,
+                    cache_extra_marker,
+                )
+        else:
+            # Standard: write from pre-serialized numpy arrays.
+            # 5-tuple includes cache_type; fall back to 4-tuple legacy.
+            if len(item) >= 6:
+                (
+                    token_hash,
+                    tokens,
+                    cache_data_flat,
+                    cache_metadata_flat,
+                    cache_type,
+                    cache_extra_marker,
+                ) = item
+            elif len(item) >= 5:
+                token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type = item
+                cache_extra_marker = None
+            else:
+                token_hash, tokens, cache_data_flat, cache_metadata_flat = item
+                cache_type = "assistant"
+                cache_extra_marker = None
+            try:
+                if cache_extra_marker is None:
+                    self._write_cache(
+                        token_hash,
+                        tokens,
+                        cache_data_flat,
+                        cache_metadata_flat,
+                        cache_type,
+                    )
+                else:
+                    self._write_cache(
+                        token_hash,
+                        tokens,
+                        cache_data_flat,
+                        cache_metadata_flat,
+                        cache_type,
+                        cache_extra_marker,
+                    )
+            finally:
+                # The index row (if the write succeeded) is committed before this release, so a reader moves
+                # from the in-flight copy to the file without a gap.
+                self._release_inflight(token_hash, cache_data_flat)
 
     def _write_cache(
         self,
@@ -1666,18 +1733,29 @@ class DiskCacheManager:
         tmp_path = self.cache_dir / f"cache_{token_hash[:16]}_{len(tokens)}tok.tmp.safetensors"
 
         try:
-            # Ensure the cache directory exists before writing.
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-            # Atomic write: write to temp file then rename.
-            # os.rename is atomic on macOS (same filesystem), so readers
-            # never see a partially-written cache file.
             # Arrays arrive as numpy (converted on main thread) to avoid
             # Metal buffer access from this background thread.
             from safetensors.numpy import save_file as np_save_file
-            np_save_file(cache_data_flat, str(tmp_path), metadata=cache_metadata_flat)
 
-            os.rename(str(tmp_path), str(file_path))
+            if self._pool_store is not None:
+                # Pool mode: temp file + fsync + sidecar + atomic publish + aggregate accounting (and pool eviction of
+                # the oldest records across every cache when over budget) all happen inside save().
+                tmp_path = None
+                file_path = self._pool_store.save(
+                    token_hash,
+                    lambda temp: np_save_file(cache_data_flat, str(temp), metadata=cache_metadata_flat),
+                )
+                file_name = str(file_path)
+            else:
+                # Ensure the cache directory exists before writing.
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+                # Atomic write: write to temp file then rename.
+                # os.rename is atomic on macOS (same filesystem), so readers
+                # never see a partially-written cache file.
+                np_save_file(cache_data_flat, str(tmp_path), metadata=cache_metadata_flat)
+
+                os.rename(str(tmp_path), str(file_path))
 
             file_size = file_path.stat().st_size
             now = time.time()
@@ -1715,12 +1793,14 @@ class DiskCacheManager:
 
         except Exception as e:
             logger.warning(f"Failed to store disk cache: {e}")
-            # Clean up temp file and any partial final file
-            for p in (tmp_path, file_path):
-                try:
-                    p.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            # Clean up temp file and any partial final file. Pool mode: save() already removed its own temp files and
+            # unpublished a record it could not account; never delete a pool file here.
+            if self._pool_store is None:
+                for p in (tmp_path, file_path):
+                    try:
+                        p.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
     def _finalize_tq_native(
         self,
@@ -1879,9 +1959,18 @@ class DiskCacheManager:
 
     def clear(self) -> None:
         """Remove all cached files and reset the index."""
+        if self._pool_store is not None:
+            try:
+                self._pool_store.clear()
+            except Exception as exc:
+                logger.warning("Disk cache pool clear failed: %s", exc)
         conn = self._pool.get()
         try:
-            rows = conn.execute("SELECT file_name FROM cache_entries").fetchall()
+            rows = (
+                conn.execute("SELECT file_name FROM cache_entries").fetchall()
+                if self._pool_store is None
+                else []
+            )
             for (file_name,) in rows:
                 file_path = self.cache_dir / file_name
                 if file_path.exists():
@@ -1908,35 +1997,30 @@ class DiskCacheManager:
         if self._writer_thread.is_alive():
             logger.warning("Disk cache writer thread did not stop in time")
 
-        # Flush remaining items from write queue.
-        # Handles both standard and TQ-native queue formats.
+        # Flush remaining items from write queue through the writer's own item handler. The old inline unpack expected
+        # 5-tuples, but standard items are 6-tuples (cache_extra_marker) and TQ-native ones 7-tuples, so every leftover
+        # write at shutdown failed with "too many values to unpack" and was dropped with a warning (found 2026-10-11).
         while not self._write_queue.empty():
             try:
                 item = self._write_queue.get_nowait()
-                if isinstance(item[0], str) and item[0] == "__tq_native__":
-                    # 6-tuple: ("__tq_native__", token_hash, tokens, tmp_path, file_name, cache_type)
-                    if len(item) >= 6:
-                        _, token_hash, tokens, tmp_path_str, file_name, cache_type = item
-                    else:
-                        _, token_hash, tokens, tmp_path_str, file_name = item
-                        cache_type = "assistant"
-                    self._finalize_tq_native(
-                        token_hash, tokens, tmp_path_str, file_name, cache_type
-                    )
-                else:
-                    # 5-tuple: (token_hash, tokens, data, metadata, cache_type)
-                    if len(item) >= 5:
-                        token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type = item
-                    else:
-                        token_hash, tokens, cache_data_flat, cache_metadata_flat = item
-                        cache_type = "assistant"
-                    self._write_cache(
-                        token_hash, tokens, cache_data_flat, cache_metadata_flat, cache_type
-                    )
             except queue.Empty:
                 break
+            try:
+                self._process_write_item(item)
             except Exception as e:
                 logger.warning(f"Failed to flush disk cache write: {e}")
+            finally:
+                item = None
+                try:
+                    self._write_queue.task_done()
+                except ValueError:
+                    pass
+
+        if self._pool_store is not None:
+            try:
+                self._pool_store.close()
+            except Exception as exc:
+                logger.warning("Disk cache pool close failed: %s", exc)
 
         # Close connection pool
         self._pool.close_all()
@@ -2001,6 +2085,11 @@ class DiskCacheManager:
                 "inflight_entries": len(self._inflight),
                 "tq_native_enabled": self._allow_tq_native,
             }
+            if self._pool_store is not None:
+                # max_size_gb is 0 here because the managed pool owns the budget, not because it is unlimited.
+                result["ssd_pool"] = True
+                result["ssd_pool_dir"] = str(self._pool_store.directory)
+                result["ssd_pool_budget_gb"] = round(self._pool_store.max_size_bytes / 1024 ** 3, 2)
             # Include TQ-native stats if any TQ operations occurred
             if self.tq_native_stores > 0 or self.tq_native_hits > 0:
                 result["tq_native_stores"] = self.tq_native_stores

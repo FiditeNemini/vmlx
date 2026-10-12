@@ -657,6 +657,10 @@ class SchedulerConfig:
         None  # None = ~/.cache/vmlx-engine/prompt-cache/<model_hash>
     )
     disk_cache_max_gb: float = 10.0  # 0 = unlimited
+    # --disk-cache-pool: the whole-prompt SSD cache lives in the managed aggregate pool at this root, budgeted like the
+    # block store (cli.resolve_prompt_disk_pool); disk_cache_max_gb is then not used.
+    disk_cache_pool_root: Optional[str] = None
+    disk_cache_pool_max_gb: float = 0.0  # 0 = unlimited
     model_path: Optional[str] = None  # Used to scope disk cache per model
 
     # Loader fingerprint inputs (F6 + A4 Concern #1). Mixed into the trie
@@ -1837,6 +1841,9 @@ class Scheduler:
             self.disk_cache = DiskCacheManager(
                 cache_dir=cache_dir,
                 max_size_gb=self.config.disk_cache_max_gb,
+                pool_root=getattr(self.config, "disk_cache_pool_root", None),
+                pool_max_size_gb=getattr(self.config, "disk_cache_pool_max_gb", 0.0),
+                pool_model_key=os.path.basename(cache_dir),
                 allow_tq_native=bool(self._tq_active),
                 # Pass expected layer count
                 # so the safetensors header validator can hard-reject

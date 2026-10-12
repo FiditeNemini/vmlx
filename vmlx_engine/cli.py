@@ -977,6 +977,23 @@ def normalize_block_disk_cache_budget(args) -> float:
     return args.block_disk_cache_max_gb
 
 
+def resolve_prompt_disk_pool(args):
+    """Return (pool_root, max_gb) when --disk-cache-pool is set, else (None, 0.0).
+
+    The whole-prompt SSD cache (exact typed N-1 snapshots: openPangu-2.0, typed GLM) used its own directory and a flat
+    --disk-cache-max-gb (10 GB by default). One openPangu snapshot is ~3 GB at 4.5k tokens, so that budget evicted on
+    almost every turn and the app's SSD pool notice never saw it (2026-10-11). In the pool it follows the same root
+    and the same budget as the block store and the GLM native snapshots: percent of the cache volume unless
+    --block-disk-cache-max-gb is given (0 = unlimited), oldest-first eviction across every cache.
+    """
+    if not getattr(args, "disk_cache_pool", False):
+        return None, 0.0
+    root = getattr(args, "block_disk_cache_dir", None) or os.path.expanduser(
+        "~/.cache/vmlx-engine/block-cache"
+    )
+    return os.path.abspath(os.path.expanduser(root)), resolve_block_disk_cache_max_gb(args)
+
+
 def resolve_block_disk_cache_max_gb(args) -> float:
     """Resolve the block-disk (SSD / L2) budget in GB.
 
@@ -2824,6 +2841,8 @@ def serve_command(args):
             enable_disk_cache=args.enable_disk_cache,
             disk_cache_dir=args.disk_cache_dir,
             disk_cache_max_gb=args.disk_cache_max_gb,
+            disk_cache_pool_root=resolve_prompt_disk_pool(args)[0],
+            disk_cache_pool_max_gb=resolve_prompt_disk_pool(args)[1],
             model_path=args.model,
             # Loader fingerprint inputs (F6 + A4 Concern #1) — feed smelt
             # state into the trie cache key so divergent loader configs
@@ -3252,6 +3271,8 @@ def bench_command(args):
             enable_disk_cache=getattr(args, 'enable_disk_cache', False),
             disk_cache_dir=getattr(args, 'disk_cache_dir', None),
             disk_cache_max_gb=getattr(args, 'disk_cache_max_gb', 10.0),
+            disk_cache_pool_root=resolve_prompt_disk_pool(args)[0],
+            disk_cache_pool_max_gb=resolve_prompt_disk_pool(args)[1],
             # Block disk cache (L2 for paged cache)
             enable_block_disk_cache=getattr(args, 'enable_block_disk_cache', False),
             block_disk_cache_dir=getattr(args, 'block_disk_cache_dir', None),
@@ -4059,6 +4080,14 @@ Examples:
         default=10.0,
         help="Maximum total size of disk cache in gigabytes. Oldest entries are evicted "
              "when the limit is exceeded. 0 = unlimited. (default: 10)",
+    )
+    serve_parser.add_argument(
+        "--disk-cache-pool",
+        action="store_true",
+        default=False,
+        help="Put the whole-prompt SSD cache (exact typed snapshots: openPangu, typed GLM) in the managed aggregate "
+             "SSD pool at the block cache root, budgeted like the block store (percent of the volume unless "
+             "--block-disk-cache-max-gb), with oldest-first eviction across every cache. Ignores --disk-cache-max-gb.",
     )
     # Block-level disk cache (L2 for paged cache)
     serve_block_disk_group = serve_parser.add_mutually_exclusive_group()

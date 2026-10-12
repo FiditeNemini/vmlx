@@ -710,6 +710,24 @@ def _ssm_companion_cache_extra_keys(request: Any) -> Optional[Any]:
     return getattr(request, "_cache_extra_keys", None)
 
 
+def _hybrid_boundary_checkpoint_every() -> int:
+    """Hybrid (SSM/GDN + attention) companion checkpoints every N prompt tokens of a prefill
+    (VMLX_HYBRID_BOUNDARY_CHECKPOINT_TOKENS, default 4096, 0 = off; rounded up to the paged block size).
+
+    The recurrent companion used to exist only at request ends, so any later prompt that diverges
+    before the end of a stored one (a tools toggle rendered after a long system ledger, a branch, a
+    new chat with the same system prompt) found its KV blocks but no companion and re-prefilled the
+    whole prompt (Qwen3.8 Flash-Next, 37.7k: 33.6 s). The vmlx#91 resume restores the longest stored
+    checkpoint below the KV hit and prefills the rest. Each checkpoint is one snapshot of the fixed-size
+    recurrent state (Flash-Next: ~110 MB, 36 layers) written to the SSD tier as it is captured. Same
+    mechanism as Naive's mixed-SWA boundary checkpoints (utils/single_batch_generator.py).
+    """
+    try:
+        return max(0, int(os.environ.get("VMLX_HYBRID_BOUNDARY_CHECKPOINT_TOKENS", "4096").strip() or 0))
+    except ValueError:
+        return 4096
+
+
 def _uses_ssm_companion_cache(
     kv_positions: Optional[List[int]],
     num_layers: Optional[int],
@@ -7998,7 +8016,7 @@ def _release_cancelled_prefill_request(request: Any) -> None:
         "_media_clean_prefix_cache", "_media_repair_ssm_checkpoint",
         "_media_clean_capture_boundaries", "_inline_ssm_capture",
         "_inline_ssm_checkpoints", "_mixed_swa_boundary", "_dots3_media_boundary",
-        "_qwen_media_tail_full_input_ids",
+        "_qwen_media_tail_full_input_ids", "_periodic_ssm_boundaries",
     ):
         if hasattr(request, attr):
             setattr(request, attr, None)
@@ -9905,6 +9923,29 @@ class MLLMBatchGenerator:
             if _inline_materialize:
                 mx.eval(*_inline_materialize)
             checkpoint_tokens = list(all_tokens[:key_boundary])
+            if key_boundary in (getattr(request, "_periodic_ssm_boundaries", None) or ()):
+                # A periodic checkpoint serves later requests only: store it
+                # now (the SSD writer takes it off the queue in the background)
+                # instead of holding ~100 MB of recurrent state per boundary on
+                # the request until generation ends.
+                if getattr(self, "_ssm_companion_enabled", True) and not getattr(
+                    request, "_bypass_prefix_cache", False
+                ):
+                    self._ssm_state_cache.store(
+                        checkpoint_tokens,
+                        key_boundary,
+                        ssm_layers,
+                        is_complete=True,
+                        cache_extra_keys=_ssm_companion_cache_extra_keys(request),
+                    )
+                    logger.info(
+                        "Hybrid boundary checkpoint stored for %s at %d tokens "
+                        "(%d recurrent layers)",
+                        getattr(request, "request_id", "?"),
+                        key_boundary,
+                        len(ssm_layers),
+                    )
+                return True
             checkpoints = list(prior_checkpoints)
             checkpoints.append((key_boundary, checkpoint_tokens, ssm_layers))
             request._inline_ssm_checkpoints = checkpoints  # type: ignore[attr-defined]
@@ -10490,6 +10531,33 @@ class MLLMBatchGenerator:
                 boundaries.append(block_boundary)
             if clean_boundary < seq_len:
                 boundaries.append(clean_boundary)
+
+        # Periodic checkpoints (VMLX_HYBRID_BOUNDARY_CHECKPOINT_TOKENS): the
+        # companion otherwise exists only at request ends, so a prompt that
+        # diverges late (tools toggled after a long system ledger, a branch,
+        # a new chat with the same long system prompt) had its whole KV hit
+        # discarded: "N KV blocks found but no SSM companion state -- full
+        # prefill required" (Flash-Next 37.7k: 33.6 s). The vmlx#91 resume
+        # already restores the longest stored checkpoint below the hit; these
+        # give it one within `every` tokens. They are stored to the SSD tier
+        # as they are captured (_maybe_capture_clean_ssm_boundary), never
+        # carried on the request.
+        request._periodic_ssm_boundaries = set()
+        every = _hybrid_boundary_checkpoint_every()
+        block_size = int(getattr(getattr(self, "block_aware_cache", None), "block_size", 0) or 0)
+        if every > 0 and block_size > 0 and media_limit is None:
+            every = -(-every // block_size) * block_size
+            limit = min(seq_len, clean_boundary) if clean_boundary > 0 else seq_len
+            tokens = getattr(request, "_original_token_ids", None)
+            if tokens:
+                limit = min(limit, int(self._media_safe_capture_limit(list(tokens))) - base_len)
+            planned = set(boundaries)
+            absolute = (max(base_len, 0) // every + 1) * every
+            while 0 < absolute - base_len < limit:
+                if absolute - base_len not in planned:
+                    request._periodic_ssm_boundaries.add(absolute)
+                    boundaries.append(absolute - base_len)
+                absolute += every
 
         if media_limit is not None:
             # Keep only boundaries inside the pre-media text, and re-align each

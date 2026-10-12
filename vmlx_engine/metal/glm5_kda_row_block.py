@@ -23,7 +23,7 @@ def requested():
 
 @lru_cache(maxsize=1)
 def _hardware_allowed():
-    return (mx.__version__ == "0.32.2"
+    return (mx.__version__ in ("0.32.2", "0.32.3")
             and mx.metal.is_available()
             and mx.metal.device_info().get("architecture") == "applegpu_g17s")
 

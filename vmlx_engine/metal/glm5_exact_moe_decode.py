@@ -131,7 +131,7 @@ _DOWN = r'''
 @lru_cache(maxsize=1)
 def _compatible_runtime() -> bool:
     try:
-        return (importlib.metadata.version("mlx") == "0.32.2"
+        return (importlib.metadata.version("mlx") in ("0.32.2", "0.32.3")
                 and "Apple M5" in mx.device_info().get("device_name", ""))
     except (importlib.metadata.PackageNotFoundError, RuntimeError):
         return False

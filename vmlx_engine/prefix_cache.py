@@ -217,6 +217,9 @@ def _resolve_runtime_cache_fingerprint() -> str:
     )
     if glm5_dsa_query_tile_requested():
         parts.append("glm5_dsa_query_tile=" + glm5_dsa_query_tile_identity())
+    from .metal.dsa_index_scores import dsa_index_scores_requested
+    if dsa_index_scores_requested():
+        parts.append("dsa_fused_index_scores_v1")
     if os.environ.get("VMLX_QWEN4_PREFILL_REDUCE", "0") == "1":
         parts.append("qwen4_prefill_reduce_f16_top10_v1")
     source_id = _resolve_source_checkout_id()
@@ -710,6 +713,9 @@ def compute_model_cache_key(
         )
         if glm5_dsa_query_tile_requested():
             parts.append("glm5_dsa_query_tile=" + glm5_dsa_query_tile_identity())
+        from vmlx_engine.metal.dsa_index_scores import dsa_index_scores_requested
+        if dsa_index_scores_requested():
+            parts.append("dsa_fused_index_scores_v1")
         from vmlx_engine.metal.glm5_kda_row_block import MATH_ABI, requested
         if requested():
             parts.append("glm5_kda_row_block=" + MATH_ABI)

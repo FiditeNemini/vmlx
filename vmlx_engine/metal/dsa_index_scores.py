@@ -27,8 +27,11 @@ def dsa_index_scores_requested() -> bool:
 
 _SOURCE = r"""
     #pragma clang fp contract(off)
-    const int Lq = int(q_shape[2]);
-    const int Lk = int(k_shape[2]);
+    // Q element (h, s, d) at q + h * QH + s * QS + d: [H, L, D] (QH = L*D, QS = D) or [L, H, D] (QH = D, QS = H*D).
+    const int Lq = int(QS_LAYOUT ? q_shape[1] : q_shape[2]);
+    const int Lk = int(k_shape[K_AXIS]);
+    const size_t QH = QS_LAYOUT ? size_t(D) : size_t(Lq) * D;
+    const size_t QS = QS_LAYOUT ? size_t(H) * D : size_t(D);
     const uint sg = simdgroup_index_in_threadgroup;
     const uint lane = thread_index_in_simdgroup;
     const int c0 = min(int(threadgroup_position_in_grid.x) * TN, Lk - TN);
@@ -43,12 +46,12 @@ _SOURCE = r"""
     for (int h = 0; h < H; ++h) {
         simdgroup_float8x8 acc[FI][FJ];
         for (int i = 0; i < FI; ++i) for (int j = 0; j < FJ; ++j) acc[i][j] = simdgroup_float8x8(0.0f);
-        const device float* qh = q + (size_t)h * (size_t)Lq * D;
+        const device float* qh = q + (size_t)h * QH;
         for (int d = 0; d < D; d += 8) {
             simdgroup_float8x8 a[FI];
             simdgroup_float8x8 b[FJ];
             for (int i = 0; i < FI; ++i)
-                simdgroup_load(a[i], qh + (size_t)(sr + i * 8) * D + d, D);
+                simdgroup_load(a[i], qh + (size_t)(sr + i * 8) * QS + d, QS);
             for (int j = 0; j < FJ; ++j)
                 simdgroup_load(b[j], k + (size_t)(sc + j * 8) * D + d, D, ulong2(0, 0), true);
             for (int i = 0; i < FI; ++i)
@@ -59,8 +62,11 @@ _SOURCE = r"""
             const float wv = w[(size_t)(sr + i * 8 + fm) * H + h];
             for (int j = 0; j < FJ; ++j) {
                 thread auto& e = acc[i][j].thread_elements();
-                float p0 = metal::max(e[0], 0.0f) * wv;
-                float p1 = metal::max(e[1], 0.0f) * wv;
+                float s0 = e[0];
+                float s1 = e[1];
+                if (HAS_SCALE) { s0 = s0 * scale[0]; s1 = s1 * scale[0]; }
+                float p0 = metal::max(s0, 0.0f) * wv;
+                float p1 = metal::max(s1, 0.0f) * wv;
                 out_acc[i][j][0] = out_acc[i][j][0] + p0;
                 out_acc[i][j][1] = out_acc[i][j][1] + p1;
             }
@@ -81,7 +87,7 @@ _SOURCE = r"""
 def _kernel():
     return mx.fast.metal_kernel(
         name="vmlx_dsa_fused_index_scores_v1",
-        input_names=["q", "k", "w"],
+        input_names=["q", "k", "w", "scale"],
         output_names=["out"],
         source=_SOURCE,
         header="#include <metal_stdlib>\n#include <metal_simdgroup_matrix>\nusing namespace metal;\n",
@@ -94,8 +100,29 @@ def _kernel():
 FI, FJ = 4, 2
 
 
+def _launch(q, k, w, *, H, L, D, Lk, qs_layout, k_axis, scale):
+    TM, TN = 2 * FI * 8, 2 * FJ * 8
+    sc = mx.array([float(scale if scale is not None else 1.0)], dtype=mx.float32)
+    return _kernel()(
+        inputs=[q, k, w, sc],
+        template=[("H", int(H)), ("D", int(D)), ("FI", FI), ("FJ", FJ), ("TM", TM), ("TN", TN),
+                  ("QS_LAYOUT", int(qs_layout)), ("K_AXIS", int(k_axis)), ("HAS_SCALE", int(scale is not None))],
+        grid=(-(-Lk // TN) * 128, -(-L // TM), 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[(1, L, Lk)],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
+def _admit(L, Lk, D, arrays) -> bool:
+    TM, TN = 2 * FI * 8, 2 * FJ * 8
+    return not (D % 8 or L < 2 or Lk < TN or any(a.dtype != mx.float32 for a in arrays)
+                or max(L, TM) * Lk >= 2**31)
+
+
 def dsa_index_scores(q: mx.array, k: mx.array, w: mx.array, *, enabled: bool = True):
-    """q (1, H, L, D) fp32, k (1, 1, Lk, D) fp32, w (1, L, H) fp32 -> (1, L, Lk) fp32; None when not admitted.
+    """Naive layout. q (1, H, L, D) fp32, k (1, 1, Lk, D) fp32, w (1, L, H) fp32 -> (1, L, Lk) fp32 =
+    sum_h w * relu(q . k); None when not admitted.
 
     Admitted: batch 1, one shared key head, fp32 operands, D a multiple of 8, 2 <= L, Lk >= 32 (the last tile
     overlaps the previous one instead of reading past the end; overlapping cells are computed identically; L below
@@ -108,28 +135,36 @@ def dsa_index_scores(q: mx.array, k: mx.array, w: mx.array, *, enabled: bool = T
     if B != 1 or k.shape[0] != 1 or k.shape[1] != 1 or k.shape[3] != D or tuple(w.shape) != (1, L, H):
         return None
     Lk = int(k.shape[2])
-    TM, TN = 2 * FI * 8, 2 * FJ * 8
-    if D % 8 or L < 2 or Lk < TN or any(a.dtype != mx.float32 for a in (q, k, w)):
+    if not _admit(L, Lk, D, (q, k, w)):
         return None                         # decode (L == 1) keeps the stock GEMV path
-    if max(L, TM) * Lk >= 2**31:
-        return None
+    TM = 2 * FI * 8
     if L < TM:
         # A short prefill tail (a warm turn's few new tokens) takes the same arithmetic as the cold chunk did:
         # zero-pad the queries to one tile and keep the first L rows (each row is computed independently).
-        out = dsa_index_scores(
-            mx.pad(q, [(0, 0), (0, 0), (0, TM - L), (0, 0)]),
-            k,
-            mx.pad(w, [(0, 0), (0, TM - L), (0, 0)]),
-            enabled=enabled,
-        )
-        return None if out is None else out[:, :L]
-    grid_x = -(-Lk // TN)
-    grid_y = -(-L // TM)
-    return _kernel()(
-        inputs=[q, k, w],
-        template=[("H", int(H)), ("D", int(D)), ("FI", FI), ("FJ", FJ), ("TM", TM), ("TN", TN)],
-        grid=(grid_x * 128, grid_y, 1),
-        threadgroup=(128, 1, 1),
-        output_shapes=[(1, L, Lk)],
-        output_dtypes=[mx.float32],
-    )[0]
+        out = _launch(mx.pad(q, [(0, 0), (0, 0), (0, TM - L), (0, 0)]), k, mx.pad(w, [(0, 0), (0, TM - L), (0, 0)]),
+                      H=H, L=TM, D=D, Lk=Lk, qs_layout=False, k_axis=2, scale=None)
+        return out[:, :L]
+    return _launch(q, k, w, H=H, L=L, D=D, Lk=Lk, qs_layout=False, k_axis=2, scale=None)
+
+
+def dsa_pool_index_scores(q: mx.array, pool_keys: mx.array, head_w: mx.array, scale: float, *, enabled: bool = True):
+    """GLM-5.3 layout. q (1, S, H, D) fp32, pool_keys (1, P, D) fp32, head_w (1, S, H) fp32 -> (1, S, P) fp32 =
+    sum_h head_w * relu((q . pool_key) * scale) — the indexer's pool scores before the visibility mask; None when not
+    admitted (same admission and tail padding as dsa_index_scores)."""
+    if not enabled or mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
+    if q.ndim != 4 or pool_keys.ndim != 3 or head_w.ndim != 3:
+        return None
+    B, S, H, D = q.shape
+    if B != 1 or pool_keys.shape[0] != 1 or pool_keys.shape[2] != D or tuple(head_w.shape) != (1, S, H):
+        return None
+    P = int(pool_keys.shape[1])
+    if not _admit(S, P, D, (q, pool_keys, head_w)):
+        return None
+    TM = 2 * FI * 8
+    if S < TM:
+        out = _launch(mx.pad(q, [(0, 0), (0, TM - S), (0, 0), (0, 0)]), pool_keys,
+                      mx.pad(head_w, [(0, 0), (0, TM - S), (0, 0)]),
+                      H=H, L=TM, D=D, Lk=P, qs_layout=True, k_axis=1, scale=scale)
+        return out[:, :S]
+    return _launch(q, pool_keys, head_w, H=H, L=S, D=D, Lk=P, qs_layout=True, k_axis=1, scale=scale)

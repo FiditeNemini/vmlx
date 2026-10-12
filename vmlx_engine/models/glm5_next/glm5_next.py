@@ -53,6 +53,7 @@ from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
 from vmlx_engine.glm5_dsa_query_tile import (
     glm5_dsa_query_tile_requested, try_glm5_dsa_query_tiles,
 )
+from vmlx_engine.metal.dsa_index_scores import dsa_index_scores_requested, dsa_pool_index_scores
 from vmlx_engine.glm5_decode_policy import (
     glm5_compiled_dsa_requested, glm5_exact_moe_requested,
     glm5_kda_lowrank_requested, glm5_router_matvec_requested,
@@ -1539,14 +1540,25 @@ class Glm5NextIndexer(nn.Module):
                 )
 
             # scores per idx head then head-weighted sum: [B, S, n_pools]
-            pool_scores = sparse_index_scores_decode(
-                q,
-                pool_keys,
-                family="glm5_next",
-                scale=self.scale,
-                head_weights=head_w,
-                enabled=self._fused_score_decode,
-            )
+            pool_scores = None
+            if S >= 64:
+                # Prefill chunks: fused relu(scale * q.k) x head weight x head sum in registers
+                # (metal/dsa_index_scores.py): no (S, heads, pools) fp32 intermediate, 2.4x faster per DSA layer at
+                # 4k-16k pools, true fp32 (the stock GPU einsum is ~8e-4 relative off fp64 on M5). DFlash2 verify
+                # slabs (5-16 rows) and short tails keep the stock path: padded to one 64-row tile they would cost
+                # ~0.3 ms per layer more. In the runtime cache fingerprint.
+                pool_scores = dsa_pool_index_scores(
+                    q, pool_keys, head_w, self.scale, enabled=dsa_index_scores_requested(),
+                )
+            if pool_scores is None:
+                pool_scores = sparse_index_scores_decode(
+                    q,
+                    pool_keys,
+                    family="glm5_next",
+                    scale=self.scale,
+                    head_weights=head_w,
+                    enabled=self._fused_score_decode,
+                )
             if pool_scores is None:
                 pool_scores = try_glm5_dsa_query_tiles(
                     q, pool_keys, head_w, self.scale,

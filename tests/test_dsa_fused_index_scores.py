@@ -70,3 +70,22 @@ def test_naive_indexer_uses_it_for_prefill_only(monkeypatch):
     assert "dsa_fused_index_scores_v1" in (naive_padded_prefill_identity() or "")
     monkeypatch.setenv("VMLX_DSA_FUSED_INDEX_SCORES", "0")
     assert "dsa_fused_index_scores_v1" not in (naive_padded_prefill_identity() or "")
+
+
+def test_glm_pool_variant_matches_fp64_and_the_model_uses_it_for_prefill_chunks():
+    from vmlx_engine.metal.dsa_index_scores import dsa_pool_index_scores
+    H, D, scale = 32, 128, 128 ** -0.5
+    for S, P in ((100, 999), (64, 32), (2047, 600)):
+        mx.random.seed(S + P)
+        q = mx.random.normal((1, S, H, D)); pk = mx.random.normal((1, P, D)); hw = mx.random.normal((1, S, H)) * 0.2
+        out = dsa_pool_index_scores(q, pk, hw, scale)
+        qn, kn, wn = (np.array(x).astype(np.float64) for x in (q, pk, hw))
+        ref = np.einsum("sh,shp->sp", wn[0], np.maximum(np.einsum("shd,pd->shp", qn[0], kn[0]) * scale, 0))
+        assert out.shape == (1, S, P)
+        assert np.abs(np.array(out)[0] - ref).max() <= 2e-6 * np.abs(ref).max()
+    import inspect
+    import vmlx_engine.models.glm5_next.glm5_next as G
+    src = inspect.getsource(G.Glm5NextIndexer.topk_indices)
+    assert "if S >= 64:" in src and "dsa_pool_index_scores(" in src
+    from vmlx_engine.prefix_cache import runtime_cache_fingerprint
+    assert "dsa_fused_index_scores_v1" in runtime_cache_fingerprint()

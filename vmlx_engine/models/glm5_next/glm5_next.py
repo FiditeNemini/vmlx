@@ -892,6 +892,10 @@ class ModelArgs(BaseModelArgs):
     layer_types: List[str] = field(default_factory=list)
     num_nextn_predict_layers: int = 0
     index_share_for_mtp_iteration: bool = False
+    # JANGHT bundles: config.json's top-level "jangt" block and per-module "quantization" contract (routed stacks mix
+    # trellis JANGT and Hadamard JANGH groups). None for every other bundle.
+    jangt: Optional[dict] = None
+    quantization: Optional[dict] = None
 
     @classmethod
     def from_dict(cls, params: dict) -> "ModelArgs":
@@ -943,6 +947,8 @@ class ModelArgs(BaseModelArgs):
             "index_share_for_mtp_iteration": bool(
                 t.get("index_share_for_mtp_iteration", False)
             ),
+            "jangt": params.get("jangt") or None,
+            "quantization": params.get("quantization") if params.get("jangt") else None,
         }
         return cls(**merged)
 
@@ -2356,6 +2362,14 @@ class Model(nn.Module):
         self.config = {"model_type": args.model_type}
         self.model = Glm5NextModel(args)
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
+        if args.jangt:
+            # JANGHT: every routed stack becomes a JTMixedSwitchGLU before quantization, as the VLM wrapper does
+            # (vlm.py). Without it the text-only load handed {"mode": "jangt", "kbits": ...} entries to
+            # SwitchLinear.to_quantized and the engine refused to start.
+            from vmlx_engine.jangt.switch import install_jangt
+
+            self.jangt_modules = install_jangt(self, {"jangt": args.jangt, "quantization": args.quantization,
+                                                      "swiglu_limit": args.swiglu_limit})
         from vmlx_engine.patches.mlx_lm_mtp import is_mtp_active
 
         if args.num_nextn_predict_layers > 0 and is_mtp_active():

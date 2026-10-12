@@ -135,3 +135,41 @@ def test_store_hands_the_writer_zero_copy_views(held_writer):
     assert manager.flush_pending_writes(tokens)
     restored = manager.fetch(tokens)
     assert restored[0].keys.dtype == mx.bfloat16 and mx.all(restored[0].keys == 6).item()
+
+
+def test_zero_copy_payload_survives_dropped_refs_and_allocator_churn(held_writer):
+    """The queued views must keep their buffers alive and unchanged after the caller drops every reference and the
+    allocator recycles same-sized buffers (the scheduler discards its snapshot right after store())."""
+    import gc
+
+    from mlx_lm.models.cache import KVCache
+
+    manager, gate = held_writer
+    tokens = list(range(40))
+    expected = []
+    cache = []
+    for i in range(4):
+        k = (mx.arange(1 * 2 * 256 * 64).reshape(1, 2, 256, 64) % 251 + i).astype(mx.bfloat16)
+        c = KVCache()
+        c.update_and_fetch(k, k + 1)
+        cache.append(c)
+        expected.append((mx.array(k), mx.array(k + 1)))
+    mx.eval([e for pair in expected for e in pair])
+    assert manager.store(tokens, cache)
+    del cache, c, k
+    gc.collect()
+    # Churn: same-shape allocations and in-place-style updates that would reuse any freed buffer.
+    for j in range(200):
+        junk = mx.full((1, 2, 256, 64), float(j), dtype=mx.bfloat16)
+        junk = junk * 2 + 1
+        mx.eval(junk)
+    restored = manager.fetch(tokens)                                   # served from the in-flight views
+    for layer, (k, v) in zip(restored, expected):
+        assert mx.array_equal(layer.keys[..., :256, :], k).item()
+        assert mx.array_equal(layer.values[..., :256, :], v).item()
+    gate.set()
+    assert manager.flush_pending_writes(tokens)
+    from_disk = manager.fetch(tokens)                                  # the file written from the same views
+    for layer, (k, v) in zip(from_disk, expected):
+        assert mx.array_equal(layer.keys[..., :256, :], k).item()
+        assert mx.array_equal(layer.values[..., :256, :], v).item()

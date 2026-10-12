@@ -104,6 +104,45 @@ def release_idle_memory(*, mx: Any | None = None, log: logging.Logger | None = N
     return {"released_snapshots": released, "pending_snapshots": pending, "freed_bytes": max(0, before - after)}
 
 
+class IdleMemoryReleaser:
+    """Batched serving loops (engine_core, MLLM scheduler): hand memory back once the loop has had no request and no
+    idle task for idle_allocator_release_seconds() -- the batched twin of SimpleEngine's idle lock.
+
+    The terminal collection already clears the allocator after each request, but buffers freed afterwards (SSD
+    write-behind settles, checkpoint stores, writer threads) refill the free list: Naive N0.5 idled with 2.07 GiB in
+    it after a 79k turn. ``note_work()`` on every step / idle task; ``due()`` in the loop's no-work branch; then
+    ``release()`` on the step executor (model thread)."""
+
+    def __init__(self) -> None:
+        import time as _time
+
+        self._clock = _time.monotonic
+        self.last_work = self._clock()
+        self.released = True                    # nothing to hand back before the first request
+
+    def note_work(self) -> None:
+        self.last_work = self._clock()
+        self.released = False
+
+    def due(self) -> bool:
+        if self.released:
+            return False
+        grace = idle_allocator_release_seconds()
+        return grace >= 0 and self._clock() - self.last_work >= grace
+
+    def release(self, log: logging.Logger | None = None) -> dict:
+        self.released = True
+        out = release_idle_memory(log=log)
+        if out.get("pending_snapshots"):
+            self.note_work()                    # SSD writes still in flight: try again after the grace
+        if out.get("released_snapshots") or out.get("freed_bytes", 0) >= (64 << 20):
+            (log or logger).info(
+                "Idle: released %d SSD-durable RAM snapshot(s) and %.2f GB of MLX allocator cache",
+                int(out.get("released_snapshots", 0)), out.get("freed_bytes", 0) / (1024**3),
+            )
+        return out
+
+
 class TerminalCollectionGate:
     """Whether the post-terminal full ``gc.collect()`` has anything to reclaim.
 

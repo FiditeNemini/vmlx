@@ -193,10 +193,15 @@ class EngineCore:
         # `RuntimeError: There is no Stream(gpu, N) in current thread.`
         _step_executor = getattr(self.scheduler, "_step_executor", None)
         _async_loop = asyncio.get_running_loop() if _step_executor is not None else None
+        # Idle: allocator free list (and SSD-durable snapshots) back to the OS
+        # after the grace, so an idle engine holds the model, not its leftovers.
+        from .mlx_memory import IdleMemoryReleaser
+        _idle_release = IdleMemoryReleaser()
 
         while self._running:
             try:
                 if self.scheduler.has_requests():
+                    _idle_release.note_work()
                     # Run one generation step
                     if _step_executor is not None:
                         output = await _async_loop.run_in_executor(
@@ -341,6 +346,7 @@ class EngineCore:
                     if getattr(self.scheduler, "has_idle_tasks", None) and (
                         self.scheduler.has_idle_tasks()
                     ):
+                        _idle_release.note_work()
                         if _step_executor is not None:
                             await _async_loop.run_in_executor(
                                 _step_executor,
@@ -348,6 +354,14 @@ class EngineCore:
                             )
                         else:
                             self.scheduler.run_one_idle_task()
+                        await asyncio.sleep(0)
+                    elif _idle_release.due():
+                        if _step_executor is not None:
+                            await _async_loop.run_in_executor(
+                                _step_executor, _idle_release.release, logger,
+                            )
+                        else:
+                            _idle_release.release(logger)
                         await asyncio.sleep(0)
                     else:
                         # No work, yield control

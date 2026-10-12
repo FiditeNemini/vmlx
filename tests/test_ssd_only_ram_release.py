@@ -173,3 +173,40 @@ def test_simple_engine_idle_lock_releases_after_grace_only_when_idle(monkeypatch
         eng._model_executor.shutdown(wait=True)
 
     asyncio.run(scenario())
+
+
+def test_batched_idle_releaser_fires_once_per_idle_period(monkeypatch):
+    monkeypatch.setenv("VMLX_IDLE_ALLOCATOR_RELEASE_S", "1.0")
+    calls = []
+    monkeypatch.setattr(mlx_memory, "release_idle_memory",
+                        lambda log=None: calls.append(1) or {"released_snapshots": 0, "pending_snapshots": 0,
+                                                             "freed_bytes": 2 << 30})
+    now = [100.0]
+    r = mlx_memory.IdleMemoryReleaser()
+    r._clock = lambda: now[0]
+    assert not r.due()                                        # nothing served yet
+    r.note_work()
+    now[0] += 0.5
+    assert not r.due()
+    now[0] += 0.6
+    assert r.due()
+    r.release()
+    assert calls == [1] and not r.due()                       # once per idle period
+    now[0] += 10
+    assert not r.due()
+    r.note_work()
+    now[0] += 1.1
+    assert r.due()
+    monkeypatch.setenv("VMLX_IDLE_ALLOCATOR_RELEASE_S", "-1")
+    assert not r.due()                                        # negative grace: never
+
+
+def test_batched_loops_wire_the_idle_releaser():
+    import inspect
+
+    from vmlx_engine import engine_core, mllm_scheduler
+
+    for src in (inspect.getsource(engine_core.EngineCore._engine_loop),
+                inspect.getsource(mllm_scheduler.MLLMScheduler._process_loop)):
+        assert "IdleMemoryReleaser()" in src and "_idle_release.note_work()" in src
+        assert "_idle_release.due()" in src and "_idle_release.release" in src

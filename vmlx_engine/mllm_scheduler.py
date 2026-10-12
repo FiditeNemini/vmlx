@@ -5743,9 +5743,13 @@ class MLLMScheduler:
 
     async def _process_loop(self) -> None:
         """Main async processing loop."""
+        # Idle: allocator free list back to the OS after the grace (mlx_memory).
+        from .mlx_memory import IdleMemoryReleaser
+        _idle_release = IdleMemoryReleaser()
         while self._running:
             try:
                 if self.has_requests():
+                    _idle_release.note_work()
                     # Run step on the dedicated single-worker executor
                     # to keep all MLX ops on the SAME thread as model load.
                     # See `_step_executor` field comment for the JANGTQ
@@ -5818,10 +5822,17 @@ class MLLMScheduler:
                     # can never delay a response (vmlx#245). A request
                     # arriving between entries takes the step() branch first.
                     if self.has_idle_tasks():
+                        _idle_release.note_work()
                         loop = asyncio.get_running_loop()
                         await loop.run_in_executor(
                             self._step_executor,
                             self.run_one_idle_task,
+                        )
+                        await asyncio.sleep(0)
+                    elif _idle_release.due():
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            self._step_executor, _idle_release.release, logger,
                         )
                         await asyncio.sleep(0)
                     else:

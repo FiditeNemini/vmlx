@@ -756,6 +756,15 @@ class BlockDiskStore:
             str, Tuple[Tuple[int, int, int, int], bool, Optional[Dict[int, int]]]
         ] = {}
         self._payload_check_lock = threading.Lock()
+        # Candidate-validation metadata per immutable payload file: hash ->
+        # (_stat_identity, entries). Every SSD-only lookup of a mixed-SWA or
+        # nested chain re-read each block's header and packed metadata through
+        # safetensors before reconstruction (~0.4 ms per block: ~0.24 s of a
+        # 37k Naive-layout lookup, on every tool continuation). The entries
+        # hold only literals and shape stand-ins; a rename (rewrite) changes
+        # the identity and the file is checked again.
+        self._validation_entries_memo: "OrderedDict[str, Tuple[Tuple[int, int, int, int], List[Tuple]]]" = OrderedDict()
+        self._validation_entries_max = 4096
         # LRU touches (one per block read) are recorded here and applied by the
         # background writer in one transaction (see _queue_access_update).
         self._access_pending: Dict[str, List[float]] = {}
@@ -1219,6 +1228,7 @@ class BlockDiskStore:
     def _forget_payload_checks(self, hash_hex: str) -> None:
         with self._payload_check_lock:
             self._payload_check_memo.pop(hash_hex, None)
+            self._validation_entries_memo.pop(hash_hex, None)
 
     def _evict_incompatible_tq_block(
         self,
@@ -1371,10 +1381,28 @@ class BlockDiskStore:
                     self.validation_metadata_read_failures += 1
                 return None
             file_path = self.cache_dir / row[0]
-            if not file_path.exists():
+            try:
+                identity = _payload_identity(file_path)
+            except OSError:
                 with self._stats_lock:
                     self.validation_metadata_read_failures += 1
                 return None
+            with self._payload_check_lock:
+                memo = self._validation_entries_memo.get(hash_hex)
+                if memo is not None and memo[0] == identity:
+                    self._validation_entries_memo.move_to_end(hash_hex)
+                    entries = list(memo[1])
+                else:
+                    entries = None
+            if entries is not None:
+                with self._stats_lock:
+                    self.validation_metadata_reads += 1
+                try:
+                    os.utime(file_path, None)
+                except OSError:
+                    pass
+                self._queue_access_update(hash_hex)
+                return entries
             try:
                 from .cache_record_validator import reject_safetensors_or_warn
 
@@ -1398,6 +1426,12 @@ class BlockDiskStore:
                 with self._stats_lock:
                     self.validation_metadata_read_failures += 1
                 return None
+            with self._payload_check_lock:
+                memo = self._validation_entries_memo
+                memo[hash_hex] = (identity, list(entries))
+                memo.move_to_end(hash_hex)
+                while len(memo) > self._validation_entries_max:
+                    memo.popitem(last=False)
             with self._stats_lock:
                 self.validation_metadata_reads += 1
             try:
@@ -2833,8 +2867,16 @@ class BlockDiskStore:
             # suffix behind after the first miss.  Inspect/evict an incompatible
             # record for *every* plain-KV write before queuing the replacement.
             # Standard records remain untouched and are still de-duplicated by
-            # _write_block().
-            self.has_block(block_hash)
+            # _write_block(). A hash with no index row has nothing to inspect:
+            # check that first without the aggregate mutation guard, which the
+            # busy writer holds while it publishes (~0.3 ms per block of a cold
+            # store spent waiting for it, on the model thread).
+            existing_row, _ok = self._query_index_row(
+                "SELECT 1 FROM blocks WHERE block_hash = ?",
+                (block_hash.hex(),),
+            )
+            if existing_row is not None:
+                self.has_block(block_hash)
 
         if parent_hash is not None and parent_hash in self._session_dropped_hashes:
             # The parent was budget-dropped this session — this block can

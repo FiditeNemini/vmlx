@@ -195,3 +195,44 @@ def test_apportioned_size_charges_a_linked_file_once(tmp_path):
         os.link(f, tmp_path / f"m{i}.safetensors")
     sizes = [bds._apportioned_size(os.stat(p)) for p in [f] + [tmp_path / f"m{i}.safetensors" for i in range(3)]]
     assert sum(sizes) == 1000
+
+
+def test_flash_next_qsa_blocks_group_and_reconstruct_bit_identical(tmp_path):
+    """Qwen3.8 Flash-Next QSA layers (MiniMaxM3SparseCache: K/V + indexer keys, all 4-D, token axis 2) group too."""
+    from mlx_lm.models.cache import KVCache
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+    from vmlx_engine.scheduler import Scheduler
+
+    mx.random.seed(41)
+    T = 1500
+    caches = [MiniMaxM3SparseCache(), KVCache()]
+    for start in range(0, T, 250):
+        n = min(250, T - start)
+        k = mx.random.normal((1, 2, n, 16)).astype(mx.bfloat16)
+        v = mx.random.normal((1, 2, n, 16)).astype(mx.bfloat16)
+        caches[0].update_and_fetch(k, v)
+        caches[0].update_index(mx.random.normal((1, 1, n, 8)).astype(mx.float32))
+        caches[1].update_and_fetch(k, v)
+    mx.eval([c.state for c in caches])
+    payload = Scheduler.__new__(Scheduler)._extract_cache_states(caches)
+    stores = []
+    try:
+        got = {}
+        for group in (0, 16):
+            store, cache = _store(tmp_path / f"g{group}", payload, T, group)
+            stores.append(store)
+            table, _ = cache.fetch_cache("w", list(range(T)) + [7])
+            restored = cache.reconstruct_cache(table)
+            assert restored is not None and isinstance(restored[0], MiniMaxM3SparseCache)
+            got[group] = [mx.array(a) for c in restored for a in c.state]
+            cache.release_cache("w")
+            if group:
+                assert store.group_files_written > 0 and store.group_span_reads > 0
+        want = [a for c in caches for a in c.state]
+        for a, b, w in zip(got[0], got[16], want):
+            assert a.shape == b.shape == w.shape
+            assert mx.array_equal(a.view(mx.uint8), b.view(mx.uint8)).item()
+            assert mx.array_equal(b.view(mx.uint8), w.view(mx.uint8)).item()
+    finally:
+        for s in stores:
+            s.shutdown()

@@ -547,8 +547,11 @@ def _cache_data_has_tq(cache_data: Any) -> bool:
 # VMLX_BLOCK_GROUP_FILES=N (default 16; 0 or 1 = one file per block).
 _GROUP_META_KEY = "__vmlx_group_meta__"
 _BLOCK_META_KEY = "__vmlx_block_meta__"
-_GROUP_ELIGIBLE_TAGS = frozenset({"kv", "cache_list", "rotating_kv_pending", "skip"})
-_GROUP_EXCLUDED_KEY_PARTS = ("_scales", "_zeros", "_data", "turboquant", "tq_", "dsv4", "zaya", "minimax",
+# minimax_m3 = the MiniMax-M3 / Qwen3.8 Flash-Next QSA sparse layer: keys, values and idx_keys are all 4-D with the
+# token axis at dim 2 and reconstruct concatenates them exactly so (a member without idx_keys keeps them per member,
+# which makes the span read fall back per block).
+_GROUP_ELIGIBLE_TAGS = frozenset({"kv", "cache_list", "rotating_kv_pending", "skip", "minimax_m3"})
+_GROUP_EXCLUDED_KEY_PARTS = ("_scales", "_zeros", "_data", "turboquant", "tq_", "dsv4", "zaya",
                              "cumulative", "_offset", "_max_size", "_keep", "no_state")
 
 
@@ -5028,6 +5031,11 @@ class BlockDiskStore:
                     self.selective_rotating_layers_omitted
                 ),
                 "validation_metadata_reads": self.validation_metadata_reads,
+                "group_files_written": self.group_files_written,
+                "group_members_written": self.group_members_written,
+                "group_member_reads": self.group_member_reads,
+                "group_span_reads": getattr(self, "group_span_reads", 0),
+                "group_span_blocks": getattr(self, "group_span_blocks", 0),
                 "validation_metadata_read_failures": (
                     self.validation_metadata_read_failures
                 ),

@@ -10572,6 +10572,51 @@ class MLLMBatchGenerator:
 
         return sorted(set(boundaries))
 
+    def _media_periodic_ssm_boundaries(
+        self,
+        request: "MLLMBatchRequest",
+        seq_len: int,
+        runs: List[Tuple[int, int]],
+    ) -> List[int]:
+        """Periodic companion checkpoints for a COLD media prefill: the
+        absolute multiples of ``_hybrid_boundary_checkpoint_every()`` strictly
+        before the first media placeholder (recurrent state there has absorbed
+        only text, so it is the same state a text-only request computes, and
+        the media key -- scoped to the placeholder -- resolves away from its
+        companion key). Without them a later text-only request that diverges
+        after such a conversation's long system prompt (a tools toggle, a
+        branch) found the KV blocks but no companion (I-36 r3). Returns local
+        chunk edges; the snapshots are stored when captured."""
+        request._periodic_ssm_boundaries = set()
+        if not (
+            getattr(self, "_is_hybrid", False)
+            and getattr(self, "_ssm_state_cache", None) is not None
+            and getattr(self, "_hybrid_kv_positions", None)
+        ):
+            return []
+        every = _hybrid_boundary_checkpoint_every()
+        block_size = int(getattr(getattr(self, "block_aware_cache", None), "block_size", 0) or 0)
+        if every <= 0 or block_size <= 0 or not runs:
+            return []
+        if int(getattr(request, "_cached_tokens", 0) or 0) > 0:
+            return []                      # warm media tails keep their own (conditioned) boundaries
+        every = -(-every // block_size) * block_size
+        tokens = getattr(request, "_original_token_ids", None) or []
+        try:
+            # A family whose media conversations store no KV would only orphan these on SSD.
+            if not self._media_prefix_cache_allowed(request, list(tokens)):
+                return []
+        except Exception:
+            return []
+        limit = min(int(seq_len) - 1, min(int(start) for start, _ in runs), len(tokens))
+        out = []
+        boundary = every
+        while boundary < limit:
+            request._periodic_ssm_boundaries.add(boundary)
+            out.append(boundary)
+            boundary += every
+        return out
+
     def _media_safe_capture_limit(self, token_ids: Optional[List[int]]) -> int:
         """Highest token index whose prefix contains no media placeholder.
 
@@ -13862,6 +13907,14 @@ class MLLMBatchGenerator:
             bounds = sorted(set(bounds) | set(clean_boundaries))
         if glm_native_boundary > 0:
             bounds = sorted(set(bounds) | {glm_native_boundary})
+        # Before the first placeholder only, so no media run is ever split by these.
+        periodic_media_bounds = set(
+            self._media_periodic_ssm_boundaries(request, seq_len, runs)
+            if not bounded_mimo and not bounded_glm and len(bounds) > 1
+            else ()
+        )
+        if periodic_media_bounds:
+            bounds = sorted(set(bounds) | periodic_media_bounds)
 
         if bounded_mimo:
             # Complete the encoder independently before measuring LM headroom.
@@ -14028,6 +14081,10 @@ class MLLMBatchGenerator:
             # the HTTP thread or turn a cancellation into a full-prefill retry.
             _raise_if_prefill_cancelled(request)
             self._store_glm_native_chunk(request, cache, end)
+            if end in periodic_media_bounds:
+                self._maybe_capture_clean_ssm_boundary(
+                    request, cache, list(getattr(request, "_original_token_ids", None) or []), end,
+                )
             if bounded_glm or bounded_mimo:
                 peak = int(mx.get_peak_memory())
                 transient = max(0, peak - active)

@@ -107,3 +107,23 @@ def test_bypass_request_stores_nothing(monkeypatch):
     _plan(g, req, 9000, 0)
     assert MLLMBatchGenerator._maybe_capture_clean_ssm_boundary(g, req, _cache(), req._original_token_ids, 4096)
     assert g._ssm_state_cache.stored == [] and not getattr(req, "_inline_ssm_checkpoints", None)
+
+
+def test_media_prefill_plans_checkpoints_only_before_the_first_placeholder(monkeypatch):
+    """Cold media prefill: periodic edges strictly before the first placeholder (pure-text recurrent state, whose
+    companion key drops the placeholder-scoped media key), none for warm tails, disallowed families or non-hybrids."""
+    monkeypatch.delenv("VMLX_HYBRID_BOUNDARY_CHECKPOINT_TOKENS", raising=False)
+    g = _gen()
+    g._media_prefix_cache_allowed = lambda req, toks=None: True
+    plan = lambda req, seq, runs: MLLMBatchGenerator._media_periodic_ssm_boundaries(g, req, seq, runs)
+    req = SimpleNamespace(_cached_tokens=0, _original_token_ids=list(range(39000)), request_id="m")
+    assert plan(req, 39010, [(38200, 38800)]) == [4096 * i for i in range(1, 10)]
+    assert req._periodic_ssm_boundaries == {4096 * i for i in range(1, 10)}
+    assert plan(req, 39010, [(9000, 9600), (20000, 20600)]) == [4096, 8192]      # first run caps
+    assert plan(SimpleNamespace(_cached_tokens=5000, _original_token_ids=list(range(39000))), 34000, [(30000, 30600)]) == []
+    assert plan(req, 39010, []) == []
+    g._media_prefix_cache_allowed = lambda req, toks=None: False
+    assert plan(req, 39010, [(38200, 38800)]) == []
+    g._media_prefix_cache_allowed = lambda req, toks=None: True
+    g._is_hybrid = False
+    assert plan(req, 39010, [(38200, 38800)]) == []

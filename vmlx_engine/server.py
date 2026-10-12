@@ -595,7 +595,11 @@ _default_enable_thinking: bool | None = (
 _native_mtp_sampling_policy: str = "compatible-only"
 _default_chat_template_kwargs: dict | None = None  # Set via --chat-template-kwargs
 _custom_chat_template: str | None = None  # Set via --chat-template
-_max_prompt_tokens: int = 0  # Set at startup based on available memory (0 = no limit)
+# Enforced prompt/context cap: an explicit --max-prompt-tokens, else the model's
+# declared context ceiling (0 = none). The free-memory estimate below NEVER
+# enforces: it is kept in _memory_advisory_prompt_tokens, logged and reported.
+_max_prompt_tokens: int = 0
+_memory_advisory_prompt_tokens: int = 0  # free-Metal-memory KV estimate (advice only)
 _model_name_mismatch_warned: bool = (
     False  # Suppress repeated model name mismatch warnings
 )
@@ -676,7 +680,14 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
 
 
 def _estimate_max_prompt_tokens() -> int:
-    """Estimate max safe prompt length based on available GPU memory.
+    """Estimate how many prompt tokens of live KV fit the free Metal working set.
+
+    ADVISORY ONLY: the result is logged and reported (/health
+    ``memory_advisory_prompt_tokens``) but never refuses a prompt; see
+    ``_resolve_max_prompt_tokens``. The estimate is architecture-blind for most
+    families (Naive's bounded SWA layers were costed as full attention, which
+    refused 50.8k+ prompts on a 128 GB Mac for a model declaring 1M context),
+    and Metal already fails loudly when something genuinely does not fit.
 
     Standard caches use linear K+V geometry. Native DSV4 uses its bounded SWA
     ring plus ratio-4 CSA/indexer and ratio-128 HCA pool geometry. We allow the
@@ -755,10 +766,10 @@ def _estimate_max_prompt_tokens() -> int:
                 estimated = min(estimated, declared_limit)
             if 0 < estimated < declared_limit and not dsv4_ceiling_logged:
                 logger.info(
-                    "Metal-memory-limited context: model declares %d tokens "
-                    "but the current free working set supports ~%d "
-                    "(active=%.1fGB, limit=%.1fGB, free=%.1fGB); advertising "
-                    "the memory-derived cap",
+                    "Context memory advisory: model declares %d tokens; the "
+                    "current free working set fits ~%d by estimate "
+                    "(active=%.1fGB, limit=%.1fGB, free=%.1fGB). Advice only: "
+                    "longer prompts are attempted, not rejected",
                     declared_limit,
                     estimated,
                     active / (1024**3),
@@ -867,7 +878,7 @@ def _declared_context_limit_from_config(config: Any) -> int:
 def _refresh_loaded_max_prompt_tokens(reason: str) -> int:
     """Recompute the session prompt cap after the engine owns a loaded model."""
 
-    global _max_prompt_tokens
+    global _max_prompt_tokens, _memory_advisory_prompt_tokens
 
     # Metadata belongs to this loaded-model generation, not the lifetime of
     # the Python process. A repaired/replaced folder can keep its path across
@@ -876,6 +887,7 @@ def _refresh_loaded_max_prompt_tokens(reason: str) -> int:
     _jang_sampling_defaults_cache.clear()
     _generation_defaults_cache.clear()
 
+    _declared = 0
     # Record the loaded bundle's declared positional ceiling so both
     # schedulers can clamp output budgets to (context − prompt) with a
     # logged context-exhaustion notice — max OUTPUT and max CONTEXT are
@@ -885,7 +897,6 @@ def _refresh_loaded_max_prompt_tokens(reason: str) -> int:
         from vmlx_engine.context_limits import set_declared_context_tokens
 
         _bundle = _model_path or ""
-        _declared = 0
         if _bundle:
             _declared = _declared_context_limit_from_config(
                 _read_bundle_json(_bundle, "config.json")
@@ -902,12 +913,14 @@ def _refresh_loaded_max_prompt_tokens(reason: str) -> int:
 
     explicit_limit = (_cli_args or {}).get("max_prompt_tokens")
     auto_estimate = _estimate_max_prompt_tokens()
+    _memory_advisory_prompt_tokens = int(auto_estimate or 0)
     _max_prompt_tokens = _resolve_max_prompt_tokens(
         auto_estimate,
         explicit_limit,
+        _declared,
     )
     if _max_prompt_tokens > 0:
-        source = "explicit" if explicit_limit and explicit_limit > 0 else "automatic"
+        source = "explicit" if explicit_limit and explicit_limit > 0 else "declared context"
         logger.info(
             "Refreshed max prompt/context length after %s: %d tokens (%s)",
             reason,
@@ -1133,16 +1146,23 @@ def _apply_projected_output_guard(
 def _resolve_max_prompt_tokens(
     auto_estimate: int,
     explicit_limit: int | None,
+    declared_limit: int | None = 0,
 ) -> int:
     """Resolve the prompt/context token cap enforced before prefill.
 
     ``--max-tokens`` controls generated output length. This resolver is for
     prompt/context length only: an explicit ``--max-prompt-tokens`` value wins;
-    otherwise the engine uses the automatic memory-safe estimate.
+    otherwise the cap is the model's declared context ceiling (a hard truth,
+    also enforced by ``context_limits`` at admission). ``auto_estimate`` (the
+    free-memory KV estimate) is accepted for the advisory log only and NEVER
+    becomes the cap: an estimate may advise, never refuse.
     """
     if explicit_limit is not None and explicit_limit > 0:
         return int(explicit_limit)
-    return int(auto_estimate or 0)
+    try:
+        return max(0, int(declared_limit or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _effective_max_prompt_tokens(request_or_value: Any | int | None = None) -> int:
@@ -9779,40 +9799,41 @@ def load_model(
             f"Applied custom chat template from --chat-template ({len(_custom_chat_template)} chars)"
         )
 
-    # Compute max safe prompt token limit based on available GPU memory
-    global _max_prompt_tokens
+    # Prompt/context cap: explicit --max-prompt-tokens, else the declared
+    # context ceiling. The free-memory estimate only ADVISES (never refuses).
+    global _max_prompt_tokens, _memory_advisory_prompt_tokens
     _auto_max_prompt_tokens = _estimate_max_prompt_tokens()
+    _memory_advisory_prompt_tokens = int(_auto_max_prompt_tokens or 0)
     _max_prompt_tokens = _resolve_max_prompt_tokens(
         _auto_max_prompt_tokens,
         max_prompt_tokens,
+        _declared_context_limit_from_config(_loaded_model_config_for_memory_projection()),
     )
-    if _max_prompt_tokens > 0:
-        if max_prompt_tokens is not None and max_prompt_tokens > 0:
-            logger.info(
-                f"Max prompt/context length: ~{_max_prompt_tokens:,} tokens "
-                "(explicit --max-prompt-tokens)"
-            )
-        else:
-            logger.info(
-                f"Max safe prompt length: ~{_max_prompt_tokens:,} tokens "
-                f"(based on available GPU memory)"
-            )
+    if _max_prompt_tokens > 0 and max_prompt_tokens is not None and max_prompt_tokens > 0:
+        logger.info(
+            f"Max prompt/context length: ~{_max_prompt_tokens:,} tokens "
+            "(explicit --max-prompt-tokens)"
+        )
+    if _memory_advisory_prompt_tokens > 0:
+        logger.info(
+            f"Context memory advisory: ~{_memory_advisory_prompt_tokens:,} prompt tokens "
+            "of live KV fit the free GPU working set by estimate (advice only)"
+        )
         # vmlx#85 @Benjamin-Wegener: advise user when their requested
-        # max_tokens exceeds the memory-safe limit. This is the most
+        # max_tokens exceeds the memory estimate. This is the most
         # common question — "can I run <big model> at <large context>
-        # on <low RAM Mac>?" — and the answer is usually "yes, but
-        # only up to N tokens before Metal OOM."
-        if _default_max_tokens > _max_prompt_tokens:
+        # on <low RAM Mac>?" The estimate advises; it never refuses.
+        if _default_max_tokens > _memory_advisory_prompt_tokens:
             logger.warning(
                 f"CONTEXT ADVISORY (vmlx#85): --max-tokens="
-                f"{_default_max_tokens} exceeds the memory-safe limit "
-                f"(~{_max_prompt_tokens:,} tokens) for this model on "
-                f"this Mac. Prompts longer than ~{_max_prompt_tokens:,} "
-                f"tokens will be REJECTED with a 413 prompt_too_long error to avoid "
-                f"Metal OOM. Use a Mac with more RAM, a smaller model, "
-                f"or set --max-tokens={_max_prompt_tokens} to silence this warning. "
-                f"Use --max-prompt-tokens={_max_prompt_tokens} only when you want "
-                f"to set the prompt/context cap explicitly."
+                f"{_default_max_tokens} exceeds the memory estimate "
+                f"(~{_memory_advisory_prompt_tokens:,} tokens) for this model on "
+                f"this Mac. Prompts longer than that may exceed free Metal "
+                f"memory; they are attempted, not rejected. Use a Mac with more "
+                f"RAM or a smaller model if they fail, or "
+                f"set --max-tokens={_memory_advisory_prompt_tokens} to silence this warning. "
+                f"Use --max-prompt-tokens=N only when you want to set the "
+                f"prompt/context cap explicitly."
             )
 
     # Cache JANG metadata at load time (avoids sync file IO in async /health handler)
@@ -14259,6 +14280,8 @@ async def health():
 
     if _model_type != "image" and _max_prompt_tokens > 0:
         result["max_prompt_tokens"] = _max_prompt_tokens
+    if _model_type != "image" and _memory_advisory_prompt_tokens > 0:
+        result["memory_advisory_prompt_tokens"] = _memory_advisory_prompt_tokens
 
     # Nemotron-3-Nano-Omni multimodal: surface bundle status + active backend.
     # Lets the UI show "Vision/Audio: Native MLX (fast)" vs "PyTorch bridge".

@@ -253,15 +253,42 @@ class TestHelperFunctions:
 
         assert server._resolve_max_prompt_tokens(64000, 8192) == 8192
 
-    def test_resolve_max_prompt_tokens_uses_auto_estimate_when_unset(self):
+    def test_resolve_max_prompt_tokens_never_enforces_memory_estimate_when_unset(self):
+        """The free-memory estimate advises only: without an explicit cap the
+        enforced cap is the declared context ceiling (or none)."""
         from vmlx_engine import server
 
-        assert server._resolve_max_prompt_tokens(4096, None) == 4096
+        assert server._resolve_max_prompt_tokens(4096, None) == 0
+        assert server._resolve_max_prompt_tokens(4096, None, 1048576) == 1048576
 
-    def test_resolve_max_prompt_tokens_uses_auto_estimate_when_zero(self):
+    def test_resolve_max_prompt_tokens_never_enforces_memory_estimate_when_zero(self):
         from vmlx_engine import server
 
-        assert server._resolve_max_prompt_tokens(4096, 0) == 4096
+        assert server._resolve_max_prompt_tokens(4096, 0) == 0
+        assert server._resolve_max_prompt_tokens(4096, 0, 262144) == 262144
+
+    def test_refresh_keeps_memory_estimate_as_advice_only(self, monkeypatch, tmp_path):
+        """Naive N0.5 on a 128 GB Mac: declared 1,048,576 tokens, free-memory
+        estimate ~50.8k. A 79k prompt was refused with prompt_too_long; the
+        enforced cap must be the declared ceiling and the estimate advisory."""
+        import json as _json
+
+        from vmlx_engine import context_limits, server
+
+        (tmp_path / "config.json").write_text(_json.dumps({"max_position_embeddings": 1048576}))
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_cli_args", {})
+        monkeypatch.setattr(server, "_max_prompt_tokens", 0)
+        monkeypatch.setattr(server, "_memory_advisory_prompt_tokens", 0)
+        monkeypatch.setattr(server, "_estimate_max_prompt_tokens", lambda: 50801)
+        monkeypatch.setattr(context_limits, "set_declared_context_tokens", lambda _: None)
+        assert server._refresh_loaded_max_prompt_tokens("test") == 1048576
+        assert server._max_prompt_tokens == 1048576
+        assert server._memory_advisory_prompt_tokens == 50801
+        assert server._effective_max_prompt_tokens(None) == 1048576
+        # an explicit operator cap still wins
+        monkeypatch.setattr(server, "_cli_args", {"max_prompt_tokens": 8192})
+        assert server._refresh_loaded_max_prompt_tokens("test") == 8192
 
     def test_estimate_max_prompt_tokens_uses_batched_private_model_and_context_ceiling(
         self, monkeypatch
@@ -388,17 +415,22 @@ class TestHelperFunctions:
 
         assert server._declared_context_limit_from_config(config) == 131072
 
-    def test_refresh_loaded_max_prompt_tokens_applies_automatic_estimate(
+    def test_refresh_loaded_max_prompt_tokens_keeps_automatic_estimate_advisory(
         self, monkeypatch
     ):
+        """The automatic free-memory estimate is recorded as advice; with no
+        explicit cap and no declared context nothing is enforced."""
         from vmlx_engine import server
 
+        monkeypatch.setattr(server, "_model_path", "")
         monkeypatch.setattr(server, "_cli_args", {"max_prompt_tokens": None})
         monkeypatch.setattr(server, "_max_prompt_tokens", 0)
+        monkeypatch.setattr(server, "_memory_advisory_prompt_tokens", 0)
         monkeypatch.setattr(server, "_estimate_max_prompt_tokens", lambda: 65536)
 
-        assert server._refresh_loaded_max_prompt_tokens("test") == 65536
-        assert server._max_prompt_tokens == 65536
+        assert server._refresh_loaded_max_prompt_tokens("test") == 0
+        assert server._max_prompt_tokens == 0
+        assert server._memory_advisory_prompt_tokens == 65536
 
     def test_refresh_loaded_max_prompt_tokens_preserves_explicit_limit(
         self, monkeypatch

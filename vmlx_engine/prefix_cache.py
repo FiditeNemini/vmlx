@@ -6513,8 +6513,7 @@ class BlockAwarePrefixCache:
                                     and getattr(self, "_ssd_write_behind", False)
                                     and block_chain_hash in disk_only_fallbacks
                                     and not (
-                                        has_minimax_m3_cache_data
-                                        or has_dsv4_cache_data
+                                        has_dsv4_cache_data
                                         or has_dsv4_delta_cache_data
                                         or has_zaya_cca_cache_data
                                         or has_native_quantized
@@ -6523,11 +6522,12 @@ class BlockAwarePrefixCache:
                                 ):
                                     # SSD-only write-behind: the block keeps the
                                     # payload the writer was given (for plain,
-                                    # rotating and nested CacheList KV the very
-                                    # same arrays its frozen views alias) until
-                                    # its fence settles, so a lookup before the
-                                    # write is durable restores from RAM instead
-                                    # of waiting at admission.
+                                    # rotating, nested CacheList and Qwen3.8
+                                    # Flash-Next QSA sparse KV the very same arrays its
+                                    # frozen views alias) until its fence settles,
+                                    # so a lookup before the write is durable
+                                    # restores from RAM instead of waiting at
+                                    # admission.
                                     block.cache_data = block_kv_data
                                     block.cache_data_from_disk = False
                                     block.durability_write_pending = True

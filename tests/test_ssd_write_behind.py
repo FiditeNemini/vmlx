@@ -229,3 +229,48 @@ def test_nested_cache_list_layers_write_behind(tmp_path, monkeypatch, slow_write
                 assert mx.array_equal(b.view(mx.uint8), w.view(mx.uint8)).item()
     finally:
         store.shutdown()
+
+
+def test_flash_next_qsa_cache_writes_behind(tmp_path, monkeypatch, slow_writer):
+    """Qwen3.8 Flash-Next full-attention layers are QSACache (K/V + indexer keys; the class is MiniMaxM3SparseCache)."""
+    monkeypatch.setenv("VMLX_SSD_WRITE_BEHIND", "1")
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+    from vmlx_engine.scheduler import Scheduler
+
+    mx.random.seed(31)
+    caches = [MiniMaxM3SparseCache(), KVCache()]
+    for start in range(0, 128, 32):
+        k = mx.random.normal((1, 2, 32, 16)).astype(mx.bfloat16)
+        v = mx.random.normal((1, 2, 32, 16)).astype(mx.bfloat16)
+        caches[0].update_and_fetch(k, v)
+        caches[0].update_index(mx.random.normal((1, 1, 32, 8)).astype(mx.float32))
+        caches[1].update_and_fetch(k, v)
+    mx.eval([c.state for c in caches])
+    payload = Scheduler.__new__(Scheduler)._extract_cache_states(caches)
+    store, manager, cache = _manager(tmp_path)
+    try:
+        assert cache.store_cache("qsa", list(range(128)), payload) is not None
+        assert cache.write_behind_pending() == 1, "Flash-Next QSA stores must take the write-behind branch"
+        assert all(b.cache_data is not None for b in _blocks(manager))
+
+        def restore(rid):
+            table, rest = cache.fetch_cache(rid, list(range(128)) + [5])
+            assert table is not None and table.num_tokens == 128 and rest == [5]
+            restored = cache.reconstruct_cache(table)
+            assert restored is not None and isinstance(restored[0], MiniMaxM3SparseCache)
+            got = [mx.array(a) for c in restored for a in c.state]
+            cache.release_cache(rid)
+            return got
+
+        from_ram = restore("in-window")
+        cache.settle_write_behind(wait=True)
+        assert all(b.cache_data is None for b in _blocks(manager))
+        from_ssd = restore("after-durable")
+        want = [a for c in caches for a in c.state]
+        assert len(from_ram) == len(from_ssd) == len(want)
+        for a, b, w in zip(from_ram, from_ssd, want):
+            assert a.dtype == w.dtype and a.shape == w.shape
+            assert mx.array_equal(a.view(mx.uint8), w.view(mx.uint8)).item()
+            assert mx.array_equal(b.view(mx.uint8), w.view(mx.uint8)).item()
+    finally:
+        store.shutdown()

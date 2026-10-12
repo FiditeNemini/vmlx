@@ -116,9 +116,34 @@ class TestSerializeBlock:
 
         assert num_layers == 1
         assert dtype == "rotating_kv_pending"
-        assert "layer_0_rotating_pending" in tensors
+        # identified by the per-layer type map in the block meta, no marker tensor (one tensor per pending layer
+        # per block was ~40% of a Naive block's tensors)
+        assert "layer_0_rotating_pending" not in tensors
         restored = _deserialize_block(dict(tensors), dtype)
         assert restored == [("rotating_kv_pending", "RotatingKVCache")]
+
+    def test_rotating_pending_blocks_written_with_the_marker_tensor_still_read(self):
+        import json
+
+        import mlx.core as mx
+        import numpy as np
+
+        from vmlx_engine.block_disk_store import _deserialize_block, _serialize_block
+
+        def with_meta(tensors, edit):
+            meta = json.loads(bytes(np.asarray(tensors["__vmlx_block_meta__"])).decode())
+            edit(meta)
+            out = dict(tensors)
+            out["__vmlx_block_meta__"] = mx.array(np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8))
+            return out
+
+        tensors, dtype, _ = _serialize_block([("rotating_kv_pending", "RotatingKVCache")])
+        old = dict(tensors)
+        old["layer_0_rotating_pending"] = mx.array([1], dtype=mx.int32)            # the old format, type map kept
+        old = with_meta(old, lambda m: m.setdefault("__tensor_dtypes__", {}).update({"layer_0_rotating_pending": "int32"}))
+        assert _deserialize_block(dict(old), dtype) == [("rotating_kv_pending", "RotatingKVCache")]
+        oldest = with_meta(old, lambda m: m.pop("__layer_types__", None))           # oldest files: inferred
+        assert _deserialize_block(dict(oldest), dtype) == [("rotating_kv_pending", "RotatingKVCache")]
 
 
 class TestEndToEndRoundTrip:

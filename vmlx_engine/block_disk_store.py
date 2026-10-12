@@ -2493,8 +2493,29 @@ class BlockDiskStore:
 
         pending_mlx: list[tuple[str, Any]] = []
         detached: Dict[str, Any] = {}
+        # Fast path, same bytes and the same aliasing as below: evaluate the inputs once, then expose each
+        # C-contiguous buffer to NumPy through the buffer protocol (BF16 as its uint16 bits). The general path
+        # builds two lazy nodes per tensor (contiguous + bit view) and evaluates them, which cost ~5-8 us per
+        # tensor on the store path (a 46k Naive store freezes ~36k tensors on the request's terminal path);
+        # mx.contiguous of a contiguous input shares its buffer, so the views alias exactly what they did.
+        # Non-contiguous inputs (no buffer export) still take the general path and are copied there.
+        mlx_inputs = [value for value in tensors.values() if isinstance(value, mx.array)]
+        if mlx_inputs:
+            mx.eval(*mlx_inputs)
         for name, value in tensors.items():
             if isinstance(value, mx.array):
+                try:
+                    buffer = memoryview(value)
+                except (BufferError, TypeError, ValueError):
+                    buffer = None
+                if buffer is not None and buffer.c_contiguous:
+                    if value.dtype == mx.bfloat16:
+                        view = np.ndarray(tuple(value.shape), dtype=np.uint16, buffer=buffer)
+                    else:
+                        view = np.asarray(buffer)
+                    view.setflags(write=False)
+                    detached[name] = view
+                    continue
                 materialized = mx.contiguous(value)
                 if "bfloat16" in str(value.dtype):
                     # Reinterpret the bf16 bits as uint16 rather than widening
@@ -5556,8 +5577,12 @@ def _serialize_block(
                 meta.setdefault("__orig_dtypes__", {})[str(i)] = str(keys.dtype)
 
         elif tag == "rotating_kv_pending":
+            # The layer is identified by __layer_types__ (set above) and its class name here; readers consult the
+            # type map first. The old one-element marker tensor carried nothing else, yet cost a tensor per pending
+            # layer per block everywhere a tensor costs (create, freeze, write, read): Naive's 36 sliding-window
+            # layers made it 36 of a block's 85 tensors. Files written with the marker still read
+            # (_infer_layer_type fallback).
             _, class_name = layer_data
-            tensors[f"layer_{i}_rotating_pending"] = mx.array([1], dtype=mx.int32)
             meta[str(i)] = {"class_name": str(class_name)}
 
         elif tag == "cache_list":
@@ -5993,15 +6018,21 @@ def _deserialize_block(
     except (TypeError, ValueError):
         declared_num_layers = 0
 
-    if not layer_indices:
+    # Layers whose type map entry carries no tensors (a pending rotating chain node is identified by its tag alone).
+    tensorless = {
+        int(k) for k, v in layer_types.items()
+        if v == "rotating_kv_pending" and str(k).isdigit()
+    } if isinstance(layer_types, dict) else set()
+
+    if not layer_indices and not tensorless:
         return []
 
-    max_layer = max(layer_indices.keys())
+    max_layer = max(list(layer_indices.keys()) + list(tensorless))
     num_cache_layers = max(max_layer + 1, declared_num_layers)
     cache_data: List[Tuple] = []
 
     for i in range(num_cache_layers):
-        if i not in layer_indices:
+        if i not in layer_indices and i not in tensorless:
             cache_data.append(("skip",))
             continue
 

@@ -649,8 +649,13 @@ class PrefixDiskTier:
         self.misses += 1
         return None
 
-    def _read_link(self, name, ids):
-        """One materialized link: (arrays, layers, parent) of snapshot ``name`` for exactly ``ids``, + its file identity."""
+    def _read_link(self, name, ids, leaf: bool = True):
+        """One materialized link: (arrays, layers, parent) of snapshot ``name`` for exactly ``ids``, + its file identity.
+
+        A parent link (``leaf=False``) contributes only its MLA token rows to the assembled snapshot: its KDA state,
+        drafter context and logits are superseded by the leaf's. Those arrays are dropped unread (``mx.load`` is lazy, so
+        an array that is never evaluated is never read from the file) — on GLM-5.3 every link carries ~454 MB of KDA
+        state, and materializing it for each of ~15 parents made a 65k chained restore read ~7 GB it then discarded."""
         import json
 
         seen = {}
@@ -660,10 +665,20 @@ class PrefixDiskTier:
             arrays, meta = mx.load(str(path), return_metadata=True)
             if meta.get("format") != self.FORMAT or arrays["ids"].tolist() != [int(t) for t in ids]:
                 raise ValueError("prefix snapshot does not match")
+            layers = json.loads(meta["layers"])
+            if not leaf:
+                keep = set()
+                for i, entry in enumerate(layers):
+                    if entry[0] != "Glm5MLACache":
+                        continue
+                    absorbed = tuple(entry[1][:2]) == ("glm5_next_native_v2", "mla_absorbed")
+                    keep.update(f"c{i}.{j}" for j, axis in enumerate(_mla_seq_axes(absorbed))
+                                if axis is not None and entry[2][j])
+                arrays = {k: v for k, v in arrays.items() if k in keep}
             # MLX loads lazily. Keep the eviction lock through materialization,
             # not merely until the file's header has been read.
             mx.eval(list(arrays.values()))
-            return arrays, json.loads(meta["layers"]), json.loads(meta.get("parent") or "null")
+            return arrays, layers, json.loads(meta.get("parent") or "null")
 
         try:
             return self._catalog.load(name, len(ids), read), seen.get("identity")
@@ -721,7 +736,7 @@ class PrefixDiskTier:
             cur_name, cur_ids = name, [int(t) for t in ids]
             while True:
                 failed = (cur_name, len(cur_ids), None)
-                link, identity = self._read_link(cur_name, cur_ids)
+                link, identity = self._read_link(cur_name, cur_ids, leaf=not links)
                 if link is None:
                     if links:
                         self.chain_misses += 1        # parent gone (evicted): the leaf alone restores nothing

@@ -547,3 +547,41 @@ def test_prefix_disk_delta_chain_restores_lossless_after_restart(tmp_path, monke
         third.disk.close()
     finally:
         target.close()
+
+
+def test_prefix_disk_chain_parents_read_only_mla_rows(tmp_path, monkeypatch):
+    """A chained restore materializes only the MLA token rows of each parent link: the parents' KDA state, drafter
+    context and logits are superseded by the leaf and must stay unread (GLM-5.3: ~454 MB of KDA per link)."""
+    import vmlx_engine.glm_dflash2 as GD
+    monkeypatch.setattr(GD, "PREFIX_SNAPSHOT_EVERY", 16)
+    monkeypatch.setenv("VMLX_SSD_ONLY_RAM_RELEASE", "1")
+    model = _target(11)
+    target = GLMDFlashTarget(model, TAPS)
+    try:
+        prompt = list(range(5, 75))
+        follow = prompt + list(range(90, 99))
+        cold, _ = _run(model, target, follow, 12, None)
+        first = GD.PrefixStore(4, disk=GD.PrefixDiskTier(tmp_path, 2 ** 30))
+        _run(model, target, prompt, 12, first)
+        first.disk.flush()
+        first.disk.close()
+        second = GD.PrefixStore(4, disk=GD.PrefixDiskTier(tmp_path, 2 ** 30))
+        calls = []
+        orig = second.disk._read_link
+
+        def spy(name, ids, leaf=True):
+            out = orig(name, ids, leaf=leaf)
+            calls.append((leaf, out[0]))
+            return out
+        second.disk._read_link = spy
+        got, st = _run(model, target, follow, 12, second)
+        assert st.cache_source == "disk" and got == cold
+        parents = [link for leaf, link in calls if not leaf]
+        assert calls[0][0] and len(parents) >= 3
+        for arrays, layers, _ in parents:
+            assert arrays and set(arrays) <= {f"c{i}.{j}" for i, e in enumerate(layers) if e[0] == "Glm5MLACache"
+                                             for j in range(len(e[2]))}
+            assert not {"hidden", "logits", "ids"} & set(arrays)
+        second.disk.close()
+    finally:
+        target.close()

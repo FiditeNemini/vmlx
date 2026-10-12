@@ -550,18 +550,18 @@ def test_batched_engine_offset_proxy_and_request_rope_deltas():
     assert mbg._offset_proxy_needed_for_model_type("minicpmv4_7")
     lm = SimpleNamespace(decode_positions_add_request_rope_delta=True, _rope_deltas=mx.array([[-178]]))
     reqs = [SimpleNamespace(), SimpleNamespace(), SimpleNamespace()]
-    gen = SimpleNamespace(language_model=lm, active_batch=SimpleNamespace(requests=reqs))
-    mbg.MLLMBatchGenerator._record_request_rope_delta(gen, reqs[0])
+    batch = SimpleNamespace(requests=reqs)
+    mbg._record_request_rope_delta(lm, reqs[0])
     lm._rope_deltas = None
-    mbg.MLLMBatchGenerator._record_request_rope_delta(gen, reqs[2])
+    mbg._record_request_rope_delta(lm, reqs[2])
     assert reqs[0]._mrope_decode_delta == -178 and reqs[2]._mrope_decode_delta == 0
-    rows = mbg.MLLMBatchGenerator._request_rope_delta_rows(gen, 3)
-    assert rows.tolist() == [[-178], [0], [0]]
+    assert mbg._request_rope_delta_rows(lm, batch, 3).tolist() == [[-178], [0], [0]]
     with pytest.raises(RuntimeError):
-        mbg.MLLMBatchGenerator._request_rope_delta_rows(gen, 2)
-    # Language models that do not opt in keep the engine's absolute positions.
-    gen.language_model = SimpleNamespace()
-    assert mbg.MLLMBatchGenerator._request_rope_delta_rows(gen, 3) is None
+        mbg._request_rope_delta_rows(lm, batch, 2)
+    # Language models that do not opt in keep the engine's absolute positions,
+    # and stub engines without a language model are a no-op.
+    assert mbg._request_rope_delta_rows(SimpleNamespace(), batch, 3) is None
+    mbg._record_request_rope_delta(None, SimpleNamespace())
 
 
 def test_processor_alignment_helpers():

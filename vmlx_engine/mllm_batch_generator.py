@@ -8620,6 +8620,43 @@ def _wrap_batch_caches(cache: List[Any]) -> List[Any]:
     return wrapped
 
 
+def _record_request_rope_delta(language_model: Any, request: Any) -> None:
+    """Remember a request's mRoPE delta after its media prefill.
+
+    Only for language models that declare
+    ``decode_positions_add_request_rope_delta`` (MiniCPM-V-4.7 canvas M-RoPE):
+    their decode position is ``cache_len + rope_delta`` (the transformers
+    contract), and the delta is per request, so it cannot live in the language
+    model's module state when rows are batched.
+    """
+    if not getattr(language_model, "decode_positions_add_request_rope_delta", False):
+        return
+    deltas = getattr(request, "_mrope_tail_rope_deltas", None)
+    if deltas is None:
+        deltas = getattr(language_model, "_rope_deltas", None)
+    request._mrope_decode_delta = (  # type: ignore[attr-defined]
+        int(deltas.reshape(-1)[0].item()) if deltas is not None else 0
+    )
+
+
+def _request_rope_delta_rows(
+    language_model: Any, active_batch: Any, batch_size: int
+) -> Optional[mx.array]:
+    """Per-row ``(B, 1)`` decode rope deltas for opted-in models, or None when all are zero."""
+    if not getattr(language_model, "decode_positions_add_request_rope_delta", False):
+        return None
+    requests = list(getattr(active_batch, "requests", None) or [])
+    deltas = [int(getattr(r, "_mrope_decode_delta", 0) or 0) for r in requests]
+    if not any(deltas):
+        return None
+    if len(deltas) != batch_size:
+        raise RuntimeError(
+            f"mRoPE decode deltas cover {len(deltas)} request(s) but the decode "
+            f"batch has {batch_size} row(s)"
+        )
+    return mx.array(deltas, dtype=mx.int32)[:, None]
+
+
 def _offset_proxy_needed_for_model_type(model_type: str) -> bool:
     """Scalar-offset proxying is ONLY for Qwen-style VL language models.
 
@@ -11973,7 +12010,7 @@ class MLLMBatchGenerator:
                 request, input_ids, cache, kwargs
             )
             request.vision_encoded = True
-            self._record_request_rope_delta(request)
+            _record_request_rope_delta(getattr(self, "language_model", None), request)
             if hasattr(output, "logits"):
                 return output.logits
             return output
@@ -13569,7 +13606,7 @@ class MLLMBatchGenerator:
             request, input_ids, seq_len, cache, kwargs
         )
         request.vision_encoded = True
-        self._record_request_rope_delta(request)
+        _record_request_rope_delta(getattr(self, "language_model", None), request)
 
         if hasattr(output, "logits"):
             return output.logits
@@ -19387,40 +19424,6 @@ class MLLMBatchGenerator:
             )
         return token, logprobs
 
-    def _record_request_rope_delta(self, request: Any) -> None:
-        """Remember this request's mRoPE delta after its media prefill.
-
-        Only for language models that declare
-        ``decode_positions_add_request_rope_delta`` (MiniCPM-V-4.7 canvas
-        M-RoPE): their decode position is ``cache_len + rope_delta`` (the
-        transformers contract), and the delta is per request, so it cannot
-        live in the language model's module state when rows are batched.
-        """
-        lm = self.language_model
-        if not getattr(lm, "decode_positions_add_request_rope_delta", False):
-            return
-        deltas = getattr(request, "_mrope_tail_rope_deltas", None)
-        if deltas is None:
-            deltas = getattr(lm, "_rope_deltas", None)
-        request._mrope_decode_delta = (  # type: ignore[attr-defined]
-            int(deltas.reshape(-1)[0].item()) if deltas is not None else 0
-        )
-
-    def _request_rope_delta_rows(self, batch_size: int) -> Optional[mx.array]:
-        """Per-row ``(B, 1)`` decode rope deltas, or None when all are zero."""
-        if not getattr(self.language_model, "decode_positions_add_request_rope_delta", False):
-            return None
-        requests = list(getattr(getattr(self, "active_batch", None), "requests", None) or [])
-        deltas = [int(getattr(r, "_mrope_decode_delta", 0) or 0) for r in requests]
-        if not any(deltas):
-            return None
-        if len(deltas) != batch_size:
-            raise RuntimeError(
-                f"mRoPE decode deltas cover {len(deltas)} request(s) but the decode "
-                f"batch has {batch_size} row(s)"
-            )
-        return mx.array(deltas, dtype=mx.int32)[:, None]
-
     def _step(
         self, input_tokens: mx.array, cache: List[Any]
     ) -> Tuple[mx.array, List[mx.array]]:
@@ -19479,7 +19482,11 @@ class MLLMBatchGenerator:
                 self.language_model,
             )
             if position_ids is not None:
-                _row_deltas = self._request_rope_delta_rows(int(position_ids.shape[1]))
+                _row_deltas = _request_rope_delta_rows(
+                    self.language_model,
+                    getattr(self, "active_batch", None),
+                    int(position_ids.shape[1]),
+                )
                 if _row_deltas is not None:
                     position_ids = position_ids + _row_deltas[None, :, :]
                 lm_kwargs["position_ids"] = position_ids

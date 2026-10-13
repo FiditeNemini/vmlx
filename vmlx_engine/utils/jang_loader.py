@@ -4631,7 +4631,8 @@ def _load_jang_v2_vlm(
         if str(config.get("model_type", "")).lower() == "minicpmv4_7":
             from vmlx_engine.jangh.install import enable_minicpm_fused
 
-            enable_minicpm_fused(model)
+            _fused_banks = enable_minicpm_fused(model)
+            logger.info("JANGH MiniCPM fused options (JANGH_MINICPM_FUSED): %d routed banks configured", _fused_banks)
         # Dense JANGH projections (non-routed jangtq2 entries, e.g. Qwen3.8-27B JANGH2 MLP) -> TQLinear before quantize.
         from vmlx_engine.jangh.dense import install_jangh_dense
 

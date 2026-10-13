@@ -227,8 +227,8 @@ class _PrefixSnapshot:
 
 # Delta snapshots (2026-10-12). The lane snapshots the prompt every PREFIX_SNAPSHOT_EVERY tokens, at the stable root
 # and at the prompt end, and every snapshot held the WHOLE MLA prefix: GLM-5.3 JANGHT2.4 wrote 35 GB for one cold
-# 64.7k-token prompt (33 snapshots; ~10.6 KB/token of MLA + ~454 MB of KDA state each) and 0.63 GB for a 35-token
-# continuation. The MLA layers' state is append-only along each slot's token axis, so a snapshot that extends the
+# 64.7k-token prompt (33 snapshots; ~10.6 KB/token of MLA, plus per snapshot 147.5 MB of KDA state + conv tails and
+# 83.9 MB of drafter context = 2,047 rows x 5 tapped layers x 4096 bf16) and 0.63 GB for a 35-token continuation. The MLA layers' state is append-only along each slot's token axis, so a snapshot that extends the
 # request's previous snapshot (or the one it restored) stores only the new rows of every MLA slot, COPIED (a view would
 # pin the live buffer), and the KDA layers whole. ``parent`` names that snapshot; a restore loads the chain root first,
 # compares every link's token ids, and concatenates each slot. A missing parent is a miss, never wrong state; the
@@ -654,8 +654,9 @@ class PrefixDiskTier:
 
         A parent link (``leaf=False``) contributes only its MLA token rows to the assembled snapshot: its KDA state,
         drafter context and logits are superseded by the leaf's. Those arrays are dropped unread (``mx.load`` is lazy, so
-        an array that is never evaluated is never read from the file) — on GLM-5.3 every link carries ~454 MB of KDA
-        state, and materializing it for each of ~15 parents made a 65k chained restore read ~7 GB it then discarded."""
+        an array that is never evaluated is never read from the file) — on GLM-5.3 every link carries ~232 MB of KDA
+        state and drafter context, and materializing it for each of ~15 parents made a 65k chained restore read
+        several GB it then discarded."""
         import json
 
         seen = {}

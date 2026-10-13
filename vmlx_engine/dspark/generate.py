@@ -117,9 +117,17 @@ class ARFallback:
         self.draft_rate = rate if self.draft_rate is None else self.draft_rate + self.alpha * (rate - self.draft_rate)
 
     def record_ar(self, seconds: float) -> None:
-        self.ar_seconds = seconds if self.ar_seconds is None else self.ar_seconds + self.alpha * (seconds - self.ar_seconds)
-        self.ar_left = max(0, self.ar_left - 1)
-        self.since_probe += 1
+        self.record_ar_burst(1, seconds)
+
+    def burst_size(self) -> int:
+        """AR steps to run now: the rest of the current burst, cut at the next draft probe."""
+        return max(1, min(self.ar_left, self.probe_every - self.since_probe))
+
+    def record_ar_burst(self, steps: int, seconds: float) -> None:
+        per_step = seconds / max(1, steps)
+        self.ar_seconds = per_step if self.ar_seconds is None else self.ar_seconds + self.alpha * (per_step - self.ar_seconds)
+        self.ar_left = max(0, self.ar_left - steps)
+        self.since_probe += steps
         if self.since_probe >= self.probe_every:
             self.ar_left = 0
             self.probe = True                        # one draft round re-measures the text
@@ -171,20 +179,37 @@ def iter_dspark(
     while produced < max_new:
         room = max_new - produced
         if ar_fallback is not None and fixed_width is None and ar_fallback.next_is_ar():
+            # Pipelined AR burst: step i+1 is queued (async_eval) before step i's token is read, as in the AR lane,
+            # and the burst's tap rows reach the drafter in one call. Same values as one-at-a-time steps.
+            n_steps = max(1, min(int(ar_fallback.burst_size()), room))
             t_step = time.perf_counter()
             logits, feats = target.ar_step(anchor, cache, taps)
             pick = _pick(logits[None], sampler).reshape(1)
-            mx.eval(pick, feats)
-            drafter.add_context(feats)
-            anchor = pick.astype(anchor.dtype)
-            new = [int(pick.item())]
-            ar_fallback.record_ar(time.perf_counter() - t_step)
-            stats.ar_tokens += 1
-            produced += 1
+            mx.async_eval(pick, feats)
+            burst_feats, new, stop = [], [], False
+            for i in range(n_steps):
+                nxt = None
+                if i + 1 < n_steps:
+                    logits2, feats2 = target.ar_step(pick.astype(anchor.dtype), cache, taps)
+                    nxt = (_pick(logits2[None], sampler).reshape(1), feats2)
+                    mx.async_eval(*nxt)
+                tok = int(pick.item())
+                burst_feats.append(feats)
+                new.append(tok)
+                if tok in eos:
+                    stop = True
+                    break
+                if nxt is not None:
+                    pick, feats = nxt
+            drafter.add_context(mx.concatenate(burst_feats, axis=1) if len(burst_feats) > 1 else burst_feats[0])
+            anchor = mx.array([new[-1]], dtype=anchor.dtype)
+            ar_fallback.record_ar_burst(len(new), time.perf_counter() - t_step)
+            stats.ar_tokens += len(new)
+            produced += len(new)
             stats.tokens = produced
             stats.decode_s = time.perf_counter() - t1
             yield new
-            if new[0] in eos:
+            if stop:
                 return
             continue
         t_round = time.perf_counter()

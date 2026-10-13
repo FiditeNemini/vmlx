@@ -453,6 +453,12 @@ class _ScriptedFallback:
     def record_ar(self, seconds):
         pass
 
+    def burst_size(self):
+        return 3
+
+    def record_ar_burst(self, steps, seconds):
+        pass
+
 
 @pytest.mark.parametrize("plan", [[False, True], [True, True, False], [False, False, True, True, True]])
 @pytest.mark.parametrize("moe", [False, True])

@@ -14,6 +14,7 @@ P_target(draft) instead of 1[argmax = draft].
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, List, Optional, Sequence
@@ -89,8 +90,17 @@ class ARFallback:
     burst = 8
     probe_every = 24
 
+    # Width choice from MEASURED round costs (VMLX_DSPARK_MEASURED_WIDTH=0: the static choose_width model). The static
+    # model prices a round at 1 + 0.12 * (T - 1) decode steps and ignores the drafter; measured on the 35B-A3B (600-token
+    # context) a round is drafter 5.4 ms (~0.53 AR step) + verify 11 / 16 / 18-21 / 26 ms at T = 1 / 2 / 4 / 7 rows
+    # (~0.5 AR step for the second row, ~0.2 for each later one): the static model makes 7-row verifies look nearly
+    # free, so rounds ran wide and slow and the AR fallback took ~80 % of the tokens in sustained multi-turn chat.
+    prior_fixed = 0.5        # drafter, in AR-step units, until rounds are measured
+    prior_per_row = 0.3      # each verify row after the first, in AR-step units
+
     def __init__(self):
         self.draft_rate: Optional[float] = None     # committed tokens per second of draft rounds (EMA)
+        self.width_seconds: dict = {}                # verify rows T -> round seconds (EMA)
         self.ar_seconds: Optional[float] = None     # seconds per AR step (EMA)
         self.ar_left = 0
         self.since_probe = 0
@@ -112,7 +122,43 @@ class ARFallback:
             return True
         return False
 
-    def record_draft(self, tokens: int, seconds: float) -> None:
+    def round_seconds(self, rows: int) -> Optional[float]:
+        """Estimated seconds of a draft round verifying ``rows`` rows: its EMA when measured, else a line through the
+        measured widths (one measured width: the prior slope), else the prior; None before any timing exists."""
+        if rows in self.width_seconds:
+            return self.width_seconds[rows]
+        pts = sorted(self.width_seconds.items())
+        unit = self.ar_seconds
+        if len(pts) >= 2:
+            (t0, c0), (t1, c1) = pts[0], pts[-1]
+            slope = max((c1 - c0) / max(t1 - t0, 1), 0.0)
+            return max(c0 + slope * (rows - t0), 1e-6)
+        if len(pts) == 1 and unit is not None:
+            t0, c0 = pts[0]
+            return max(c0 + self.prior_per_row * unit * (rows - t0), 1e-6)
+        if unit is not None:
+            return unit * (1.0 + self.prior_fixed + self.prior_per_row * (rows - 1))
+        return None
+
+    def choose_width(self, conf: Sequence[float], max_draft: int, cost_per_row: float) -> int:
+        """Draft count k maximizing E[tokens | k] / measured round seconds(k + 1 rows); the static model until a
+        timing exists."""
+        if self.round_seconds(2) is None or os.environ.get("VMLX_DSPARK_MEASURED_WIDTH", "1").strip().lower() in \
+                {"0", "false", "off", "no"}:
+            return choose_width(conf, max_draft, cost_per_row)
+        best, best_k, run, expected = 0.0, 1, 1.0, 1.0
+        for k in range(1, min(max_draft, len(conf)) + 1):
+            run *= float(conf[k - 1])
+            expected += run
+            value = expected / self.round_seconds(k + 1)
+            if value > best:
+                best, best_k = value, k
+        return best_k
+
+    def record_draft(self, tokens: int, seconds: float, rows: Optional[int] = None) -> None:
+        if rows is not None:
+            prev = self.width_seconds.get(rows)
+            self.width_seconds[rows] = seconds if prev is None else prev + self.alpha * (seconds - prev)
         self.rounds += 1
         self.since_probe = 0
         rate = tokens / max(seconds, 1e-9)
@@ -274,7 +320,12 @@ def iter_dspark(
             drafts, conf = drafter.draft(hidden, anchor, target.lm_head, max_draft,
                                          sampler=sampler)
             mx.eval(drafts, conf)
-            k = fixed_width if fixed_width is not None else choose_width(conf.tolist(), max_draft, cost_per_row)
+            if fixed_width is not None:
+                k = fixed_width
+            elif ar_fallback is not None and hasattr(ar_fallback, "choose_width"):
+                k = ar_fallback.choose_width(conf.tolist(), max_draft, cost_per_row)
+            else:
+                k = choose_width(conf.tolist(), max_draft, cost_per_row)
             k = max(1, min(int(k), n))
             proposal = drafts[:k]
         else:
@@ -297,7 +348,7 @@ def iter_dspark(
         stats.drafted += k
         stats.accepted += accepted
         if ar_fallback is not None:
-            ar_fallback.record_draft(len(new), time.perf_counter() - t_round)
+            ar_fallback.record_draft(len(new), time.perf_counter() - t_round, rows=k + 1)
         stats.widths[k + 1] = stats.widths.get(k + 1, 0) + 1
         cut = next((i for i, t in enumerate(new) if t in eos), None)
         if cut is not None:

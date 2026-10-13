@@ -461,7 +461,7 @@ class _ScriptedFallback:
         self.i += 1
         return out
 
-    def record_draft(self, tokens, seconds):
+    def record_draft(self, tokens, seconds, rows=None):
         pass
 
     def record_ar(self, seconds):
@@ -846,3 +846,36 @@ def test_real_drafter_keeps_greedy_equal_to_ar(tmp_path, monkeypatch, candidates
     reference = generate_ar(target, PROMPT, 24, set())
     drafter = _real_drafter(tmp_path)
     assert generate_dspark(target, drafter, PROMPT, 24, set()) == reference
+
+
+
+# ------------------------------------------------------------- width choice from measured round costs
+def test_measured_round_costs_pick_a_narrower_width_than_the_static_model():
+    from vmlx_engine.dspark.generate import ARFallback, choose_width
+
+    conf = [0.8] * 6
+    policy = ARFallback()
+    assert policy.round_seconds(2) is None                         # nothing measured: the static model decides
+    assert policy.choose_width(conf, 6, 0.12) == choose_width(conf, 6, 0.12) == 5     # E/(1 + 0.12 k) peaks at 5
+    policy.ar_seconds = 0.01                                       # prior: 1 + 0.5 + 0.3 * (T - 1) AR steps
+    assert abs(policy.round_seconds(4) - 0.01 * (1.5 + 0.9)) < 1e-12
+    # Measured like the 35B-A3B: rows are expensive (2 rows 20 ms, 7 rows 45 ms; 4 rows interpolated to 30 ms).
+    policy.record_draft(2, 0.020, rows=2)
+    policy.record_draft(4, 0.045, rows=7)
+    assert abs(policy.round_seconds(4) - 0.030) < 1e-12
+    assert policy.choose_width(conf, 6, 0.12) == 3                 # E 2.95 / 30 ms beats 1.8 / 20 ms and 3.95 / 45 ms
+    import os
+    os.environ["VMLX_DSPARK_MEASURED_WIDTH"] = "0"
+    try:
+        assert policy.choose_width(conf, 6, 0.12) == 5             # A/B switch: the static model
+    finally:
+        del os.environ["VMLX_DSPARK_MEASURED_WIDTH"]
+
+
+def test_measured_width_choice_keeps_greedy_equal_to_ar(tmp_path):
+    from vmlx_engine.dspark.generate import ARFallback
+
+    target = _tiny_target()
+    reference = generate_ar(target, PROMPT, 30, set())
+    out = generate_dspark(target, _oracle(tmp_path, reference), PROMPT, 30, set(), ar_fallback=ARFallback())
+    assert out == reference

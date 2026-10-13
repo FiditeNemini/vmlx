@@ -29,7 +29,12 @@ Three forwards over the module's own vendored Qwen3.5 layers:
   opt-in ``_rollback_sink``).
 
 Taps are the residual-stream outputs of the drafter's ``target_layer_ids``.
-Text rows only (positions = sequence index, rope delta 0).
+Text requests: positions = sequence index. Image requests (``set_media``, from
+``MLXMultimodalLM._dspark_media_plan``): prompt rows read the merged input
+embeddings (vision features scattered at the placeholders) and the prompt's
+canvas M-RoPE positions; every row after the prompt (AR step, verify) is text
+at ``offset + rope_delta``, the same positions the served language model gives
+decode steps after that prompt. The drafter only proposes text tokens.
 """
 
 from __future__ import annotations
@@ -94,6 +99,9 @@ class MiniCPMDSparkTarget:
         self._patched_kernel_enabled = _qwen_vlm_gated_delta_kernel_enabled
         self.lm_head = self.lm.lm_head
         self.embed_tokens = self.nm.embed_tokens
+        self.media_embeds = None
+        self.media_positions = None
+        self.rope_delta = 0
         # Dense JANGH projections: per-row decode kernel for verify rows.
         for _, module in self.lm.named_modules():
             if getattr(module, "is_jangtq2_dense", False):
@@ -106,9 +114,27 @@ class MiniCPMDSparkTarget:
     def make_cache(self):
         return self.lm.make_cache()
 
+    def set_media(self, embeds=None, positions=None, rope_delta: int = 0) -> None:
+        """One request's media plan (cleared with ``set_media()``): (1, P, H) prompt embeddings, (3, 1, P) canvas
+        positions, and the rope delta of the text after the prompt. A resumed prefix that already holds every media
+        item needs only the delta (embeds/positions None)."""
+        self.media_embeds = embeds
+        self.media_positions = positions
+        self.rope_delta = int(rope_delta or 0)
+
     def _positions(self, offset: int, rows: int) -> mx.array:
-        pos = mx.arange(offset, offset + rows, dtype=mx.int32)[None, None]
+        plan = self.media_positions
+        if plan is not None and offset + rows <= int(plan.shape[-1]):
+            return plan[:, :, offset:offset + rows]
+        start = offset + self.rope_delta
+        pos = mx.arange(start, start + rows, dtype=mx.int32)[None, None]
         return mx.broadcast_to(pos, (3, 1, rows))
+
+    def _embed(self, tokens: mx.array, offset: int) -> mx.array:
+        rows = int(tokens.shape[1])
+        if self.media_embeds is not None and offset + rows <= int(self.media_embeds.shape[1]):
+            return self.media_embeds[:, offset:offset + rows]
+        return self.nm.embed_tokens(tokens)
 
     def _masks(self, h, cache):
         base = importlib.import_module("mlx_vlm.models.base")
@@ -120,8 +146,9 @@ class MiniCPMDSparkTarget:
     def _stock(self, tokens: mx.array, cache, taps: Sequence[int], logits: bool):
         """Same ops as LanguageModel.__call__ -> Qwen3_5Model.__call__ on text rows."""
         nm = self.nm
-        h = nm.embed_tokens(tokens)
-        pos = self._positions(_cache_offset(cache, nm.fa_idx), int(tokens.shape[1]))
+        offset = _cache_offset(cache, nm.fa_idx)
+        h = self._embed(tokens, offset)
+        pos = self._positions(offset, int(tokens.shape[1]))
         fa_mask, ssm_mask = self._masks(h, cache)
         pe = nm.layers[nm.fa_idx].self_attn.rotary_emb(h, pos)
         feats = []
@@ -188,8 +215,9 @@ class MiniCPMDSparkTarget:
         with row_exact_verify_scope() as exact:
             if not exact:
                 raise RuntimeError("row-exact verify is disabled (VMLX_ROW_EXACT_VERIFY_QMV=0)")
-            h = nm.embed_tokens(tokens)
-            pos = self._positions(_cache_offset(cache, nm.fa_idx), rows)
+            offset = _cache_offset(cache, nm.fa_idx)
+            h = self._embed(tokens, offset)
+            pos = self._positions(offset, rows)
             _, ssm_mask = self._masks(h, cache)
             pe = rotary_rows_like_decode(nm.layers[nm.fa_idx].self_attn.rotary_emb, pos, h)
             for module in gdn:

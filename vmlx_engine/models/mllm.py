@@ -3418,6 +3418,21 @@ def _set_vlm_inference_mode(model: Any) -> None:
                 stack.append(value)
 
 
+class _dspark_media_cleared:
+    """Clears a DSpark target's per-request media plan when generation ends (finished, failed or abandoned), so the
+    next request never inherits another request's embeddings or rope delta."""
+
+    def __init__(self, target):
+        self.target = target
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.target.set_media()
+        return False
+
+
 class _MaybeVLMStream:
     __slots__ = ("_cm",)
 
@@ -4651,6 +4666,21 @@ def _dflash2_media_key_tokens(tokens: list, media_ids: set, grid, pixel_values):
             for j in range(n)
         ]
     return key_tokens
+
+def _dspark_salted_media_keys(tokens: list, media_ids: set, salt: str) -> list:
+    """Session-key tokens for a DSpark media request: every media placeholder position carries a pseudo id from a
+    SHAKE-256 stream of the request's media salt (30 bits per position, above any vocab id; text positions keep their
+    ids). Prefix matching (RAM and SSD) then runs through the media only when ALL of it is identical -- a follow-up
+    turn about the same image(s) -- and stops at the first placeholder otherwise. The model never sees these ids."""
+    import hashlib
+
+    positions = [i for i, t in enumerate(tokens) if t in media_ids]
+    stream = hashlib.shake_256(("dspark-media|" + str(salt)).encode()).digest(4 * len(positions))
+    keys = list(tokens)
+    for j, i in enumerate(positions):
+        keys[i] = 0x80000000 | (int.from_bytes(stream[4 * j:4 * j + 4], "big") & 0x3FFFFFFF)
+    return keys
+
 
 class MLXMultimodalLM:
     """
@@ -6581,10 +6611,13 @@ class MLXMultimodalLM:
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
 
-        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs):
+        _dspark_media = None
+        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs) and (
+            not all_images or (_dspark_media := self._dspark_media_plan(formatted_prompt, all_images, kwargs)) is not None
+        ):
             final = None
             text = ""
-            for final in self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs):
+            for final in self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs, media=_dspark_media):
                 text += final.text
             final.text = text
             return final
@@ -6945,8 +6978,9 @@ class MLXMultimodalLM:
         }
 
     def _dspark_eligible(self, images, videos, audio, temperature, kwargs) -> bool:
-        """Text-only requests whose sampling the DSpark loop reproduces exactly."""
-        if getattr(self, "_dspark", None) is None or images or videos or audio:
+        """Requests whose sampling the DSpark loop reproduces exactly: text, or images (the caller then needs a
+        ``_dspark_media_plan``). Video and audio keep the native VLM path."""
+        if getattr(self, "_dspark", None) is None or videos or audio:
             return False
         from ..metal.row_exact_qmv import row_exact_qmv_requested
 
@@ -6971,11 +7005,42 @@ class MLXMultimodalLM:
             return False
         return True
 
-    def _stream_dspark(self, formatted_prompt: str, max_tokens: int, temperature: float, kwargs: dict):
-        """DSpark generation for a text prompt, streamed as MLLMOutput chunks.
+    def _dspark_media_plan(self, formatted_prompt: str, images: list, kwargs: dict) -> dict | None:
+        """Image-request inputs for the DSpark lane, or None (native VLM path).
+
+        The DFlash2 media plan: the same mlx-vlm ``prepare_inputs`` as the native route, then (deferred in
+        ``materialize``) the model's own ``get_input_embeddings`` -- vision tower, merged features, canvas M-RoPE
+        positions and the rope delta of the text after the prompt. MiniCPM's crops cannot be paired with grid rows, so
+        the session key is ``_dspark_salted_media_keys`` (whole-request media identity in every placeholder position):
+        a follow-up turn about the same image(s) resumes through them, any other media diverges at the first
+        placeholder. VMLX_DSPARK_MEDIA=0 keeps image requests on the native path (A/B).
+        """
+        if os.environ.get("VMLX_DSPARK_MEDIA", "1").strip().lower() in {"0", "false", "off", "no"}:
+            return None
+        self._guard_simple_image_prefill(
+            formatted_prompt, True, images=images, resize_shape=kwargs.get("resize_shape"),
+        )
+        plan = self._dflash2_media_plan(formatted_prompt, images, kwargs)
+        if plan is None or not int(plan.get("media_end") or 0):
+            return None
+        if plan.get("key_tokens") is None:
+            config = self.model.config
+            media_ids = {
+                int(v) for v in (getattr(config, name, None) for name in (
+                    "image_token_index", "video_token_index", "image_token_id", "video_token_id"))
+                if v is not None
+            }
+            plan["key_tokens"] = _dspark_salted_media_keys(plan["prompt_tokens"], media_ids, plan["salt"])
+        plan["image_count"] = len(images)
+        return plan
+
+    def _stream_dspark(self, formatted_prompt: str, max_tokens: int, temperature: float, kwargs: dict,
+                       media: dict | None = None):
+        """DSpark generation for a text or image prompt, streamed as MLLMOutput chunks.
 
         Tokenization, prefill chunking and stop tokens follow the served
         mlx-vlm AR path, so greedy output equals AR decoding token for token.
+        ``media`` (``_dspark_media_plan``): the processor's prompt ids, session key ids and the deferred vision plan.
         """
         import time as _time
 
@@ -6987,7 +7052,12 @@ class MLXMultimodalLM:
 
         runtime = self._dspark
         tokenizer = self.processor.tokenizer if hasattr(self.processor, "tokenizer") else self.processor
-        prompt_ids = list(tokenizer(formatted_prompt, add_special_tokens=True)["input_ids"])
+        if media is not None:
+            prompt_ids = [int(t) for t in media["prompt_tokens"]]
+            key_ids = [int(t) for t in media["key_tokens"]]
+        else:
+            prompt_ids = list(tokenizer(formatted_prompt, add_special_tokens=True)["input_ids"])
+            key_ids = prompt_ids
         criteria = getattr(tokenizer, "stopping_criteria", None)
         eos = set(getattr(criteria, "eos_token_ids", None) or [])
         if not eos and getattr(tokenizer, "eos_token_id", None) is not None:
@@ -7021,8 +7091,31 @@ class MLXMultimodalLM:
         def _make_draft():
             return [KVCache() for _ in drafter.layers]
 
-        resume = _dsession.lookup(model_key, prompt_ids, tokenizer, target.make_cache, _make_draft)
+        resume = _dsession.lookup(model_key, key_ids, tokenizer, target.make_cache, _make_draft)
         cache_len = int(resume["cache_len"]) if resume is not None else 0
+        # Media: a restored prefix holding every media item of this request leaves a text tail at offset + its cached
+        # rope delta (vision tower skipped); otherwise run the plan (vision tower, merged embeddings, positions).
+        vision_s = 0.0
+        if media is None:
+            target.set_media()
+        else:
+            cached_delta = resume.get("rope_delta") if resume is not None else None
+            if cached_delta is not None and cache_len >= int(media["media_end"]):
+                target.set_media(rope_delta=int(cached_delta))
+                logger.info("DSpark media: every media token is inside the restored %d-token prefix; cached rope "
+                            "delta %d, vision tower skipped", cache_len, int(cached_delta))
+            else:
+                _vt = _time.perf_counter()
+                planned = media["materialize"]()
+                vision_s = _time.perf_counter() - _vt
+                target.set_media(planned["embeds"], planned["positions"], planned["rope_delta"])
+        active_delta = int(target.rope_delta)
+
+        def _entry_delta(cut: int):
+            # Valid for a later request only when the entry holds all of its own request's media.
+            if media is None:
+                return 0
+            return active_delta if int(cut) >= int(media["media_end"]) else None
         cuts = _dsession.snapshot_cuts(tokenizer, prompt_ids, cache_len)
         snapshots = []
 
@@ -7031,9 +7124,10 @@ class MLXMultimodalLM:
             snapshots.append((kind, cut, _dsession.clone(cache, target.make_cache), _dsession.clone(draft_caches, _make_draft)))
 
         session = {}
-        logger.info("DSpark text chat active for %s (prompt %d tokens, %d restored from %s)", self.model_name,
-                    len(prompt_ids), cache_len, (resume or {}).get("source", "none"))
-        with _MaybeVLMStream():
+        logger.info("DSpark %s chat active for %s (prompt %d tokens, %d restored from %s)",
+                    "media (%d image(s))" % int(media.get("image_count") or 0) if media is not None else "text",
+                    self.model_name, len(prompt_ids), cache_len, (resume or {}).get("source", "none"))
+        with _MaybeVLMStream(), _dspark_media_cleared(target):
             for chunk in iter_dspark(
                 target, drafter, prompt_ids, int(max_tokens), eos,
                 prefill_step=step, sampler=sampler, max_draft=runtime["max_draft"],
@@ -7064,14 +7158,18 @@ class MLXMultimodalLM:
         parent = _dsession.ssd_parent(resume)
         for kind, cut, t_cache, d_cache in snapshots:
             if t_cache is not None and d_cache is not None:
-                receipt = _dsession.store({"kind": kind, "tokens": prompt_ids[:cut], "cache_len": int(cut),
-                                           "target_cache": t_cache, "draft_cache": d_cache, "model_key": model_key},
+                receipt = _dsession.store({"kind": kind, "tokens": key_ids[:cut], "cache_len": int(cut),
+                                           "target_cache": t_cache, "draft_cache": d_cache, "model_key": model_key,
+                                           "rope_delta": _entry_delta(cut)},
                                           parent=parent)
         forwarded = list(session.get("forwarded") or [])
         if _dsession.reuse_enabled() and len(forwarded) > cache_len and session.get("target_cache") is not None:
-            receipt = _dsession.store({"kind": "turn", "tokens": forwarded, "cache_len": len(forwarded),
+            # Session keys: the prompt's key ids (media positions carry the media identity) + the generated tokens.
+            turn_tokens = key_ids + forwarded[len(prompt_ids):] if len(forwarded) >= len(prompt_ids) else forwarded
+            receipt = _dsession.store({"kind": "turn", "tokens": turn_tokens, "cache_len": len(forwarded),
                                        "target_cache": session["target_cache"],
-                                       "draft_cache": drafter.context_caches(), "model_key": model_key},
+                                       "draft_cache": drafter.context_caches(), "model_key": model_key,
+                                       "rope_delta": _entry_delta(len(forwarded))},
                                       parent=parent)
         summary = stats.as_dict()
         spec = {"kind": "dspark", **summary, "generation_tps": summary.get("decode_tok_s")}
@@ -7086,7 +7184,7 @@ class MLXMultimodalLM:
             completion_tokens=produced, spec_stats=spec,
             cached_tokens=cache_len, cache_detail=(resume or {}).get("source", ""),
             # The footer's pp/s receipt (same contract as the DFlash2 lane / batched engine).
-            prefill_usage={"tokens": int(len(prompt_ids) - cache_len), "seconds": float(stats.prefill_s),
+            prefill_usage={"tokens": int(len(prompt_ids) - cache_len), "seconds": float(stats.prefill_s) + vision_s,
                            "scope": "model_prefill_and_prompt_state", "path": "dspark"},
             persistence_future=receipt,
         )
@@ -7235,8 +7333,11 @@ class MLXMultimodalLM:
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
 
-        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs):
-            yield from self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs)
+        _dspark_media = None
+        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs) and (
+            not all_images or (_dspark_media := self._dspark_media_plan(formatted_prompt, all_images, kwargs)) is not None
+        ):
+            yield from self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs, media=_dspark_media)
             return
 
         # The server's SimpleEngine uses stream_chat(), not stream_generate().

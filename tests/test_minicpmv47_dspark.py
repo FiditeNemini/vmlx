@@ -270,7 +270,7 @@ def test_load_dspark_runtime_requires_the_declared_drafter(tmp_path, kwargs, out
     [
         ({}, {}, True),
         ({}, {"repetition_penalty": 1.0, "top_p": 0.9}, True),
-        ({"images": ["x"]}, {}, False),
+        ({"images": ["x"]}, {}, True),            # planned by the caller (_dspark_media_plan) or native
         ({"videos": ["x"]}, {}, False),
         ({"audio": ["x"]}, {}, False),
         ({}, {"repetition_penalty": 1.1}, False),
@@ -280,7 +280,7 @@ def test_load_dspark_runtime_requires_the_declared_drafter(tmp_path, kwargs, out
         ({}, {"thinking_budget": 64}, False),
     ],
 )
-def test_text_only_requests_route_to_dspark(media, kwargs, routed):
+def test_requests_route_to_dspark(media, kwargs, routed):
     engine = SimpleNamespace(_dspark={"loaded": True})
     args = (media.get("images", []), media.get("videos", []), media.get("audio", []), 0.0, kwargs)
     assert MLXMultimodalLM._dspark_eligible(engine, *args) is routed
@@ -678,3 +678,125 @@ def test_session_store_round_trip_ram_tier(monkeypatch):
     S.store(dict(entry))
     assert S.lookup("k", PROMPT + [1, 2], None, target.make_cache, list) is None
     S.clear()
+
+
+# ------------------------------------------------------------- image requests (canvas M-RoPE + merged embeddings)
+def _media_inputs(model):
+    """One 8x8-patch crop (4 tokens in 16x) inside a text prompt, the same layout as the runtime tests."""
+    from tests.test_minicpmv47_runtime import _image_prompt
+
+    ids = _image_prompt(4)
+    pixels = mx.random.normal((1, 3, 14, 64 * 14), key=mx.random.key(11))
+    sizes = mx.array([[8, 8]], dtype=mx.int32)
+    return ids, pixels, sizes
+
+
+def _native_media_ar(model, ids, pixels, sizes, max_new, follow=()):
+    """The native VLM route: the model's own forward with pixels (vision tower, scatter, whole-prompt canvas plan),
+    then served decode steps (language-model positions = offset + rope delta). ``follow`` = (generated, new_text):
+    decode those generated tokens, prefill the new text, and greedy-decode ``max_new`` more (the next turn)."""
+    from mlx_vlm.models.cache import make_prompt_cache
+
+    lm = model.language_model
+    cache = make_prompt_cache(lm)
+    logits = model(ids, pixel_values=pixels, target_sizes=sizes, cache=cache).logits[0, -1]
+    if follow:
+        generated, new_text = follow
+        for t in generated:
+            lm(mx.array([[t]]), cache=cache)
+        logits = lm(mx.array([new_text]), cache=cache).logits[0, -1]
+    tok = mx.argmax(logits).reshape(1)
+    out = [int(tok.item())]
+    while len(out) < max_new:
+        tok = mx.argmax(lm(tok.reshape(1, 1), cache=cache).logits[0, -1]).reshape(1)
+        out.append(int(tok.item()))
+    lm.reset_position_state()
+    return out
+
+
+def _plan(model, ids, pixels, sizes):
+    feats = model.get_input_embeddings(ids, pixels, target_sizes=sizes)
+    lm = model.language_model
+    positions, delta = lm._position_ids, int(lm._rope_deltas.reshape(-1)[0].item())
+    lm.reset_position_state()
+    return feats.inputs_embeds, positions, delta
+
+
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("fixed_width", [None, 1, 3, 7])
+def test_media_dspark_greedy_equals_native_ar(tmp_path, moe, fixed_width):
+    target = _tiny_moe_target() if moe else _tiny_target()
+    ids, pixels, sizes = _media_inputs(target.model)
+    reference = _native_media_ar(target.model, ids, pixels, sizes, 24)
+    embeds, positions, delta = _plan(target.model, ids, pixels, sizes)
+    assert delta != 0                       # the canvas plan compresses the image: text after it is offset by delta
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    drafter.prompt_len = int(ids.shape[1])
+    target.set_media(embeds, positions, delta)
+    try:
+        out = generate_dspark(target, drafter, ids[0].tolist(), 24, set(), fixed_width=fixed_width)
+    finally:
+        target.set_media()
+    assert out == reference
+    if fixed_width is None:
+        # Control: the same request without the plan (placeholder embeddings, sequence positions) is NOT the answer.
+        assert generate_dspark(target, drafter, ids[0].tolist(), 24, set()) != reference
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_media_follow_up_turn_resumes_with_the_cached_rope_delta(tmp_path, moe):
+    """Turn 2 resumes the end-of-turn state of an image turn: only the rope delta is set (no embeddings, vision tower
+    skipped), and the new text + decode equal the native route that kept the same cache."""
+    from vmlx_engine.dspark.generate import iter_dspark
+
+    target = _tiny_moe_target() if moe else _tiny_target()
+    ids, pixels, sizes = _media_inputs(target.model)
+    prompt = ids[0].tolist()
+    reference = _native_media_ar(target.model, ids, pixels, sizes, 10)
+    embeds, positions, delta = _plan(target.model, ids, pixels, sizes)
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    drafter.prompt_len = len(prompt)
+    session = {}
+    target.set_media(embeds, positions, delta)
+    try:
+        for _ in iter_dspark(target, drafter, prompt, 10, set(), session=session):
+            pass
+    finally:
+        target.set_media()
+    forwarded = list(session["forwarded"])
+    new_text = [777, 778, 779]
+    ref2 = _native_media_ar(target.model, ids, pixels, sizes, 12, follow=(forwarded[len(prompt):], new_text))
+    drafter2 = _drafter_for(target, tmp_path / "2", ref2, 64 if moe else 16)
+    drafter2.prompt_len = len(forwarded) + len(new_text)
+    resume = {"target_cache": session["target_cache"], "draft_cache": drafter.context_caches(),
+              "cache_len": len(forwarded)}
+    import copy
+
+    control_resume = {"target_cache": copy.deepcopy(session["target_cache"]),
+                      "draft_cache": copy.deepcopy(drafter.context_caches()), "cache_len": len(forwarded)}
+    target.set_media(rope_delta=delta)
+    try:
+        out = []
+        for chunk in iter_dspark(target, drafter2, forwarded + new_text, 12, set(), resume=resume):
+            out.extend(chunk)
+    finally:
+        target.set_media()
+    assert out == ref2
+    # Control: the same resume at delta 0 (positions as if the image took its token count) is NOT the answer.
+    control = []
+    for chunk in iter_dspark(target, drafter2, forwarded + new_text, 12, set(), resume=control_resume):
+        control.extend(chunk)
+    assert control != ref2
+
+
+def test_salted_media_keys_follow_the_media_identity():
+    from vmlx_engine.models.mllm import _dspark_salted_media_keys
+
+    media = {248056}
+    tokens = [1, 2, 248056, 248056, 248056, 9, 10]
+    a = _dspark_salted_media_keys(tokens, media, "salt-a")
+    assert a == _dspark_salted_media_keys(tokens, media, "salt-a")             # same media: identical keys
+    b = _dspark_salted_media_keys(tokens, media, "salt-b")
+    assert a[:2] == b[:2] == tokens[:2] and a[5:] == b[5:] == tokens[5:]       # text positions keep their ids
+    assert all(a[i] != b[i] for i in (2, 3, 4))                                # other media: diverge at the first
+    assert len(set(a[2:5])) == 3 and all(k >= 0x80000000 for k in a[2:5])      # per position, above any vocab id

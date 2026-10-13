@@ -124,9 +124,31 @@ class DSparkDrafter(nn.Module):
 
     # ------------------------------------------------------------ context
     def reset(self) -> None:
-        self._k = [None] * len(self.layers)
-        self._v = [None] * len(self.layers)
+        from mlx_lm.models.cache import KVCache
+
+        # Context K/V per drafter layer, grown in steps (KVCache) instead of concatenated per round: the old
+        # concatenation copied the whole context twice per layer per round, a cost that grew with the conversation.
+        # Also the form the session store / SSD tier persist and restore (the mlx-lm cache state protocol).
+        self._ctx = [KVCache() for _ in self.layers]
         self.ctx_len = 0
+
+    def context_caches(self) -> list:
+        """The context K/V caches (one per drafter layer) covering ``ctx_len`` positions."""
+        return self._ctx
+
+    def set_context(self, caches: list) -> None:
+        """Adopt restored context caches (session store / SSD); they must all cover the same positions."""
+        caches = list(caches)
+        if len(caches) != len(self.layers):
+            raise ValueError("DSpark drafter context: one cache per drafter layer expected")
+        offsets = {int(getattr(c, "offset", 0) or 0) for c in caches}
+        if len(offsets) != 1:
+            raise ValueError(f"DSpark drafter context caches disagree on length: {sorted(offsets)}")
+        self._ctx = caches
+        self.ctx_len = offsets.pop()
+
+    def context_arrays(self) -> list:
+        return [a for c in self._ctx for a in (c.keys, c.values) if a is not None]
 
     def _rope(self, x: mx.array, offset: int) -> mx.array:
         return mx.fast.rope(x, self.head_dim, traditional=False, base=self.rope_theta, scale=1.0, offset=offset)
@@ -142,8 +164,7 @@ class DSparkDrafter(nn.Module):
             k = attn.k_norm(attn.k_proj(ctx).reshape(1, count, attn.kv_heads, attn.head_dim)).transpose(0, 2, 1, 3)
             k = self._rope(k, self.ctx_len)
             v = attn.v_proj(ctx).reshape(1, count, attn.kv_heads, attn.head_dim).transpose(0, 2, 1, 3)
-            self._k[li] = k if self._k[li] is None else mx.concatenate([self._k[li], k], axis=2)
-            self._v[li] = v if self._v[li] is None else mx.concatenate([self._v[li], v], axis=2)
+            self._ctx[li].update_and_fetch(k, v)
         self.ctx_len += count
 
     # -------------------------------------------------------------- block
@@ -160,9 +181,10 @@ class DSparkDrafter(nn.Module):
             v = attn.v_proj(x).reshape(1, length, attn.kv_heads, attn.head_dim).transpose(0, 2, 1, 3)
             q = self._rope(q, start)
             k = self._rope(k, start)
-            if self._k[li] is not None:
-                k = mx.concatenate([self._k[li], k], axis=2)
-                v = mx.concatenate([self._v[li], v], axis=2)
+            # Context + this block: the block rows are written after the context in the cache buffer and trimmed
+            # off again below (the next add_context overwrites them), so no per-round copy of the context.
+            k, v = self._ctx[li].update_and_fetch(k, v)
+            self._ctx[li].trim(length)
             o = mx.fast.scaled_dot_product_attention(q, k, v, scale=attn.head_dim**-0.5, mask=None)
             h = h + attn.o_proj(o.transpose(0, 2, 1, 3).reshape(1, length, -1))
             y = layer.post_attention_layernorm(h)

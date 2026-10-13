@@ -30,6 +30,8 @@ class DSparkStats:
     accepted: int = 0
     ar_tokens: int = 0
     tokens: int = 0
+    prefill_tokens: int = 0
+    cached_tokens: int = 0
     prefill_s: float = 0.0
     decode_s: float = 0.0
     widths: dict = field(default_factory=dict)
@@ -154,20 +156,59 @@ def iter_dspark(
     fixed_width: Optional[int] = None,
     stats: Optional[DSparkStats] = None,
     ar_fallback: Optional[ARFallback] = None,
+    resume: Optional[dict] = None,
+    snapshot_cuts: Sequence[int] = (),
+    on_snapshot: Optional[Callable] = None,
+    session: Optional[dict] = None,
 ) -> Iterator[List[int]]:
     """Yield the token ids committed by each round (prefill yields the first). ``ar_fallback`` (a policy instance,
-    or None for draft rounds only) interleaves AR steps when drafting measures slower than plain decoding."""
+    or None for draft rounds only) interleaves AR steps when drafting measures slower than plain decoding.
+
+    Multi-turn reuse (dspark/session.py): ``resume`` = a stored session entry ({target_cache, draft_cache,
+    cache_len}) whose tokens are a prefix of ``prompt_ids``; only ``prompt_ids[cache_len:]`` is prefilled.
+    ``snapshot_cuts`` (absolute prompt positions) end prefill segments; ``on_snapshot(cut, target_cache,
+    draft_caches)`` is called at each with the live caches (the callee clones them). ``session`` (a dict) is kept
+    current with ``forwarded`` (exactly the token ids the target cache and drafter context hold), ``target_cache``
+    and ``drafter``, so the caller can store the end-of-turn state whenever it stops consuming."""
     max_draft = max(1, min(int(max_draft), MAX_VERIFY_ROWS - 1, drafter.block))
     stats = stats if stats is not None else DSparkStats()
     taps = drafter.target_layer_ids
-    cache = target.make_cache()
-    drafter.reset()
+    ids = [int(t) for t in prompt_ids]
+    if resume is not None:
+        cache = resume["target_cache"]
+        cached = int(resume["cache_len"])
+        drafter.set_context(resume["draft_cache"])
+        if drafter.ctx_len != cached:
+            raise ValueError(f"DSpark resume: drafter context {drafter.ctx_len} != target cache {cached}")
+    else:
+        cache = target.make_cache()
+        cached = 0
+        drafter.reset()
+    if not 0 <= cached < len(ids):
+        raise ValueError("DSpark resume must leave at least one prompt token to prefill")
+    forwarded = ids[:cached]
+    if session is not None:
+        session.update(forwarded=forwarded, target_cache=cache, drafter=drafter)
     t0 = time.perf_counter()
-    logits, feats = target.prefill(mx.array([list(prompt_ids)]), cache, taps, prefill_step)
+    start = cached
+    for cut in sorted({int(c) for c in snapshot_cuts if cached < int(c) < len(ids)}):
+        feats = target.prefill_segment(mx.array([ids[start:cut]]), cache, taps, prefill_step)
+        if feats is not None:
+            drafter.add_context(feats)
+        mx.eval(*drafter.context_arrays())
+        forwarded.extend(ids[start:cut])
+        start = cut
+        if on_snapshot is not None:
+            on_snapshot(cut, cache, drafter.context_caches())
+    logits, feats = target.prefill(mx.array([ids[start:]]), cache, taps, prefill_step)
     anchor = _pick(logits[None], sampler).reshape(1)
-    drafter.add_context(feats)
-    mx.eval(anchor, drafter._k, drafter._v)
+    if feats is not None:
+        drafter.add_context(feats)
+    mx.eval(anchor, *drafter.context_arrays())
+    forwarded.extend(ids[start:])
     stats.prefill_s = time.perf_counter() - t0
+    stats.prefill_tokens = len(ids) - cached
+    stats.cached_tokens = cached
     first = int(anchor.item())
     stats.tokens = 1
     yield [first]
@@ -183,6 +224,7 @@ def iter_dspark(
             # and the burst's tap rows reach the drafter in one call. Same values as one-at-a-time steps.
             n_steps = max(1, min(int(ar_fallback.burst_size()), room))
             t_step = time.perf_counter()
+            launched = [int(anchor.item())]
             logits, feats = target.ar_step(anchor, cache, taps)
             pick = _pick(logits[None], sampler).reshape(1)
             mx.async_eval(pick, feats)
@@ -190,10 +232,13 @@ def iter_dspark(
             for i in range(n_steps):
                 nxt = None
                 if i + 1 < n_steps:
+                    launched.append(None)            # filled with this step's input token below, once read
                     logits2, feats2 = target.ar_step(pick.astype(anchor.dtype), cache, taps)
                     nxt = (_pick(logits2[None], sampler).reshape(1), feats2)
                     mx.async_eval(*nxt)
                 tok = int(pick.item())
+                if i + 1 < n_steps:
+                    launched[i + 1] = tok                # the pipelined step forwarded this token
                 burst_feats.append(feats)
                 new.append(tok)
                 if tok in eos:
@@ -201,7 +246,14 @@ def iter_dspark(
                     break
                 if nxt is not None:
                     pick, feats = nxt
+            if launched and launched[-1] is None:
+                launched.pop()                       # stopped before reading the last launched step's input
+            # A pipelined step past the EOS token already ran: its input (the EOS) is in the cache, and its tap row
+            # must reach the drafter so the context stays aligned with the cache.
+            if len(launched) > len(burst_feats) and nxt is not None:
+                burst_feats.append(nxt[1])
             drafter.add_context(mx.concatenate(burst_feats, axis=1) if len(burst_feats) > 1 else burst_feats[0])
+            forwarded.extend(launched)
             anchor = mx.array([new[-1]], dtype=anchor.dtype)
             ar_fallback.record_ar_burst(len(new), time.perf_counter() - t_step)
             stats.ar_tokens += len(new)
@@ -239,6 +291,7 @@ def iter_dspark(
         new = drafted[:accepted] + [target_picks[accepted]]
         target.rollback(cache, sink, kept=accepted + 1, total=k + 1)
         drafter.add_context(feats[:, :accepted + 1])
+        forwarded.extend(rows[0, :accepted + 1].tolist())
         anchor = mx.array([new[-1]], dtype=anchor.dtype)
         stats.rounds += 1
         stats.drafted += k
@@ -265,11 +318,18 @@ def generate_dspark(target, drafter, prompt_ids, max_new, eos, **kwargs) -> List
     return out
 
 
-def generate_ar(target, prompt_ids, max_new, eos, *, prefill_step=None, stats: Optional[dict] = None) -> List[int]:
-    """Greedy AR reference with the same prefill structure and the served decode call."""
+def generate_ar(target, prompt_ids, max_new, eos, *, prefill_step=None, stats: Optional[dict] = None,
+                prefill_cuts: Sequence[int] = ()) -> List[int]:
+    """Greedy AR reference with the same prefill structure and the served decode call. ``prefill_cuts`` splits the
+    prefill at those positions exactly like a DSpark request that snapshots there (same segment shapes)."""
     cache = target.make_cache()
     t0 = time.perf_counter()
-    logits, _ = target.prefill(mx.array([list(prompt_ids)]), cache, (), prefill_step)
+    ids = [int(t) for t in prompt_ids]
+    start = 0
+    for cut in sorted({int(c) for c in prefill_cuts if 0 < int(c) < len(ids)}):
+        target.prefill_segment(mx.array([ids[start:cut]]), cache, (), prefill_step)
+        start = cut
+    logits, _ = target.prefill(mx.array([ids[start:]]), cache, (), prefill_step)
     tok = mx.argmax(logits).reshape(1)
     out = [int(tok.item())]
     t1 = time.perf_counter()

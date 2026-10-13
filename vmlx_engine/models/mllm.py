@@ -4800,6 +4800,10 @@ class MLXMultimodalLM:
                 logger.warning("DFlash2 lane matmul not installed: %s", exc)
             try:
                 self._dspark = _load_dspark_runtime(self.model, resolved_name)
+                if self._dspark is not None:
+                    from ..dspark import session as _dspark_session
+
+                    _dspark_session.attach_ssd(resolved_name, self._dspark["path"])
             except Exception as exc:  # noqa: BLE001
                 self._dspark = None
                 logger.warning("DSpark drafter not loaded for %s: %s", resolved_name, exc)
@@ -7005,15 +7009,39 @@ class MLXMultimodalLM:
         produced = 0
         finish = None
         started = _time.perf_counter()
-        logger.info("DSpark text chat active for %s (prompt %d tokens)", self.model_name, len(prompt_ids))
+        # Multi-turn reuse (dspark/session.py): resume the longest stored prefix of this prompt (RAM, then SSD),
+        # snapshot at the system end / before the assistant tag, store the end-of-turn state.
+        from mlx_lm.models.cache import KVCache
+
+        from ..dspark import session as _dsession
+
+        target, drafter = runtime["target"], runtime["drafter"]
+        model_key = (id(target), id(drafter))
+
+        def _make_draft():
+            return [KVCache() for _ in drafter.layers]
+
+        resume = _dsession.lookup(model_key, prompt_ids, tokenizer, target.make_cache, _make_draft)
+        cache_len = int(resume["cache_len"]) if resume is not None else 0
+        cuts = _dsession.snapshot_cuts(tokenizer, prompt_ids, cache_len)
+        snapshots = []
+
+        def _on_snapshot(cut, cache, draft_caches):
+            kind = next((k for k, c in cuts if c == cut), "boundary")
+            snapshots.append((kind, cut, _dsession.clone(cache, target.make_cache), _dsession.clone(draft_caches, _make_draft)))
+
+        session = {}
+        logger.info("DSpark text chat active for %s (prompt %d tokens, %d restored from %s)", self.model_name,
+                    len(prompt_ids), cache_len, (resume or {}).get("source", "none"))
         with _MaybeVLMStream():
             for chunk in iter_dspark(
-                runtime["target"], runtime["drafter"], prompt_ids, int(max_tokens), eos,
+                target, drafter, prompt_ids, int(max_tokens), eos,
                 prefill_step=step, sampler=sampler, max_draft=runtime["max_draft"],
                 cost_per_row=runtime["cost_per_row"], stats=stats,
                 # AR steps when drafting measures slower (low-acceptance text); VMLX_DSPARK_AR_FALLBACK=0 = A/B off.
                 ar_fallback=(None if os.environ.get("VMLX_DSPARK_AR_FALLBACK", "1").strip().lower() in
                              {"0", "false", "off", "no"} else ARFallback()),
+                resume=resume, snapshot_cuts=[c for _, c in cuts], on_snapshot=_on_snapshot, session=session,
             ):
                 for token in chunk:
                     if token in eos:
@@ -7030,6 +7058,21 @@ class MLXMultimodalLM:
                 yield MLLMOutput(text=detok.last_segment, prompt_tokens=len(prompt_ids), completion_tokens=produced)
         detok.finalize()
         elapsed = _time.perf_counter() - started
+        # Store this turn's reusable states (snapshots, then the end-of-turn entry: exactly the tokens the caches
+        # hold). The last SSD receipt settles before the next lookup (SimpleEngine terminal persistence).
+        receipt = None
+        parent = _dsession.ssd_parent(resume)
+        for kind, cut, t_cache, d_cache in snapshots:
+            if t_cache is not None and d_cache is not None:
+                receipt = _dsession.store({"kind": kind, "tokens": prompt_ids[:cut], "cache_len": int(cut),
+                                           "target_cache": t_cache, "draft_cache": d_cache, "model_key": model_key},
+                                          parent=parent)
+        forwarded = list(session.get("forwarded") or [])
+        if _dsession.reuse_enabled() and len(forwarded) > cache_len and session.get("target_cache") is not None:
+            receipt = _dsession.store({"kind": "turn", "tokens": forwarded, "cache_len": len(forwarded),
+                                       "target_cache": session["target_cache"],
+                                       "draft_cache": drafter.context_caches(), "model_key": model_key},
+                                      parent=parent)
         summary = stats.as_dict()
         spec = {"kind": "dspark", **summary, "generation_tps": summary.get("decode_tok_s")}
         logger.info(
@@ -7041,6 +7084,11 @@ class MLXMultimodalLM:
         yield MLLMOutput(
             text=detok.last_segment, finish_reason=finish or "length", prompt_tokens=len(prompt_ids),
             completion_tokens=produced, spec_stats=spec,
+            cached_tokens=cache_len, cache_detail=(resume or {}).get("source", ""),
+            # The footer's pp/s receipt (same contract as the DFlash2 lane / batched engine).
+            prefill_usage={"tokens": int(len(prompt_ids) - cache_len), "seconds": float(stats.prefill_s),
+                           "scope": "model_prefill_and_prompt_state", "path": "dspark"},
+            persistence_future=receipt,
         )
 
     def stream_chat(

@@ -499,3 +499,168 @@ def test_ar_fallback_policy_switches_on_measured_rates():
     q.record_draft(tokens=6, seconds=0.030)       # 200 tok/s drafting
     q.ar_seconds = 0.010
     assert not q.next_is_ar()                     # drafting pays: stay on draft rounds
+
+
+def test_drafter_cache_context_equals_concatenated_reference(tmp_path):
+    """The KVCache-backed context (append + trim of the block rows) gives the same block hidden states as attending
+    over an explicit concatenation, across two add_context calls and two consecutive blocks."""
+    import mlx.nn as nn
+
+    src = _save_drafter(tmp_path / "d", _drafter_config(hidden=16))
+    drafter = load_drafter(src, bits=16)
+    mx.random.seed(4)
+    feats1 = mx.random.normal((1, 9, 3 * 16)).astype(mx.bfloat16)
+    feats2 = mx.random.normal((1, 5, 3 * 16)).astype(mx.bfloat16)
+    block = mx.random.normal((1, drafter.block, 16)).astype(mx.bfloat16)
+
+    def reference(feature_chunks, blk):
+        ks, vs, pos = [[] for _ in drafter.layers], [[] for _ in drafter.layers], 0
+        for f in feature_chunks:
+            ctx = drafter.hidden_norm(drafter.fc(f))
+            n = int(f.shape[1])
+            for li, layer in enumerate(drafter.layers):
+                a = layer.self_attn
+                k = a.k_norm(a.k_proj(ctx).reshape(1, n, a.kv_heads, a.head_dim)).transpose(0, 2, 1, 3)
+                ks[li].append(drafter._rope(k, pos))
+                vs[li].append(a.v_proj(ctx).reshape(1, n, a.kv_heads, a.head_dim).transpose(0, 2, 1, 3))
+            pos += n
+        h, L = blk, int(blk.shape[1])
+        for li, layer in enumerate(drafter.layers):
+            a = layer.self_attn
+            x = layer.input_layernorm(h)
+            q = drafter._rope(a.q_norm(a.q_proj(x).reshape(1, L, a.heads, a.head_dim)).transpose(0, 2, 1, 3), pos)
+            k = drafter._rope(a.k_norm(a.k_proj(x).reshape(1, L, a.kv_heads, a.head_dim)).transpose(0, 2, 1, 3), pos)
+            v = a.v_proj(x).reshape(1, L, a.kv_heads, a.head_dim).transpose(0, 2, 1, 3)
+            k = mx.concatenate(ks[li] + [k], axis=2)
+            v = mx.concatenate(vs[li] + [v], axis=2)
+            o = mx.fast.scaled_dot_product_attention(q, k, v, scale=a.head_dim**-0.5, mask=None)
+            h = h + a.o_proj(o.transpose(0, 2, 1, 3).reshape(1, L, -1))
+            y = layer.post_attention_layernorm(h)
+            h = h + layer.mlp.down_proj(nn.silu(layer.mlp.gate_proj(y)) * layer.mlp.up_proj(y))
+        return drafter.norm(h)
+
+    drafter.reset()
+    drafter.add_context(feats1)
+    first = drafter(block)
+    mx.eval(first)
+    drafter.add_context(feats2)
+    second = drafter(block)
+    mx.eval(second)
+    assert drafter.ctx_len == 14 and drafter.context_caches()[0].offset == 14
+    for got, ref in ((first, reference([feats1], block)), (second, reference([feats1, feats2], block))):
+        diff = mx.abs(got.astype(mx.float32) - ref.astype(mx.float32)).max().item()
+        assert diff <= 2e-2 * (mx.abs(ref.astype(mx.float32)).max().item() + 1e-6), diff
+
+
+# ------------------------------------------------------------- multi-turn reuse (dspark/session.py)
+def _drafter_for(target, tmp_path, reference, hidden):
+    src = _save_drafter(tmp_path / "d", _drafter_config(hidden=hidden))
+    drafter = _OracleDrafter(_drafter_config(hidden=hidden), reference, len(PROMPT))
+    drafter.load_weights(tree_flatten(load_drafter(src, bits=16).parameters()), strict=True)
+    return drafter
+
+
+def _offset(target, cache):
+    from vmlx_engine.dspark.minicpm_target import _cache_offset
+    return _cache_offset(cache, target.nm.fa_idx)
+
+
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("plan", [None, [False, True], [True, True, False]])
+def test_session_state_tracks_exactly_what_the_caches_hold(tmp_path, moe, plan):
+    from vmlx_engine.dspark.generate import iter_dspark
+    target = _tiny_moe_target() if moe else _tiny_target()
+    reference = generate_ar(target, PROMPT, 30, set())
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    eos = {reference[13]}                                     # a stop inside the run (exercises an EOS mid-burst)
+    session = {}
+    out = []
+    for chunk in iter_dspark(target, drafter, PROMPT, 30, eos, session=session,
+                             ar_fallback=_ScriptedFallback(plan) if plan else None):
+        out.extend(chunk)
+    fw = session["forwarded"]
+    assert fw[: len(PROMPT)] == PROMPT and fw[len(PROMPT):] == out[: len(fw) - len(PROMPT)]
+    assert _offset(target, session["target_cache"]) == len(fw) == drafter.ctx_len
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_resume_from_a_snapshot_equals_ar_with_the_same_segments(tmp_path, moe):
+    """A cold request snapshots at a cut; a second prompt sharing that prefix resumes from the snapshot and must equal
+    AR run with the same prefill segmentation."""
+    from mlx_lm.models.cache import KVCache
+    from vmlx_engine.dspark import session as S
+    from vmlx_engine.dspark.generate import iter_dspark
+    target = _tiny_moe_target() if moe else _tiny_target()
+    cut = 6
+    reference = generate_ar(target, PROMPT, 20, set(), prefill_cuts=[cut])
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    snaps = []
+    make_draft = lambda: [KVCache() for _ in drafter.layers]
+    for _ in iter_dspark(target, drafter, PROMPT, 20, set(), snapshot_cuts=[cut],
+                         on_snapshot=lambda c, tc, dc: snaps.append((c, S.clone(tc, target.make_cache), S.clone(dc, make_draft)))):
+        pass
+    assert [c for c, *_ in snaps] == [cut] and snaps[0][1] is not None and snaps[0][2] is not None
+    prompt2 = PROMPT[:cut] + [901, 902, 903, 904, 905]
+    ref2 = generate_ar(target, prompt2, 20, set(), prefill_cuts=[cut])
+    drafter2 = _drafter_for(target, tmp_path / "2", ref2, 64 if moe else 16)
+    drafter2.prompt_len = len(prompt2)
+    resume = {"target_cache": snaps[0][1], "draft_cache": snaps[0][2], "cache_len": cut}
+    stats = DSparkStats()
+    out = []
+    for chunk in iter_dspark(target, drafter2, prompt2, 20, set(), resume=resume, stats=stats):
+        out.extend(chunk)
+    assert out == ref2 and stats.cached_tokens == cut and stats.prefill_tokens == len(prompt2) - cut
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_resume_from_the_end_of_turn_state_equals_ar(tmp_path, moe):
+    from vmlx_engine.dspark.generate import iter_dspark
+    target = _tiny_moe_target() if moe else _tiny_target()
+    reference = generate_ar(target, PROMPT, 12, set())
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    session = {}
+    for _ in iter_dspark(target, drafter, PROMPT, 12, set(), session=session, ar_fallback=_ScriptedFallback([False, True])):
+        pass
+    fw = list(session["forwarded"])
+    prompt2 = fw + [777, 778, 779]
+    # Reference built the way the stored cache was: the prompt prefilled, every generated token DECODED (verify rows
+    # and AR steps are bit-equal to decode steps), then the new turn prefilled and greedy decode.
+    ref_cache = target.make_cache()
+    target.prefill(mx.array([PROMPT]), ref_cache, (), None)
+    for t in fw[len(PROMPT):]:
+        target.decode(mx.array([t]), ref_cache)
+    logits, _ = target.prefill(mx.array([prompt2[len(fw):]]), ref_cache, (), None)
+    tok = mx.argmax(logits).reshape(1)
+    ref2 = [int(tok.item())]
+    while len(ref2) < 15:
+        tok = mx.argmax(target.decode(tok, ref_cache)).reshape(1)
+        ref2.append(int(tok.item()))
+    drafter2 = _drafter_for(target, tmp_path / "2", ref2, 64 if moe else 16)
+    drafter2.prompt_len = len(prompt2)
+    resume = {"target_cache": session["target_cache"], "draft_cache": drafter.context_caches(), "cache_len": len(fw)}
+    out = []
+    for chunk in iter_dspark(target, drafter2, prompt2, 15, set(), resume=resume):
+        out.extend(chunk)
+    assert out == ref2
+
+
+def test_session_store_round_trip_ram_tier(monkeypatch):
+    from mlx_lm.models.cache import KVCache
+    from vmlx_engine.dspark import session as S
+    monkeypatch.setattr(S, "SSD", None)
+    S.clear()
+    target = _tiny_target()
+    cache = target.make_cache()
+    target.prefill(mx.array([PROMPT]), cache, (), None)
+    entry = {"kind": "turn", "tokens": list(PROMPT), "cache_len": len(PROMPT), "target_cache": cache,
+             "draft_cache": [KVCache()], "model_key": "k"}
+    receipt = S.store(entry)
+    assert receipt.done() and receipt.vmlx_lookup_served_from_ram
+    assert S.lookup("other", PROMPT + [1], None, target.make_cache, list) is None      # model key guard
+    hit = S.lookup("k", PROMPT + [1, 2], None, target.make_cache, list)
+    assert hit is entry and hit["source"] == "dspark-ram"
+    assert S.lookup("k", PROMPT + [1, 2], None, target.make_cache, list) is None        # ownership moved
+    monkeypatch.setenv("VMLX_DSPARK_PREFIX_REUSE", "0")
+    S.store(dict(entry))
+    assert S.lookup("k", PROMPT + [1, 2], None, target.make_cache, list) is None
+    S.clear()

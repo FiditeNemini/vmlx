@@ -2916,6 +2916,21 @@ def serve_command(args):
         if ignored:
             print(f"  NOTE: These settings require --continuous-batching and will be ignored: {', '.join(ignored)}")
 
+    # DSpark (a drafter shipped inside the bundle, loaded with the model): its multi-turn session tier lives in the
+    # same managed SSD pool and budget as the block cache; off with --disable-block-disk-cache (dspark/session.py).
+    try:
+        from .dspark import session as _dspark_session
+
+        _dspark_session.configure_defaults(
+            root=getattr(args, "block_disk_cache_dir", None) or os.path.expanduser("~/.cache/vmlx-engine/block-cache"),
+            max_size_bytes=int(float(resolve_block_disk_cache_max_gb(args)) * 1024**3),
+            enabled=_block_disk_explicit is not False,
+        )
+    except Exception:  # noqa: BLE001 - never blocks the server; the RAM tier still works
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("DSpark session SSD defaults not configured", exc_info=True)
+
     # Load speculative decoding draft model if configured
     spec_model = getattr(args, 'speculative_model', None)
     if spec_model:

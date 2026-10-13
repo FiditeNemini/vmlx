@@ -5262,7 +5262,9 @@ export class SessionManager extends EventEmitter {
     // takes precedence.
     const bundledDsparkDrafter = dsv4Active ? null : findBundledDsparkDrafter(config.modelPath)
     const dsparkChoice: boolean | undefined = (config as any).useBundledDspark
-    const dsparkActive = !!bundledDsparkDrafter && (dsparkChoice ?? bundledDsparkDefault(config.modelPath)) &&
+    // The engine loads DSpark only in the multimodal loader (models/mllm.py), so a text-only launch (Multimodal
+    // Force Off) must stay on the normal lane instead of a single-request lane that never drafts.
+    const dsparkActive = isVLM && !!bundledDsparkDrafter && (dsparkChoice ?? bundledDsparkDefault(config.modelPath)) &&
       !config.speculativeModel && !dflash2Speculative
     const cacheStackActive = dsv4Active
       ? true
@@ -5530,7 +5532,7 @@ export class SessionManager extends EventEmitter {
     }
     if (bundledDsparkDrafter) {
       // The user's choice when set; otherwise the bundle's stamp (auto), which is what the lane above followed.
-      const dsparkOverridden = !!config.speculativeModel || dflash2Speculative
+      const dsparkOverridden = !isVLM || !!config.speculativeModel || dflash2Speculative
       args.push('--dspark', dsparkOverridden ? 'off' : dsparkChoice === undefined ? 'auto' : dsparkActive ? 'on' : 'off')
       if (dsparkActive) console.log(`[SESSION] Using the DSpark drafter bundled with the model: ${bundledDsparkDrafter}`)
     }

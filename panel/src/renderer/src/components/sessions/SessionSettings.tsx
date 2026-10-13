@@ -396,7 +396,7 @@ export function buildCommandPreview(
     : !!detectedDflash2Path)
   // A bundled DSpark drafter (<bundle>/dspark) runs on the single-request lane, on by default (sessions.ts).
   const dsparkChoice = config.useBundledDspark
-  const dsparkActive = !dsv4Active && !!bundledDspark && (dsparkChoice ?? bundledDspark.default) &&
+  const dsparkActive = !dsv4Active && isVLM && !!bundledDspark && (dsparkChoice ?? bundledDspark.default) &&
     !config.speculativeModel && !dflash2Speculative
   const cacheStackActive = dsv4Active
     ? true
@@ -529,7 +529,7 @@ export function buildCommandPreview(
     parts.push('--no-bundled-dflash2')
   }
   if (bundledDspark && !dsv4Active) {
-    const dsparkOverridden = !!config.speculativeModel || dflash2Speculative
+    const dsparkOverridden = !isVLM || !!config.speculativeModel || dflash2Speculative
     parts.push('--dspark', dsparkOverridden ? 'off' : dsparkChoice === undefined ? 'auto' : dsparkActive ? 'on' : 'off')
   }
   if (compatibleExternalSpeculative) {

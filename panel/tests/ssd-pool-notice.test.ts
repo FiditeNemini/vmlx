@@ -4,6 +4,14 @@ import { readManagedSsdPoolBudget } from '../src/shared/ssdPoolHealth'
 
 const snapshot = { root: '/cache', used: 950, cap: 1000, capacityEvicted: 0 }
 describe('SSD pool capacity notice', () => {
+  it('reads the DSpark shared budget without inventing usage from write counters', () => {
+    const budget = { root: '/cache', bytes_after: 950, max_size_bytes: 1000, accounted: true }
+    expect(readSsdPoolSnapshot({ dspark_cache: { ssd: { global_budget: budget } } })).toEqual(snapshot)
+    expect(readSsdPoolSnapshot({ dspark_cache: { ssd: { writes: 99 } } })).toBeNull()
+    expect(readSsdPoolSnapshot({ dspark_cache: { ssd: { global_budget: {
+      ...budget, telemetry_stale: true,
+    } } } })).toBeNull()
+  })
   it('uses DFlash2 shared-pool usage and rejects stale snapshots', () => {
     const budget = { root: '/cache', bytes_after: 950, max_size_bytes: 1000, accounted: true }
     const cache = { dflash2_cache: { ssd: { writes: 99, global_budget: budget } } }

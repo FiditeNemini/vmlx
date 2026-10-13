@@ -258,7 +258,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     )
   }
 
-  const dflash2Cache = stats?.dflash2_cache
+  const dflash2Cache = stats?.dflash2_cache ?? stats?.dspark_cache
   const dflash2Budget = dflash2Cache?.ssd?.bundle_budget ?? dflash2Cache?.ssd?.global_budget
   const schedulerCache = dflash2Cache ? null : stats?.scheduler_cache
   const schedulerStats = stats?.scheduler_stats
@@ -416,7 +416,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {/* Cache Stats Overview */}
       {dflash2Cache && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">DFlash2</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{stats?.dspark_cache ? 'DSpark' : 'DFlash2'}</h4>
           {dflash2Cache.ssd?.budget_scope === 'bundle' && (
             <p className="text-xs text-muted-foreground mb-2">{t('sessions.cache.dflash2BundleBudgetNote')}</p>
           )}

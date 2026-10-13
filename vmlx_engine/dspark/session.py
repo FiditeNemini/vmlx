@@ -172,3 +172,15 @@ def clear(include_ssd: bool = False) -> int:
     if include_ssd and SSD is not None:
         return SSD.clear()
     return 0
+
+
+def cache_stats() -> dict:
+    """Administrative view of this lane's existing store and shared SSD budget."""
+    result = {"ram": _store().stats(), "ssd": None}
+    if SSD is not None:
+        from dataclasses import asdict
+
+        budget = asdict(SSD.store.budget.refresh_health())
+        budget["root"] = str(SSD.store.root)
+        result["ssd"] = dict(SSD.stats, pending_writes=SSD._q.unfinished_tasks, global_budget=budget)
+    return result

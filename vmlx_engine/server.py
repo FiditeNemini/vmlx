@@ -14242,6 +14242,9 @@ async def health():
         from .speculative import is_dflash2_enabled as _df2_cache_enabled
         if _df2_cache_enabled():
             result.setdefault("cache", {})["dflash2_cache"] = _active_dflash2_cache_runtime().session_cache_stats()
+        if dspark_info is not None:
+            from .dspark import session as dspark
+            result.setdefault("cache", {})["dspark_cache"] = dspark.cache_stats()
         from . import request_telemetry as _request_telemetry
         result["last_request"] = _request_telemetry.last()
         result["request_lifecycle"] = _request_lifecycle_health_snapshot(
@@ -14849,6 +14852,52 @@ def _active_dflash2_cache_runtime():
     return dflash2_runtime
 
 
+async def _clear_dspark_cache(include_ssd=False, *, pool=False, expected_root=None, expected_pid=None):
+    """Keep generation excluded until the existing DSpark writer/clear finishes."""
+    from .dspark import session as dspark
+
+    lock = getattr(_engine, "_generation_lock", None)
+    worker = getattr(_engine, "_run_model_call", None)
+    if lock is None or not callable(worker) or lock.locked():
+        raise HTTPException(status_code=409, detail="Wait for DSpark generation to finish before clearing cache")
+
+    def clear():
+        if not pool:
+            return dspark.clear(include_ssd=include_ssd)
+        disk = dspark.SSD
+        if disk is None:
+            raise HTTPException(status_code=409, detail="No managed SSD pool is available")
+        budget = disk.store.budget
+        if expected_pid != os.getpid() or expected_root != str(budget.root):
+            raise HTTPException(status_code=409, detail="SSD pool or engine identity changed; refresh before clearing")
+        if not disk.flush(10.0):
+            raise HTTPException(status_code=409, detail="Wait for pending SSD writes before clearing cache")
+        result = budget.clear_eligible()
+        return {
+            "status": "eligible_cleared", "cache_type": "ssd_pool", "root": str(budget.root),
+            "freed_bytes": result.evicted_bytes, "removed_entries": result.evicted_entries,
+            "remaining_bytes": result.bytes_after, "effective_cap_bytes": result.max_size_bytes,
+            "protected_temp_files": result.protected_temp_files,
+            "protected_recent_orphans": result.protected_recent_orphans,
+            "resident_cache_preserved": True, "retired_disk_hints": 0,
+        }
+
+    async with lock:
+        # Client cancellation cannot stop a worker. Keep admission held until
+        # deletion settles, so a new request cannot restore a half-cleared entry.
+        task = asyncio.create_task(worker(clear))
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+
 async def _clear_glm_dflash2_cache(include_ssd: bool) -> bool:
     """Exclude new generation while the native writer drains and clears."""
     lock = getattr(_engine, "_generation_lock", None)
@@ -14930,6 +14979,9 @@ async def cache_stats():
         from .speculative import is_dflash2_enabled as _df2_cache_enabled
         if _df2_cache_enabled():
             result["dflash2_cache"] = _active_dflash2_cache_runtime().session_cache_stats()
+        if _loaded_dspark_health_status(_engine) is not None:
+            from .dspark import session as dspark
+            result["dspark_cache"] = dspark.cache_stats()
         # Every engine, not only DFlash2: SimpleEngine records the last terminal's durability too, and without any
         # engine block a SimpleEngine session's Cache panel had nothing to show (T-PERF map 2026-10-11).
         try:
@@ -16531,6 +16583,15 @@ async def clear_cache(
     if cache_type == "ssd_pool":
         import sqlite3
 
+        if _loaded_dspark_health_status(_engine) is not None:
+            try:
+                return await _clear_dspark_cache(pool=True, expected_root=expected_root, expected_pid=expected_pid)
+            except BlockingIOError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except (OSError, sqlite3.Error) as exc:
+                logger.exception("DSpark SSD pool clear could not finish")
+                raise HTTPException(status_code=503, detail="SSD clear did not finish; refresh cache status before retrying") from exc
+
         from .speculative import is_dflash2_enabled
         if (_engine is not None and is_dflash2_enabled()
                 and getattr(_current_model_config(), "family_name", None)
@@ -16593,6 +16654,21 @@ async def clear_cache(
 
     clear_resident_prefix = cache_type in ("ram", "prefix", "all")
     clear_prefix_l2 = cache_type in ("prefix", "all")
+
+    if (clear_resident_prefix or clear_prefix_l2) and _loaded_dspark_health_status(_engine) is not None:
+        try:
+            await _clear_dspark_cache(include_ssd=clear_prefix_l2)
+            cleared.append("dspark_sessions")
+            from .dspark import session as dspark
+            if clear_prefix_l2 and dspark.SSD is not None:
+                cleared.append("dspark_session_disk")
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            skipped.append("dspark_sessions:requests_in_use")
+        except Exception:
+            logger.exception("DSpark session clear did not finish")
+            skipped.append("dspark_sessions:clear_failed")
 
     if clear_resident_prefix or cache_type == "multimodal":
         clear_native_media = getattr(_engine, "clear_native_media_cache", None)

@@ -879,3 +879,35 @@ def test_measured_width_choice_keeps_greedy_equal_to_ar(tmp_path):
     reference = generate_ar(target, PROMPT, 30, set())
     out = generate_dspark(target, _oracle(tmp_path, reference), PROMPT, 30, set(), ar_fallback=ARFallback())
     assert out == reference
+
+
+# ------------------------------------------------------------- pipelined rounds (one sync per draft round)
+@pytest.mark.parametrize("moe", [False, True])
+def test_pipelined_rounds_keep_greedy_equal_to_ar(tmp_path, monkeypatch, moe):
+    from vmlx_engine.dspark.generate import ARFallback
+
+    monkeypatch.setenv("VMLX_DSPARK_PIPELINE", "1")
+    target = _tiny_moe_target() if moe else _tiny_target()
+    reference = generate_ar(target, PROMPT, 30, set())
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    stats = DSparkStats()
+    out = generate_dspark(target, drafter, PROMPT, 30, set(), ar_fallback=ARFallback(), stats=stats)
+    assert out == reference
+    assert stats.rounds > 0 and 0 < stats.accepted < stats.drafted       # partial acceptances, rollbacks exercised
+    real = generate_dspark(target, _real_drafter(tmp_path, 64 if moe else 16), PROMPT, 30, set(), ar_fallback=ARFallback())
+    assert real == reference
+
+
+def test_planned_width_follows_the_acceptance_history():
+    from vmlx_engine.dspark.generate import ARFallback
+
+    policy = ARFallback()
+    policy.ar_seconds = 0.01
+    policy.record_draft(3, 0.020, rows=2)
+    policy.record_draft(3, 0.045, rows=7)
+    for _ in range(20):
+        policy.record_acceptance(6, 6)                 # every draft accepted
+    wide = policy.planned_width(6, 0.12)
+    for _ in range(40):
+        policy.record_acceptance(6, 0)                 # first draft always rejected
+    assert policy.planned_width(6, 0.12) == 1 < wide

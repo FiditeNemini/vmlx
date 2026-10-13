@@ -101,6 +101,7 @@ class ARFallback:
     def __init__(self):
         self.draft_rate: Optional[float] = None     # committed tokens per second of draft rounds (EMA)
         self.width_seconds: dict = {}                # verify rows T -> round seconds (EMA)
+        self.position_accept: list = []              # P(draft j accepted | drafts < j accepted), EMA per position
         self.ar_seconds: Optional[float] = None     # seconds per AR step (EMA)
         self.ar_left = 0
         self.since_probe = 0
@@ -154,6 +155,23 @@ class ARFallback:
             if value > best:
                 best, best_k = value, k
         return best_k
+
+    prior_accept = 0.7
+
+    def record_acceptance(self, drafted: int, accepted: int) -> None:
+        """Per-position acceptance history for planning a width before the round's drafts exist (pipelined rounds)."""
+        while len(self.position_accept) < drafted:
+            self.position_accept.append(self.prior_accept)
+        for j in range(min(drafted, accepted + 1)):
+            hit = 1.0 if j < accepted else 0.0
+            self.position_accept[j] += self.alpha * (hit - self.position_accept[j])
+
+    def planned_width(self, max_draft: int, cost_per_row: float) -> int:
+        """Draft count from the acceptance HISTORY (no sync on this round's confidences): the same objective as
+        choose_width with the per-position EMA in place of the confidence head."""
+        conf = [self.position_accept[j] if j < len(self.position_accept) else self.prior_accept
+                for j in range(max_draft)]
+        return self.choose_width(conf, max_draft, cost_per_row)
 
     def record_draft(self, tokens: int, seconds: float, rows: Optional[int] = None) -> None:
         if rows is not None:
@@ -261,6 +279,9 @@ def iter_dspark(
     if first in eos or max_new <= 1:
         return
     mask_embed = target.embed_tokens(mx.array([[drafter.mask_token_id]]))
+    # VMLX_DSPARK_PIPELINE=1: one sync per draft round (planned width; drafter overlapped with verify graph building).
+    pipelined = (ar_fallback is not None and hasattr(ar_fallback, "planned_width")
+                 and os.environ.get("VMLX_DSPARK_PIPELINE", "0").strip().lower() in {"1", "true", "on", "yes"})
     t1 = time.perf_counter()
     produced = 1
     while produced < max_new:
@@ -316,7 +337,14 @@ def iter_dspark(
              mx.broadcast_to(mask_embed, (1, drafter.block - 1, mask_embed.shape[-1]))], axis=1)
         hidden = drafter(block)
         n = min(max_draft, room - 1) if room > 1 else 0
-        if n >= 1:
+        if n >= 1 and pipelined:
+            # One sync per round: the width comes from the acceptance history, the drafter is queued (async_eval) and
+            # the verify graph is built on the CPU while the GPU drafts. Same values; only the schedule differs.
+            k = fixed_width if fixed_width is not None else ar_fallback.planned_width(max_draft, cost_per_row)
+            k = max(1, min(int(k), n))
+            proposal, conf = drafter.draft(hidden, anchor, target.lm_head, k, sampler=sampler)
+            mx.async_eval(proposal)
+        elif n >= 1:
             drafts, conf = drafter.draft(hidden, anchor, target.lm_head, max_draft,
                                          sampler=sampler)
             mx.eval(drafts, conf)
@@ -334,6 +362,8 @@ def iter_dspark(
         logits, feats, sink = target.verify(rows, cache, taps)
         picks = _pick(logits, sampler)
         mx.eval(picks, feats)
+        if pipelined and k:
+            mx.eval(proposal)
         drafted = proposal.tolist() if k else []
         target_picks = picks.tolist()
         accepted = 0
@@ -349,6 +379,8 @@ def iter_dspark(
         stats.accepted += accepted
         if ar_fallback is not None:
             ar_fallback.record_draft(len(new), time.perf_counter() - t_round, rows=k + 1)
+            if hasattr(ar_fallback, "record_acceptance"):
+                ar_fallback.record_acceptance(k, accepted)
         stats.widths[k + 1] = stats.widths.get(k + 1, 0) + 1
         cut = next((i for i, t in enumerate(new) if t in eos), None)
         if cut is not None:

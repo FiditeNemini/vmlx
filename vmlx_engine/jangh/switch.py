@@ -87,9 +87,14 @@ class TQSwitchGLU(nn.Module):
         self.down_proj = TQSwitchLinear(hidden_dims, input_dims, num_experts, bits_down, rotation_down)
         self.limit = float(swiglu_limit)
 
+    def _rot_in_kernel(self) -> bool:
+        """Decode H32 rotation inside the expert kernels (process-wide JANGTQ2_DECODE_ROT=kernel, or per module: a
+        family loader sets ``decode_rot_kernel`` where it measured faster, e.g. MiniCPM-V-4.7's D=2048 / I=512)."""
+        return DECODE_ROT == "kernel" or bool(getattr(self, "decode_rot_kernel", False))
+
     def _decode_h(self, xf, idx):
         g, u = self.gate_proj, self.up_proj
-        in_kernel = g.rotated and DECODE_ROT == "kernel"
+        in_kernel = g.rotated and self._rot_in_kernel()
         if g.rotated and not in_kernel:
             xf = rotate_rows(xf, g)
         return K.gather_qmv(xf, g.tq2_packed, g.tq2_scales, g._cb, idx, g.bits, x_per_dispatch=False,
@@ -99,7 +104,7 @@ class TQSwitchGLU(nn.Module):
     def _down_in(self, h):
         """(h, rotate_in_kernel) for the down projection."""
         d = self.down_proj
-        if d.rotated and DECODE_ROT != "kernel":
+        if d.rotated and not self._rot_in_kernel():
             return rotate_rows(h, d), False
         return h, d.rotated
 

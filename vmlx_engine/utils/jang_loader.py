@@ -4628,6 +4628,10 @@ def _load_jang_v2_vlm(
         from vmlx_engine.jangh.install import install_jangh
 
         install_jangh(model, config)
+        if str(config.get("model_type", "")).lower() == "minicpmv4_7":
+            from vmlx_engine.jangh.install import enable_minicpm_fused
+
+            enable_minicpm_fused(model)
         # Dense JANGH projections (non-routed jangtq2 entries, e.g. Qwen3.8-27B JANGH2 MLP) -> TQLinear before quantize.
         from vmlx_engine.jangh.dense import install_jangh_dense
 

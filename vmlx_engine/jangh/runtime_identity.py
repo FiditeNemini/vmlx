@@ -29,6 +29,12 @@ DECODE_MAX_TOKENS = os.environ.get("JANGH_DECODE_MAX_TOKENS", "").strip()
 # (1.133x at ~5.1k tokens) agreed; the later "inconclusive" warm-box pair was heat drift. JANGH_GLM_FUSED_TILES=0
 # reverts to host rotation. Part of the runtime identity, so flipping it changes the persisted-state namespace.
 GLM_FUSED_TILES = _producer_binary_flag("JANGH_GLM_FUSED_TILES", "1")
+# MiniCPM-V-4.7-35B-A3B JANGH (E=256, D=2048, I=512, k=8, gate/up 2-bit, down 3-bit, Hadamard-32): the jang loader
+# opts its routed banks into the fused fp32 weighted unsort + single-launch H32 row rotation for prefill and the
+# in-kernel H32 rotation for decode (jangh.install.enable_minicpm_fused). Synthetic, M5 Max, MLX 0.32.3, per MoE layer:
+# prefill 2048 rows 4.95 -> 4.09 ms (-17 %), decode 1 row 0.055 -> 0.047 ms (-14 %), 7-row verify 0.155 -> 0.163 ms.
+# Part of the runtime identity (changes stored-KV rounding). JANGH_MINICPM_FUSED=0 restores the generic paths.
+MINICPM_FUSED = _producer_binary_flag("JANGH_MINICPM_FUSED", "1")
 # Measured 2026-10-04 on M5 Max / MLX 0.32.3 for qwen4_exp (D=2560, I=640, E=512, k=10, JANGH 4/6-bit),
 # jangh_crossover_bench.py, interleaved A/B/A/B, medians of 14 rounds: the gather decode path wins
 # through 96 tokens and the sorted NAX path from 128.
@@ -77,4 +83,5 @@ def runtime_identity() -> str:
         + ";tail_split=" + TAIL_SPLIT
         + ";decode_max_tokens=" + DECODE_MAX_TOKENS
         + ";glm_fused_tiles=" + GLM_FUSED_TILES
+        + ";minicpm_fused=" + MINICPM_FUSED
     )

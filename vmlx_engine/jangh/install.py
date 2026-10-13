@@ -92,3 +92,24 @@ def install_jangh(model: nn.Module, config: dict) -> int:
 # Existing integrations retain the same callable, not a second implementation.
 is_jangtq2 = is_jangh
 install_jangtq2 = install_jangh
+
+
+def enable_minicpm_fused(model: nn.Module) -> int:
+    """MiniCPM-V-4.7-35B-A3B routed JANGH banks: fused fp32 weighted unsort + single-launch H32 rows (prefill) and the
+    in-kernel H32 rotation (decode). Measured faster at E=256 / D=2048 / I=512 / k=8 (runtime_identity.MINICPM_FUSED);
+    JANGH_MINICPM_FUSED=0 keeps the generic paths. Returns the number of banks configured."""
+    from .runtime_identity import MINICPM_FUSED
+
+    if MINICPM_FUSED != "1":
+        return 0
+    n = 0
+    for _path, mod in model.named_modules():
+        if isinstance(mod, TQSwitchGLU):
+            mod.use_weighted_unsort = True
+            mod.decode_rot_kernel = True
+            for lin in (mod.gate_proj, mod.up_proj, mod.down_proj):
+                lin.use_h32_rows = True
+            n += 1
+    if n:
+        logger.info("MiniCPM-V-4.7 JANGH: fused prefill unsort + H32 rows and in-kernel decode rotation on %d banks", n)
+    return n

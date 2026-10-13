@@ -293,6 +293,20 @@ def test_no_dspark_route_without_runtime_or_row_exact_verify(monkeypatch):
 
 
 # ------------------------------------------------------------- MoE target (35B-A3B shape, tiny)
+@pytest.fixture(autouse=True)
+def _stock_switchglu(monkeypatch):
+    """The exactness tests compare verify rows against stock 1-row SwitchGLU decode. MiMo-V2 capability discovery
+    (server._mimo_v2_runtime_module, only for model_type mimo_v2) installs a process-global SwitchGLU decode fast
+    path that other tests leave in place; a MiniCPM serving process never has it, so run these on the stock call."""
+    from mlx_lm.models.switch_layers import SwitchGLU
+
+    original = getattr(SwitchGLU, "_vmlx_mimo_original_affine_decode_call", None)
+    if original is not None:
+        monkeypatch.setattr(SwitchGLU, "__call__", original)
+        monkeypatch.setattr(SwitchGLU, "_vmlx_mimo_affine_decode_fast_path", False)
+    yield
+
+
 def _moe_text_config() -> dict:
     # Quantizable expert shapes (64) and 16 experts x top-8: an 8-row verify reaches SwitchGLU's 64-index sort
     # threshold, where the stock multi-row block switches kernels (the case the per-row MoE verify exists for).

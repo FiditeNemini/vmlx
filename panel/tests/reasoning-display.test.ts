@@ -303,6 +303,17 @@ describe('Electron reasoning persistence guard', () => {
         expect(source).toContain('const finalReasoningContent = reasoningDuplicatesVisibleContent')
         expect(source).toContain('const replayReasoningSegments = reasoningDuplicatesVisibleContent')
     })
+
+    it('clears the live rail and the saved display order when the duplicate rail is dropped', () => {
+        // A natural-EOS answer the engine reclassified from the template-open think rail streams as reasoning first
+        // (MiniCPM-V-4.7 "Reasoning 5 chars" + answer "ready"); the open chat must match a reload.
+        const main = readFileSync('src/main/ipc/chat.ts', 'utf8')
+        const renderer = readFileSync('src/renderer/src/components/chat/ChatInterface.tsx', 'utf8')
+        expect(main).toContain('reasoningDropped: reasoningDuplicatesVisibleContent || undefined')
+        expect(main).toContain("items: generationRecord.displayTimeline.items.filter(item => item.kind !== 'reasoning')")
+        expect(renderer).toContain('if (data.reasoningDropped) {')
+        expect(renderer).toContain('setReasoningSegmentMap(drop)')
+    })
 })
 
 describe('Client-side <think> tag extraction — edge cases', () => {

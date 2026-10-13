@@ -5043,6 +5043,16 @@ export function registerChatHandlers(
         generationRecord.status = 'completed';
         generationRecord.finishReason = lastFinishReason;
         saveGenerationRecord();
+        if (reasoningDuplicatesVisibleContent && generationRecord.displayTimeline) {
+          // The dropped rail must not survive in the display order either (a natural-EOS answer the engine
+          // reclassified from the template-open think rail streams as reasoning first, then as content).
+          generationRecord.displayTimeline = {
+            ...generationRecord.displayTimeline,
+            items: generationRecord.displayTimeline.items.filter(item => item.kind !== 'reasoning'),
+          };
+          assistantMessage.generationRecordJson = JSON.stringify(generationRecord);
+          db.updateMessageGenerationRecord(assistantMessage.id, assistantMessage.generationRecordJson);
+        }
         db.addMessage(assistantMessage);
 
         // Send final metrics
@@ -5057,6 +5067,8 @@ export function registerChatHandlers(
               responseId: activeRequests.get(chatId)?.responseId,
               content: fullContent,
               reasoningContent: finalReasoningContent || undefined,
+              // Tells the renderer to clear the rail it streamed for this message (persistence already dropped it).
+              reasoningDropped: reasoningDuplicatesVisibleContent || undefined,
               reasoningSegments:
                 replayReasoningSegments.length > 0
                   ? replayReasoningSegments

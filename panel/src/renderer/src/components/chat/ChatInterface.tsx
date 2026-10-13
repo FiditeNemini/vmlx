@@ -435,6 +435,14 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         }
         return existing ? prev.map(m => m.id === data.messageId ? completed : m) : [...prev, completed]
       })
+      // The rail duplicated the visible answer and was dropped from persistence: clear what streamed live too,
+      // so the open chat matches a reload.
+      if (data.reasoningDropped) {
+        const drop = <T,>(prev: Record<string, T>) => { const next = { ...prev }; delete next[data.messageId]; return next }
+        setReasoningMap(drop)
+        setReasoningSegmentMap(drop)
+        setReasoningDoneMap(drop)
+      }
       // Finalize reasoning state from completion event (ensures reasoning box persists
       // even if chat:reasoningDone was missed due to event ordering)
       if (data.reasoningContent) {

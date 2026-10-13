@@ -16522,16 +16522,25 @@ def test_scoped_prepackage_default_path_never_reads_private_receipt(tmp_path, mo
 
 
 def test_scoped_dflash_release_requires_all_models_and_live_owners(tmp_path, monkeypatch):
+    _check_scoped_speculative_live_owners(tmp_path, monkeypatch, integration=False)
+
+
+def test_scoped_dspark_release_requires_all_models_and_live_owners(tmp_path, monkeypatch):
+    _check_scoped_speculative_live_owners(tmp_path, monkeypatch, integration=True)
+
+
+def _check_scoped_speculative_live_owners(tmp_path, monkeypatch, *, integration):
     runner, root, path, data, provenance = _scoped_prepackage_fixture(tmp_path, monkeypatch)
-    data['schema'] = runner.SCOPED_DFLASH_SCHEMA
-    data['models'] = sorted(runner.SCOPED_DFLASH_MODELS)
-    required = runner.SCOPED_REQUIRED_RECEIPTS | runner.SCOPED_DFLASH_RECEIPTS
+    data['schema'] = runner.SCOPED_DSPARK_SCHEMA if integration else runner.SCOPED_DFLASH_SCHEMA
+    data['models'] = sorted(runner.SCOPED_DSPARK_MODELS if integration else runner.SCOPED_DFLASH_MODELS)
+    live_owners = runner.SCOPED_DFLASH_RECEIPTS | (runner.SCOPED_DSPARK_RECEIPTS if integration else set())
+    required = runner.SCOPED_REQUIRED_RECEIPTS | live_owners
     scope_path = path.parent / 'scope.json'
     scope = json.loads(scope_path.read_text())
     scope.update(models=data['models'], required_receipts=sorted(required))
     scope_path.write_text(json.dumps(scope))
     data['scope_document']['sha256'] = hashlib.sha256(scope_path.read_bytes()).hexdigest()
-    for owner in runner.SCOPED_DFLASH_RECEIPTS:
+    for owner in live_owners:
         entry = json.loads(json.dumps(data['receipts']['CACHE_API']))
         original = json.loads((path.parent / entry['receipt']['path']).read_text())
         original['owner'] = owner
@@ -16545,6 +16554,20 @@ def test_scoped_dflash_release_requires_all_models_and_live_owners(tmp_path, mon
         return runner.validate_scoped_prepackage(root, path, provenance=provenance, expected_version='1.6.74')
 
     assert validate()['status'] == 'pass'
+    # Every added owner must retain its own raw API, visual and identity proof.
+    for owner in live_owners:
+        entry = data['receipts'].pop(owner)
+        assert validate()['status'] == 'fail'
+        data['receipts'][owner] = entry
+        for surface in ('visual', 'api', 'runtime_identity'):
+            refs = entry['proof'].pop(surface)
+            assert validate()['status'] == 'fail'
+            entry['proof'][surface] = refs
+    if integration:
+        for model in runner.SCOPED_DSPARK_MODELS - runner.SCOPED_DFLASH_MODELS:
+            data['models'].remove(model)
+            assert validate()['status'] == 'fail'
+            data['models'].append(model)
     saved = data['receipts'].pop('DFLASH_CACHE')
     assert validate()['status'] == 'fail'
     data['receipts']['DFLASH_CACHE'] = saved

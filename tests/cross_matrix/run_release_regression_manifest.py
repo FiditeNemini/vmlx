@@ -433,6 +433,15 @@ SCOPED_MODELS = {"flash-next-affine4m", "flash-next-jangh4"}
 SCOPED_DFLASH_SCHEMA = "vmlx-scoped-prepackage-v2"
 SCOPED_DFLASH_MODELS = SCOPED_MODELS | {"qwen27b-dflash2-affine4d", "qwen27b-dflash2-jangh2"}
 SCOPED_DFLASH_RECEIPTS = {"DFLASH_DEFAULTS", "DFLASH_CACHE", "DFLASH_API", "DFLASH_NONREGRESSION"}
+SCOPED_DSPARK_SCHEMA = "vmlx-scoped-prepackage-v3"
+SCOPED_DSPARK_MODELS = SCOPED_DFLASH_MODELS | {
+    "flash-next-affine4s", "glm53-dflash2-janght24",
+    "minicpm47-35b-dspark-affine4m", "minicpm47-1b-ar-affine4m",
+}
+SCOPED_DSPARK_RECEIPTS = {
+    "DSPARK_DEFAULTS", "DSPARK_CACHE", "DSPARK_API", "DSPARK_NONREGRESSION",
+    "GLM_DFLASH_INTEGRATION", "NATIVE_EOS_CLASSIFICATION",
+}
 SCOPED_REQUIRED_RECEIPTS = {
     "PROVENANCE", "SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION",
     "NATIVE_MTP", "API_CACHE", "API_SURFACE", "MCP", "JANG_COMPAT",
@@ -492,11 +501,14 @@ def validate_scoped_prepackage(
         data = json.loads(raw)
         result["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
         evidence_root = path.resolve().parent
-        if not isinstance(data, dict) or data.get("schema") not in {SCOPED_PREPACKAGE_SCHEMA, SCOPED_DFLASH_SCHEMA}:
+        if not isinstance(data, dict) or data.get("schema") not in {SCOPED_PREPACKAGE_SCHEMA, SCOPED_DFLASH_SCHEMA, SCOPED_DSPARK_SCHEMA}:
             raise ValueError("unsupported scoped prepackage schema")
-        expanded = data["schema"] == SCOPED_DFLASH_SCHEMA
-        required_models = SCOPED_DFLASH_MODELS if expanded else SCOPED_MODELS
+        dspark = data["schema"] == SCOPED_DSPARK_SCHEMA
+        expanded = dspark or data["schema"] == SCOPED_DFLASH_SCHEMA
+        required_models = SCOPED_DSPARK_MODELS if dspark else (SCOPED_DFLASH_MODELS if expanded else SCOPED_MODELS)
         required_receipts = SCOPED_REQUIRED_RECEIPTS | (SCOPED_DFLASH_RECEIPTS if expanded else set())
+        if dspark:
+            required_receipts |= SCOPED_DSPARK_RECEIPTS
         if data.get("phase") != "prepackage" or data.get("version") != expected_version:
             raise ValueError("scoped phase/version mismatch")
         if set(data.get("models", [])) != required_models:
@@ -604,7 +616,7 @@ def validate_scoped_prepackage(
             if not isinstance(entry.get("resolved_failures"), list) or not isinstance(entry.get("skips"), list):
                 raise ValueError(f"{owner}: failures and skips must be explicitly accounted")
             proof = entry.get("proof")
-            needed = {"visual", "api", "runtime_identity"} if owner in {"SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION", "PROVENANCE"} | SCOPED_DFLASH_RECEIPTS else {"offline"}
+            needed = {"visual", "api", "runtime_identity"} if owner in {"SETTINGS", "CACHE_API", "MEDIA_UI", "QUOTA", "REGRESSION", "PROVENANCE"} | SCOPED_DFLASH_RECEIPTS | SCOPED_DSPARK_RECEIPTS else {"offline"}
             if not isinstance(proof, dict) or not needed <= set(proof):
                 raise ValueError(f"{owner}: missing owning proof surfaces")
             for refs in proof.values():

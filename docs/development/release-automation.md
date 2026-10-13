@@ -171,6 +171,14 @@ and uploads:
 Private manifests, proof logs, local paths, Apple submissions, and credentials
 are not uploaded.
 
+The private prepackage reader supports versioned acceptance scopes. Schema v3
+retains every v2 Qwen acceptance owner and adds Flash-Next 4S, GLM DFlash2,
+MiniCPM 35B DSpark, and MiniCPM 1B without a drafter. DSpark defaults, cache,
+API, non-regression, GLM integration, and native-EOS classification each require
+separate source-bound receipts with visual, streaming API, and runtime-identity
+artifacts. Missing evidence remains a build failure; schema validation does not
+replace review of the artifacts or the later installed-build checks.
+
 ### 3. Exact-byte promotion
 
 Run `Publish exact release candidate` with the successful candidate run ID and

@@ -7157,6 +7157,15 @@ class MLXMultimodalLM:
 
         resume = _dsession.lookup(model_key, key_ids, tokenizer, target.make_cache, _make_draft)
         cache_len = int(resume["cache_len"]) if resume is not None else 0
+        if resume is not None and resume.get("load_s") is not None:
+            # SSD restore receipt (the SSD-only RAM policy reads every resumed turn from SSD): time, bytes, rate.
+            _restored = 0
+            for _c in list(resume.get("target_cache") or []) + list(resume.get("draft_cache") or []):
+                _st = _c.state if isinstance(_c.state, (list, tuple)) else [_c.state]
+                _restored += sum(int(getattr(_a, "nbytes", 0) or 0) for _a in _st if _a is not None)
+            _ls = float(resume["load_s"])
+            logger.info("DSpark SSD restore: %d tokens, %.0f MB in %.1f ms (%.2f GB/s)", cache_len, _restored / 1e6,
+                        1000 * _ls, _restored / max(_ls, 1e-9) / 1e9)
         # Media: a restored prefix holding every media item of this request leaves a text tail at offset + its cached
         # rope delta (vision tower skipped); otherwise run the plan (vision tower, merged embeddings, positions).
         vision_s = 0.0

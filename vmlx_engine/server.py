@@ -14473,6 +14473,11 @@ def _sleep_busy_response(depth: str):
     from starlette.responses import JSONResponse
 
     num_running, num_waiting = _scheduler_busy_counts()
+    # Direct DSpark/DFlash2 engines have no scheduler. Their generation lock
+    # owns the model/cache state, including any terminal persistence fence.
+    generation_lock = getattr(_engine, "_generation_lock", None)
+    if generation_lock is not None and generation_lock.locked():
+        num_running = max(1, num_running)
     if num_running > 0 or num_waiting > 0:
         logger.warning(
             "Refusing %s sleep: scheduler busy (num_running=%d, num_waiting=%d)",

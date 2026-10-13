@@ -76,3 +76,22 @@ def test_busy_guard_tolerates_stats_failure():
     scheduler.get_stats.side_effect = RuntimeError("no stats")
     with patch.object(server, "_get_scheduler", return_value=scheduler):
         assert server._sleep_busy_response("soft") is None
+
+
+def test_sleep_refuses_while_direct_engine_is_generating():
+    from types import SimpleNamespace
+
+    async def check():
+        lock = asyncio.Lock()
+        async with lock:
+            with patch.object(server, "_engine", SimpleNamespace(_generation_lock=lock)), \
+                 patch.object(server, "_get_scheduler", return_value=None):
+                for depth in ("soft", "deep"):
+                    response = server._sleep_busy_response(depth)
+                    assert response is not None
+                    assert response.status_code == 409
+        with patch.object(server, "_engine", SimpleNamespace(_generation_lock=lock)), \
+             patch.object(server, "_get_scheduler", return_value=None):
+            assert server._sleep_busy_response("deep") is None
+
+    _run(check())

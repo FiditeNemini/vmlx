@@ -24,7 +24,7 @@ function fixture(initialPending = false) {
   let resolve!: (value: unknown) => void
   let reject!: (error: Error) => void
   const detection = new Promise((yes, no) => { resolve = yes; reject = no })
-  const state = { pending: initialPending, config: undefined as unknown, writes: [] as boolean[] }
+  const state = { pending: initialPending, config: undefined as unknown, writes: [] as boolean[], modalities: undefined as string[] | undefined }
   const epoch = { current: 0 }
   const mounted = { current: true }
   // fe432faf5 made Reset hand native-MTP mode ownership back to detected
@@ -48,6 +48,7 @@ function fixture(initialPending = false) {
     DSV4_PAGED_CACHE_BLOCK_SIZE: 64, DSV4_MAX_CACHE_BLOCKS: 4097,
   }
   for (const name of expression!.matchAll(/\b(setDetected\w+)\(/g)) environment[name[1]] = () => {}
+  environment.setDetectedRuntimeModalities = (value: string[] | undefined) => { state.modalities = value }
   const reset = new Function(...Object.keys(environment), `${js}\nreturn handler`)(...Object.values(environment)) as () => Promise<void>
   return { state, epoch, mounted, nativeMtpEdited, reset, resolve, reject }
 }
@@ -62,6 +63,15 @@ describe('creation Reset owns the model-defaults pending interval', () => {
     expect(f.state.pending).toBe(false)
     expect(f.state.config).toMatchObject({ port: 8110, timeout: 300, nativeMtpMode: 'adaptive' })
     expect(f.nativeMtpEdited.current).toBe(false)
+  })
+
+  it.each([{ modalities: ['text', 'vision', 'video'] }, { modalities: undefined }])('refreshes video capabilities from Reset detection: $modalities', async ({ modalities }) => {
+    const f = fixture()
+    f.state.modalities = ['stale', 'video']
+    const operation = f.reset()
+    f.resolve({ family: 'minicpm-v4.7', runtimeModalities: modalities })
+    await operation
+    expect(f.state.modalities).toEqual(modalities)
   })
 
   it('releases a pending selection superseded by Reset rather than stranding Launch', async () => {

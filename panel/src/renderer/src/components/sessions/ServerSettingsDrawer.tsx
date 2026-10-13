@@ -319,6 +319,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
+          setDetectedRuntimeModalities(Array.isArray(detected.runtimeModalities) ? detected.runtimeModalities : undefined)
         } else {
           setDetectedFamily(undefined)
           setDetectedToolParser(undefined)
@@ -330,6 +331,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
+          setDetectedRuntimeModalities(undefined)
         }
       } catch (_) {
         if (!resetStillCurrent()) return
@@ -343,6 +345,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
+        setDetectedRuntimeModalities(undefined)
       }
       // Bundle generation defaults are independent of family/cache detection.
       // Keep hydrating them even if detectConfig cannot classify the model.

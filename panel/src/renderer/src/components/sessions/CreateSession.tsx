@@ -288,6 +288,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
+          setDetectedRuntimeModalities(Array.isArray(detected.runtimeModalities) ? detected.runtimeModalities : undefined)
           setDetectedNativeMtp(detected.nativeMtp)
         } else {
           setDetectedFamily(undefined)
@@ -300,6 +301,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
+          setDetectedRuntimeModalities(undefined)
           setDetectedNativeMtp(undefined)
         }
         Object.assign(base, applyBundleGenerationDefaultsToSessionConfig(base, gen))
@@ -315,6 +317,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
+        setDetectedRuntimeModalities(undefined)
         setDetectedNativeMtp(undefined)
       }
     }
@@ -738,6 +741,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                                 setDetectedIsTurboQuant(!!det?.isTurboQuant)
                                 setDetectedIsMultimodal(!!det?.isMultimodal)
                                 setDetectedForceTextOnly(!!det?.forceTextOnly)
+                                setDetectedRuntimeModalities(Array.isArray(det?.runtimeModalities) ? det.runtimeModalities : undefined)
                                 setDetectedNativeMtp(det?.nativeMtp)
                                 if (det?.maxContextLength) setDetectedMaxContext(det.maxContextLength)
                               } catch (_) { }

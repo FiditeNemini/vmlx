@@ -47,6 +47,7 @@ declare global {
           enableAutoToolChoice?: boolean;
           isMultimodal?: boolean;
           forceTextOnly?: boolean;
+          runtimeModalities?: string[];
           isTurboQuant?: boolean;
           quantizationLabel?: string;
           nativeMtp?: {

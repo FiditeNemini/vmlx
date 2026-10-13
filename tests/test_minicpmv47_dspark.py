@@ -268,6 +268,16 @@ def test_load_dspark_runtime_follows_the_drafter_files(tmp_path, kwargs, outcome
             _load_dspark_runtime(_tiny_model(), root)
 
 
+def test_load_dspark_runtime_ignores_a_sidecar_that_does_not_declare_dspark(tmp_path):
+    # Same rule as panel dsparkBundle.configDeclaresDspark, which picks the serving lane from it.
+    root = _bundle(tmp_path)
+    cfg = json.loads((root / "dspark" / "config.json").read_text())
+    cfg["architectures"] = ["Qwen3ForCausalLM"]
+    cfg["dflash_config"]["projector_type"] = "mlp"
+    (root / "dspark" / "config.json").write_text(json.dumps(cfg))
+    assert _load_dspark_runtime(_tiny_model(), root) is None
+
+
 @pytest.mark.parametrize(
     "media, kwargs, routed",
     [

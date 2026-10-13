@@ -4449,6 +4449,17 @@ _NATIVE_VIDEO_FRAME_MODEL_TYPES = {"minicpmv4_7"}
 _DSPARK_MODEL_TYPES = {"minicpmv4_7"}
 
 
+def _config_declares_dspark(cfg: Any) -> bool:
+    """openbmb MiniCPM-V-4.7 drafters (``Qwen3DSparkModel``, ``dflash_config.projector_type: dspark``) and
+    SpecForge ``DSparkDraftModel``. Mirrors panel/src/main/dsparkBundle.ts::configDeclaresDspark."""
+    if not isinstance(cfg, dict):
+        return False
+    if any("dspark" in str(a).lower() for a in cfg.get("architectures") or []):
+        return True
+    projector = (cfg.get("dflash_config") or {}).get("projector_type") or cfg.get("projector_type")
+    return str(projector or "").lower() == "dspark"
+
+
 def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
     """DSpark drafter for a bundle that declares it, or None.
 
@@ -4488,6 +4499,15 @@ def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
     if not (drafter_dir / "config.json").is_file():
         if spec:
             logger.info("DSpark declared in jang_config but the bundle ships no drafter (%s); serving AR", drafter_dir)
+        return None
+    # Same rule as the panel (dsparkBundle.configDeclaresDspark), which picks the single-request lane from it: a
+    # sidecar config that does not declare DSpark is not a DSpark drafter.
+    try:
+        dcfg_raw = json.loads((drafter_dir / "config.json").read_text())
+    except Exception:
+        dcfg_raw = {}
+    if not _config_declares_dspark(dcfg_raw):
+        logger.info("%s/config.json does not declare a DSpark drafter; serving AR", drafter_dir)
         return None
     from ..dspark import load_drafter
     from ..dspark.minicpm_target import MAX_VERIFY_ROWS, MiniCPMDSparkTarget

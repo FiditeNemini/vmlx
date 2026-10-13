@@ -71,7 +71,11 @@ function sizeLimitForKind(kind: AttachmentKind): number {
  * not among them (the server would answer the turn with a 400). Unknown or failed detection never restricts. */
 export function attachmentAllowed(kind: AttachmentKind, modalities: string[] | null): boolean {
   if (kind === 'text' || !modalities || modalities.length === 0) return true
-  return modalities.map(m => m.toLowerCase()).includes(kind)
+  const names = modalities.map(m => m.toLowerCase())
+  // The engine advertises images as "vision" (server _loaded_mllm_modalities: ["text", "vision", "video", ...]);
+  // "image" is accepted too. Comparing the attachment kind literally refused every image on every VLM.
+  if (kind === 'image') return names.includes('vision') || names.includes('image')
+  return names.includes(kind)
 }
 
 export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, sessionId }: InputBoxProps) {

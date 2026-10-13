@@ -11,6 +11,11 @@ describe('attachmentAllowed', () => {
     expect(attachmentAllowed('audio', ['text', 'image', 'video'])).toBe(false)
     expect(attachmentAllowed('video', ['text'])).toBe(false)
     expect(attachmentAllowed('image', ['TEXT', 'IMAGE'])).toBe(true)
+    // The server's real vocabulary: images are advertised as "vision".
+    expect(attachmentAllowed('image', ['text', 'vision', 'video'])).toBe(true)
+    expect(attachmentAllowed('video', ['text', 'vision', 'video'])).toBe(true)
+    expect(attachmentAllowed('audio', ['text', 'vision', 'video'])).toBe(false)
+    expect(attachmentAllowed('image', ['text', 'video'])).toBe(false)
     expect(attachmentAllowed('audio', ['text', 'audio'])).toBe(true)
   })
   it('never restricts on unknown modalities or text files', () => {

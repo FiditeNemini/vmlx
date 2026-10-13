@@ -676,6 +676,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: Usage = Field(default_factory=Usage)
+    reasoning_closed_by_eos: bool | None = None
     warnings: list[str] | None = None
     # Present only when the admission-time context clamp bound this request:
     # {prompt_tokens, requested_max_tokens, clamped_max_tokens,
@@ -1362,6 +1363,7 @@ class ResponsesObject(BaseModel):
     # technically valid but a chain/coherence/cache-prefix risk applies — e.g.,
     # `previous_response_id` chained a prior response that produced reasoning
     # only (no visible message, no tool calls).
+    reasoning_closed_by_eos: bool | None = None
     warnings: list[str] | None = None
 
     @computed_field
@@ -1430,5 +1432,6 @@ class ChatCompletionChunk(BaseModel):
     model: str
     choices: list[ChatCompletionChunkChoice]
     usage: Usage | None = None  # Included when stream_options.include_usage=true
+    reasoning_closed_by_eos: bool | None = None
     warnings: list[str] | None = None
     tool_call_generating: bool | None = None  # vMLX UI hint while native XML is buffered

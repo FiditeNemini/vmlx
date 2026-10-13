@@ -176,6 +176,38 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """
         self._think_in_prompt = think_in_prompt
         self._think_in_prompt_explicit = True
+        self.reasoning_closed_by_eos = None
+
+    def native_eos_answer(
+        self,
+        text: str,
+        *,
+        finish_reason: str | None,
+        visible_content: str | None = None,
+        has_tool_calls: bool = False,
+        has_user_stop: bool = False,
+    ) -> str | None:
+        """Classify a marker-free native assistant completion at natural EOS.
+
+        Extraction alone cannot distinguish truncated thinking from a completed
+        short answer. Only the terminal owner may use this rule, after tool
+        parsing, with the actual finish reason. It never changes generation.
+        Explicitly generated reasoning markers retain their normal semantics.
+        A configured stop sequence is conservatively excluded because engines
+        may report both a matched stop string and EOS as ``stop``.
+        """
+        if (
+            not self._think_in_prompt
+            or not self._think_in_prompt_explicit
+            or finish_reason != "stop"
+            or visible_content
+            or has_tool_calls
+            or has_user_stop
+            or not text.strip()
+            or any(marker in text for marker in self.reasoning_markers)
+        ):
+            return None
+        return text
 
     def _direct_rail_without_opener(self, text: str) -> bool:
         """A known closed prompt cannot retroactively open a private rail.

@@ -21741,6 +21741,10 @@ async def create_chat_completion(
     if response_content:
         response_content = _finalize_visible_text_for_request(response_content, request, minimum_partial=4)
     response_content = _drop_tool_visible_channel_marker(response_content, tool_calls)
+    if not response_content:
+        response_content = _native_eos_visible_answer(
+            request_parser, request, output, output.text, response_content, tool_calls
+        )
     response_warnings = _merge_responses_warnings(
         _chat_completion_warnings_for_reasoning_only(
             response_content,
@@ -21825,6 +21829,7 @@ async def create_chat_completion(
             )
         ],
         usage=get_usage(output),
+        reasoning_closed_by_eos=getattr(request_parser, "reasoning_closed_by_eos", None),
         warnings=response_warnings,
         context_exhaustion=_context_exhaustion,
     )
@@ -22004,7 +22009,7 @@ def _responses_tool_arguments_for_history(arguments: Any) -> dict:
     return arguments if isinstance(arguments, dict) else {}
 
 
-def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
+def _responses_output_to_assistant_messages(output_items: list, *, reasoning_closed_by_eos: bool = False) -> list[dict]:
     """Convert a Responses output array back to chat-history assistant turns."""
     assistant_messages: list[dict] = []
     content_parts: list[str] = []
@@ -22042,6 +22047,8 @@ def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
                 if text:
                     reasoning_parts.append(text)
     reasoning_text = "\n".join(reasoning_parts) if reasoning_parts else ""
+    if reasoning_closed_by_eos:
+        reasoning_text = ""  # The visible answer owns these tokens on replay.
     if tool_calls:
         # A Responses turn can contain visible assistant text and function_call
         # items. Store them on the same assistant turn so the next
@@ -22236,6 +22243,31 @@ def _responses_terminal_state(
         item_status="completed",
         event_type="response.completed",
     )
+
+
+def _native_eos_visible_answer(parser, request, output, raw_text, visible_content, tool_calls):
+    """Terminal classification only; never ask the engine for more tokens."""
+    from .reasoning.think_parser import BaseThinkingReasoningParser
+
+    if (
+        not isinstance(parser, BaseThinkingReasoningParser)
+        or _TOOL_CALL_REJECTED.get()
+        or getattr(request, "enable_thinking", None) is False
+    ):
+        return None
+    answer = parser.native_eos_answer(
+        raw_text or "",
+        finish_reason=getattr(output, "finish_reason", None),
+        visible_content=visible_content,
+        has_tool_calls=bool(tool_calls),
+        has_user_stop=bool(getattr(request, "stop", None)),
+    )
+    if answer is not None:
+        parser.reasoning_closed_by_eos = True
+        # These tokens now own the visible answer, not two usage categories.
+        if getattr(output, "reasoning_tokens", None) is not None:
+            output.reasoning_tokens = 0
+    return answer
 
 
 def _current_response_warnings_for_reasoning_only(
@@ -25373,6 +25405,10 @@ async def create_response(
     if final_text:
         final_text = _finalize_visible_text_for_request(final_text, request, minimum_partial=4)
     final_text = _drop_tool_visible_channel_marker(final_text, tool_calls) or ""
+    if not final_text:
+        final_text = _native_eos_visible_answer(
+            request_parser, request, output, output.text, final_text, tool_calls
+        ) or ""
     if final_text:
         output_items.append(
             ResponsesOutputMessage(
@@ -25436,6 +25472,7 @@ async def create_response(
         output=output_items,
         usage=_get_responses_usage(output),
         previous_response_id=request.previous_response_id,
+        reasoning_closed_by_eos=getattr(request_parser, "reasoning_closed_by_eos", None),
         incomplete_details=_response_terminal.incomplete_details,
         effort_substitution=_ns_pop_effort(str(response_id)),
         warnings=_merge_responses_warnings(
@@ -25452,7 +25489,7 @@ async def create_response(
     if _response_terminal.finish_reason not in {"cancelled", "error"}:
         _responses_store_history(
             response_obj.id,
-            history_messages + _responses_output_to_assistant_messages(output_items),
+            history_messages + _responses_output_to_assistant_messages(output_items, reasoning_closed_by_eos=bool(getattr(request_parser, "reasoning_closed_by_eos", False))),
             reasoning_only=_reasoning_only,
         )
     return response_obj
@@ -27749,6 +27786,24 @@ async def stream_chat_completion(
                 # stream that just delivered content.
                 content_was_emitted = True
                 streamed_content += remainder
+
+    if not content_was_emitted and not tool_calls_emitted and not suppress_reasoning:
+        _eos_answer = _native_eos_visible_answer(
+            request_parser, request, last_output, accumulated_text, streamed_content, tool_calls_emitted
+        )
+        if _eos_answer is not None:
+            _eos_chunk = ChatCompletionChunk(
+                id=response_id,
+                created=_created_ts,
+                model=request.model,
+                reasoning_closed_by_eos=True,
+                choices=[ChatCompletionChunkChoice(
+                    delta=ChatCompletionChunkDelta(content=_eos_answer)
+                )],
+            )
+            yield f"data: {_dump_chat_chunk(_eos_chunk)}\n\n"
+            content_was_emitted = True
+            streamed_content += _eos_answer
 
     if (
         not tool_calls_emitted
@@ -30164,6 +30219,11 @@ async def stream_responses_api(
                 # A rejected native call may have no reasoning rail. Its
                 # sanitized empty text is authoritative; never revive raw XML.
                 display_text = clean_output_text(full_text) if full_text else ""
+        if not display_text and not _response_was_cancelled and not suppress_reasoning:
+            display_text = _native_eos_visible_answer(
+                request_parser, request, last_output, full_text, display_text, tool_calls
+            ) or ""
+
         if (
             not _response_was_cancelled
             and not display_text
@@ -30798,6 +30858,7 @@ async def stream_responses_api(
         "model": request.model,
         "output_text": display_text,
         "output": all_output_items,
+        **({"reasoning_closed_by_eos": True} if getattr(request_parser, "reasoning_closed_by_eos", False) else {}),
         **_resp_extra,
         **({"effort_substitution": _effort_record} if _effort_record else {}),
         **({"error": _required_tool_error or _format_error} if _required_tool_error or _format_error else {}),
@@ -30825,7 +30886,7 @@ async def stream_responses_api(
         _responses_store_history(
             response_id,
             (history_messages if history_messages is not None else messages)
-            + _responses_output_to_assistant_messages(all_output_items),
+            + _responses_output_to_assistant_messages(all_output_items, reasoning_closed_by_eos=bool(getattr(request_parser, "reasoning_closed_by_eos", False))),
             reasoning_only=_stream_reasoning_only,
         )
     if (

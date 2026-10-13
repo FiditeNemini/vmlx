@@ -473,8 +473,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const effectiveDraftModel = config.speculativeModel || (bundledDflash2Active ? bundledDflash2!.path : '')
   const selectedDflash2 = useDflash2Selection(effectiveDraftModel)
   const dflash2Speculative = selectedDflash2 || (!config.speculativeModel && bundledDflash2Active)
-  // Mirrors sessions.ts: DSpark runs only on the multimodal lane and yields to an explicit or DFlash2 draft model.
-  const dsparkOverridden = !multimodalActive || config.isMultimodal === false || !!config.speculativeModel || dflash2Speculative
+  // Mirrors sessions.ts: an explicit or DFlash2 draft model takes precedence over the bundled DSpark drafter.
+  const dsparkOverridden = !!config.speculativeModel || dflash2Speculative
   const dsparkActive = !!bundledDspark && (config.useBundledDspark ?? bundledDspark.default) && !dsparkOverridden
   const nativeSpeculativeCache = dflash2Speculative || dsparkActive
   const singleActiveControls = dsv4Active || glmSingleActive || nativeSpeculativeCache

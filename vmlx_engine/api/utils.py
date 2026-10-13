@@ -484,6 +484,19 @@ def _is_mllm_cache_key(model_name: str, local_path: str) -> tuple:
         return (model_name, local_path, 0.0, 0.0, _qwen_vl_env_override())
 
 
+# Model types whose ONLY runtime is the multimodal one (no mlx_lm text model): MiniCPM-V-4.7.
+_MULTIMODAL_RUNTIME_ONLY_MODEL_TYPES = frozenset({"minicpmv4_7"})
+
+
+def _multimodal_runtime_only(model_name: str) -> bool:
+    try:
+        with open(os.path.join(model_name, "config.json")) as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    return str(cfg.get("model_type", "")).lower() in _MULTIMODAL_RUNTIME_ONLY_MODEL_TYPES
+
+
 def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bool = False) -> bool:
     """
     Check if model is a multimodal language model.
@@ -519,6 +532,12 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
         except Exception:
             _force_to = False
     if _force_to:
+        if _multimodal_runtime_only(model_name):
+            # No text runtime exists for this model type (mlx_lm raises "Model type ... not supported"), so a text-only
+            # launch never loaded. Load the multimodal runtime; --text-only is still enforced where it applies, at the
+            # API (server._enforce_text_only_override rejects media, runtime modalities report ["text"]).
+            _logger.info("is_mllm_model(%s): tier=force_text_only, multimodal-only model type -> True", model_name)
+            return True
         _logger.info("is_mllm_model(%s): tier=force_text_only result=False", model_name)
         return False
 

@@ -1019,3 +1019,13 @@ def test_draft_window_limits_the_attended_context(tmp_path, monkeypatch):
     monkeypatch.setenv("VMLX_DSPARK_DRAFT_WINDOW", "4")
     assert not mx.array_equal(drafter(block), full)              # a real restriction
     assert drafter.ctx_len == 40                                 # context untouched
+
+
+@pytest.mark.parametrize("model_type, expected", [("minicpmv4_7", True), ("qwen3_5_moe", False)])
+def test_text_only_loads_the_multimodal_runtime_when_no_text_runtime_exists(tmp_path, model_type, expected):
+    # Multimodal Force Off (--text-only) on MiniCPM-V-4.7 sent the bundle to mlx_lm, which raises "Model type
+    # minicpmv4_7 not supported": the session never loaded. Media stays refused at the API (_enforce_text_only_override).
+    from vmlx_engine.api.utils import is_mllm_model
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type, "vision_config": {}}))
+    assert is_mllm_model(str(tmp_path), force_text_only=True) is expected

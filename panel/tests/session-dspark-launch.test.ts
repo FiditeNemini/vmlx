@@ -85,14 +85,19 @@ describe('bundled DSpark launch wiring', () => {
     expect(args(manager, plain)).not.toContain('--dspark')
   })
 
-  it('Multimodal Force Off keeps the batching lane: the engine loads DSpark only in the multimodal loader', async () => {
+  it('Multimodal Force Off keeps DSpark: the bundle has only a multimodal runtime, --text-only restricts media', async () => {
     const manager = new SessionManager()
     const row = await manager.createSession(bundle(true), { port: 8131, isMultimodal: false })
     const command = args(manager, row)
     expect(command).toContain('--text-only')
-    expect(flag(command, '--dspark')).toBe('off')
-    expect(command).toContain('--continuous-batching')
-    expect(command).not.toContain('--disable-prefix-cache')
+    expect(flag(command, '--dspark')).toBe('auto')
+    expect(command).toContain('--no-continuous-batching')
+  })
+
+  it('a draft model shows DSpark off: the launch passes --dspark off', async () => {
+    const manager = new SessionManager()
+    const row = await manager.createSession(bundle(true), { port: 8132, speculativeModel: '/models/other-draft' })
+    expect(flag(args(manager, row), '--dspark')).toBe('off')
   })
 
   it("passes the session's SSD tier settings to the DSpark lane (its multi-turn session snapshots)", async () => {

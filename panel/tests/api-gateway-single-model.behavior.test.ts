@@ -294,6 +294,23 @@ describe("ApiGateway single-model mode behavior", () => {
     expect(dbMock.setSetting).toHaveBeenCalledWith("gateway_port", String(port));
   });
 
+  it("restores the listener when cancelled quit starts it while stop is pending", async () => {
+    const port = await freePort();
+    dbMock.getSetting.mockReturnValue(undefined);
+    dbMock.getSessions.mockReturnValue([]);
+    const { ApiGateway } = await import("../src/main/api-gateway");
+    gateway = new ApiGateway();
+    await gateway.start(port, "127.0.0.1");
+
+    const stopping = gateway.stop();
+    const restoring = gateway.start(port, "127.0.0.1");
+    await Promise.all([stopping, restoring]);
+
+    expect(gateway.running).toBe(true);
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`);
+    expect(response.status).toBe(200);
+  });
+
   it("restores the previous listener when restart targets an active session port", async () => {
     const originalPort = await freePort();
     const conflictingPort = await freePort();

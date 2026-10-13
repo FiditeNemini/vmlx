@@ -90,6 +90,7 @@ export class ApiGateway extends EventEmitter {
   private port: number = DEFAULT_PORT;
   private host: string = "127.0.0.1";
   private _running = false;
+  private stopping: Promise<void> | null = null;
   /** Track in-flight JIT loads to prevent duplicate starts */
   private jitPending = new Map<string, Promise<JitLoadResult>>();
   /** Serialize cross-model transitions when single-model mode is enabled. */
@@ -234,6 +235,9 @@ export class ApiGateway extends EventEmitter {
   // ═══════════════════════════════════════════════════════════════
 
   async start(port?: number, host?: string): Promise<void> {
+    // A cancelled app quit may restore the gateway before server.close has
+    // settled. Waiting prevents the still-running flag from losing that start.
+    if (this.stopping) await this.stopping;
     if (this._running) return;
     this.port =
       port ??
@@ -625,8 +629,9 @@ export class ApiGateway extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     if (!this.server) return;
-    return new Promise((resolve) => {
+    this.stopping = new Promise<void>((resolve) => {
       this.server!.close(() => {
         this._running = false;
         this.server = null;
@@ -636,6 +641,11 @@ export class ApiGateway extends EventEmitter {
         resolve();
       });
     });
+    try {
+      await this.stopping;
+    } finally {
+      this.stopping = null;
+    }
   }
 
   async restart(port: number, host?: string): Promise<void> {

@@ -4441,10 +4441,18 @@ def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
     "drafter_path": "dspark"}`` (path relative to the bundle; default
     ``dspark``) with a drafter directory holding ``config.json`` +
     ``model.safetensors`` (BF16, or pre-quantized by
-    ``vmlx_engine.dspark.write_quantized_drafter``). ``VMLX_DSPARK=0``
-    disables it. Only text requests use it (see ``_dspark_eligible``).
+    ``vmlx_engine.dspark.write_quantized_drafter``). Only text requests use it
+    (see ``_dspark_eligible``).
+
+    On/off: the bundle's ``speculative.default`` decides (absent = on), and
+    ``VMLX_DSPARK`` overrides it either way (``1`` engages a drafter a bundle
+    stamps ``default: false``; ``0`` keeps every bundle on AR). The shipped
+    MiniCPM-V-4.7 bundles stamp ``default: false`` because DSpark measured
+    slower than AR on the 1B (x0.54-0.98 served); that stamp was not honoured
+    before, so those bundles ran DSpark.
     """
-    if os.environ.get("VMLX_DSPARK", "1").strip().lower() in {"0", "false", "off", "no"}:
+    override = os.environ.get("VMLX_DSPARK", "").strip().lower()
+    if override in {"0", "false", "off", "no"}:
         return None
     root = Path(model_path)
     try:
@@ -4458,6 +4466,12 @@ def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
         return None
     spec = (json.loads(stamp_path.read_text()).get("speculative") or {})
     if str(spec.get("method", "")).lower() != "dspark":
+        return None
+    if spec.get("default", True) is False and override not in {"1", "true", "on", "yes"}:
+        logger.info(
+            "DSpark drafter declared but the bundle stamps speculative.default=false; serving AR "
+            "(VMLX_DSPARK=1 engages it)",
+        )
         return None
     drafter_dir = root / str(spec.get("drafter_path") or "dspark")
     if not (drafter_dir / "config.json").is_file():

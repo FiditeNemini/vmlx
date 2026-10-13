@@ -222,13 +222,15 @@ def test_dspark_stops_at_eos_like_ar(tmp_path):
 
 
 # ------------------------------------------------------------------ serving
-def _bundle(tmp_path, *, spec=True, drafter=True, model_type="minicpmv4_7", hidden=16):
+def _bundle(tmp_path, *, spec=True, drafter=True, model_type="minicpmv4_7", hidden=16, default=None):
     root = tmp_path / "bundle"
     root.mkdir()
     (root / "config.json").write_text(json.dumps({"model_type": model_type, "text_config": _gdn_text_config()}))
     stamp = {"chat": {}}
     if spec:
         stamp["speculative"] = {"method": "dspark", "drafter_path": "dspark"}
+        if default is not None:
+            stamp["speculative"]["default"] = default
     (root / "jang_config.json").write_text(json.dumps(stamp))
     if drafter:
         _save_drafter(root / "dspark", _drafter_config(hidden=hidden))
@@ -288,3 +290,105 @@ def test_no_dspark_route_without_runtime_or_row_exact_verify(monkeypatch):
     assert MLXMultimodalLM._dspark_eligible(SimpleNamespace(_dspark=None), [], [], [], 0.0, {}) is False
     monkeypatch.setenv("VMLX_ROW_EXACT_VERIFY_QMV", "0")
     assert MLXMultimodalLM._dspark_eligible(SimpleNamespace(_dspark={"x": 1}), [], [], [], 0.0, {}) is False
+
+
+# ------------------------------------------------------------- MoE target (35B-A3B shape, tiny)
+def _moe_text_config() -> dict:
+    # Quantizable expert shapes (64) and 16 experts x top-8: an 8-row verify reaches SwitchGLU's 64-index sort
+    # threshold, where the stock multi-row block switches kernels (the case the per-row MoE verify exists for).
+    cfg = _text_config(True)
+    cfg.update(hidden_size=64, intermediate_size=64, moe_intermediate_size=64, shared_expert_intermediate_size=64,
+               num_experts=16, num_experts_per_tok=8, linear_key_head_dim=32, linear_value_head_dim=32)
+    return cfg
+
+
+def _tiny_moe_target(seed: int = 5, eval_mode: bool = True) -> MiniCPMDSparkTarget:
+    import mlx.nn as nn
+    from mlx_vlm.models.minicpmv4_7 import TextConfig, VisionConfig
+
+    from vmlx_engine.models.minicpmv4_7.config import ModelConfig
+    from vmlx_engine.models.minicpmv4_7.minicpmv4_7 import Model
+
+    config = ModelConfig.from_dict(
+        {"model_type": "minicpmv4_7", "text_config": _moe_text_config(), "vision_config": {},
+         "insert_layer_id": 0, "downsample_mode": "16x"}
+    )
+    config.text_config = TextConfig.from_dict(_moe_text_config())
+    config.vision_config = VisionConfig.from_dict(
+        {"hidden_size": 32, "intermediate_size": 48, "num_hidden_layers": 2, "num_attention_heads": 2,
+         "image_size": 56, "patch_size": 14}
+    )
+    model = Model(config)
+    _randomize(model, seed=seed)
+    # Routed experts affine 8 (the bundles' JANG_8M layout); routers stay unquantized like the bundles' bf16 routers.
+    nn.quantize(model.language_model, group_size=64, bits=8,
+                class_predicate=lambda path, m: "switch_mlp" in path and hasattr(m, "to_quantized"))
+    model.set_dtype(mx.bfloat16)
+    model.train(not eval_mode)
+    mx.eval(model.parameters())
+    return MiniCPMDSparkTarget(model)
+
+
+def _verify_vs_decode(target, width):
+    prompt = mx.array([PROMPT])
+    rows = mx.array([[11, 22, 33, 44, 55, 66, 77, 88][:width]])
+    cache = target.make_cache()
+    target.prefill(prompt, cache, (), None)
+    logits, _, sink = target.verify(rows, cache, ())
+    ref_cache = target.make_cache()
+    target.prefill(prompt, ref_cache, (), None)
+    ref_rows = [target.decode(rows[0, i:i + 1], ref_cache) for i in range(width)]
+    return [bool(mx.array_equal(logits[i], ref_rows[i]).item()) for i in range(width)], cache, sink, rows
+
+
+@pytest.mark.parametrize("eval_mode", [True, False])
+@pytest.mark.parametrize("width", [2, 5, 8])
+def test_moe_verify_rows_and_rollback_equal_decode_steps(width, eval_mode):
+    target = _tiny_moe_target(eval_mode=eval_mode)
+    assert target.moe
+    follow = [mx.array([500]), mx.array([501])]
+    for keep in sorted({1, max(1, width // 2), width}):
+        same, cache, sink, rows = _verify_vs_decode(target, width)
+        assert all(same), same
+        target.rollback(cache, sink, kept=keep, total=width)
+        after = [target.decode(t, cache) for t in follow]
+        ref_cache = target.make_cache()
+        target.prefill(mx.array([PROMPT]), ref_cache, (), None)
+        for i in range(keep):
+            target.decode(rows[0, i:i + 1], ref_cache)
+        ref_after = [target.decode(t, ref_cache) for t in follow]
+        assert all(bool(mx.array_equal(a, b).item()) for a, b in zip(after, ref_after)), keep
+
+
+def test_moe_control_stock_multi_row_block_is_not_row_exact_at_eight_rows():
+    """Fail-closed control: the per-row MoE route is what makes 8-row verify exact on this shape."""
+    target = _tiny_moe_target()
+    target.moe = False                      # stock multi-row sparse MoE block inside verify
+    same, *_ = _verify_vs_decode(target, 8)
+    assert not all(same), "the control did not reproduce the stock block's 8-row mismatch; the MoE test would be vacuous"
+
+
+@pytest.mark.parametrize("fixed_width", [None, 3, 7])
+def test_moe_dspark_greedy_equals_ar(tmp_path, fixed_width):
+    target = _tiny_moe_target()
+    reference = generate_ar(target, PROMPT, 30, set())
+    src = _save_drafter(tmp_path / "d", _drafter_config(hidden=64))
+    drafter = _OracleDrafter(_drafter_config(hidden=64), reference, len(PROMPT))
+    drafter.load_weights(tree_flatten(load_drafter(src, bits=16).parameters()), strict=True)
+    stats = DSparkStats()
+    out = generate_dspark(target, drafter, PROMPT, 30, set(), fixed_width=fixed_width, stats=stats)
+    assert out == reference
+    assert stats.accepted > 0 and stats.accepted < stats.drafted
+
+
+@pytest.mark.parametrize("default, env, engaged", [
+    (None, None, True), (True, None, True), (False, None, False), (False, "1", True), (True, "0", False),
+])
+def test_load_dspark_runtime_honours_the_stamped_default(tmp_path, monkeypatch, default, env, engaged):
+    if env is None:
+        monkeypatch.delenv("VMLX_DSPARK", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_DSPARK", env)
+    root = _bundle(tmp_path, default=default)
+    runtime = _load_dspark_runtime(_tiny_model(), root)
+    assert (runtime is not None) == engaged

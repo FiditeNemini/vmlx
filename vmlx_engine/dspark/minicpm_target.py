@@ -1,4 +1,4 @@
-"""MiniCPM-V-4.7 (dense Qwen3.5 text model) as a DSpark target.
+"""MiniCPM-V-4.7 (dense Qwen3.5 or Qwen3.5-MoE text model) as a DSpark target.
 
 Three forwards over the module's own vendored Qwen3.5 layers:
 
@@ -13,6 +13,14 @@ Three forwards over the module's own vendored Qwen3.5 layers:
   BF16, JANG_8M and JANGH4, MLX 0.32.3). Requires the stock GDN path (fused
   GDN decode kernels off, the default). Dense JANGH projections are switched
   to their per-row decode kernel for verify rows (``row_exact_verify``).
+  MoE (35B-A3B): each verify row's sparse MoE block runs as its own one-row
+  call, i.e. exactly the decode step's computation (router, top-k, experts,
+  any fused one-row expert kernel, shared expert). The stock multi-row block
+  is NOT row-exact: at 8 rows x 8 experts SwitchGLU reaches MLX's 64-index
+  sort threshold and switches to the sorted gather_qmm (measured on a 35B-shape
+  block, affine 8 and JANGH 2/4: wrong at 8 rows, exact to 7). Per-row blocks
+  cost 1.0-1.2 ms per layer for 8 rows vs 0.26 ms per decode step (M5 Max,
+  synthetic), still well below 8 decode steps.
 - ``rollback``: rejected rows are undone by trimming the attention KV and
   replaying the GatedDeltaNet recurrence over the accepted rows only, from
   the state the verify started from (captured through the vendored GDN's
@@ -49,8 +57,9 @@ class MiniCPMDSparkTarget:
         self.model = model
         self.lm = model.language_model
         self.nm = self.lm.model
-        if getattr(self.lm.args, "num_experts", 0):
-            raise ValueError("DSpark exact verify is implemented for the dense MiniCPM-V-4.7 text model only")
+        self.moe = bool(getattr(self.lm.args, "num_experts", 0))
+        if self.moe and not all(hasattr(layer.mlp, "switch_mlp") for layer in self.nm.layers):
+            raise ValueError("DSpark MoE target: every decoder layer must hold a sparse MoE block")
         from ..models.minicpmv4_7.language import _CanvasLanguageMixin
 
         if not isinstance(self.lm, _CanvasLanguageMixin):
@@ -154,7 +163,13 @@ class MiniCPMDSparkTarget:
                     else:
                         r = self._row_exact_attention(layer.self_attn, self.qlang, x, c, pos, pe)
                     h = h + r
-                    h = h + layer.mlp(layer.post_attention_layernorm(h))
+                    xn = layer.post_attention_layernorm(h)
+                    if self.moe and rows > 1:
+                        # One-row calls: bit-equal to decode by construction (see the module docstring).
+                        m = mx.concatenate([layer.mlp(mx.contiguous(xn[:, r:r + 1])) for r in range(rows)], axis=1)
+                    else:
+                        m = layer.mlp(xn)
+                    h = h + m
                     if i in taps:
                         feats.append(h)
                 logits = self.lm_head(nm.norm(h))[0]

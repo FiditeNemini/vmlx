@@ -562,6 +562,22 @@ _SOURCE = r"""
 """
 
 
+# Env switches read ONCE per verify scope (row_exact_verify_scope sets them; None = read live). A verify forward
+# makes ~340 projection calls on the MiniCPM-V-4.7 35B; reading two env vars per call and rebuilding the variant
+# tuple was ~2 ms of the 3.5-6.3 ms Python graph build that the GPU waits on after a DSpark round's sync.
+_SCOPE_ENV = {"order": None, "reg": None}
+
+
+def _env_order() -> str:
+    v = _SCOPE_ENV["order"]
+    return os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain") if v is None else v
+
+
+def _env_reg() -> str:
+    v = _SCOPE_ENV["reg"]
+    return os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip() if v is None else v
+
+
 def _register_weights(rows: int) -> bool:
     """Read each weight block into registers once for all rows.
 
@@ -570,7 +586,7 @@ def _register_weights(rows: int) -> bool:
     S4 34.0 -> 33.3 ms) and lose slightly at two (25.46 -> 25.74 ms).
     ``VMLX_ROW_EXACT_QMV_REG=0/1`` pins either choice.
     """
-    pinned = os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip()
+    pinned = _env_reg()
     if pinned in {"0", "1"}:
         return pinned == "1"
     return rows >= 3
@@ -613,6 +629,11 @@ def _max_rows(bits: int) -> int:
 
 def _variants(rows, in_dim, out_dim, bits, group_size, dtype) -> tuple[str, ...]:
     """Candidate transcriptions in admission order (the self-check decides)."""
+    return _variants_for(rows, in_dim, out_dim, bits, group_size, dtype, _env_order())
+
+
+@lru_cache(maxsize=1024)
+def _variants_for(rows, in_dim, out_dim, bits, group_size, dtype, order_env: str) -> tuple[str, ...]:
     if bits not in (2, 3, 4, 5, 6, 8) or group_size not in (32, 64, 128):
         return ()
     if dtype not in (mx.float16, mx.bfloat16, mx.float32) or not 2 <= rows <= _max_rows(bits):
@@ -636,7 +657,7 @@ def _variants(rows, in_dim, out_dim, bits, group_size, dtype) -> tuple[str, ...]
     # shared-unpack "multi" walk is best or tied for 4/5/6/8-bit; the batched
     # grid ("batch", MLX's own single-row kernel per row) is slowest and is
     # only reachable explicitly via VMLX_ROW_EXACT_QMV_ORDER.
-    order = os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain").split(",")
+    order = order_env.split(",")
     ranked = []
     for kind in order:
         kind = kind.strip()
@@ -1026,7 +1047,11 @@ def row_exact_verify_scope():
         return
     _install()
     token = _SCOPE.set(True)
+    saved = dict(_SCOPE_ENV)
+    _SCOPE_ENV.update(order=os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain"),
+                      reg=os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip())
     try:
         yield True
     finally:
         _SCOPE.reset(token)
+        _SCOPE_ENV.update(saved)

@@ -23,6 +23,7 @@ real weights; a failed check keeps the stock path for that shape and logs it.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -565,17 +566,18 @@ _SOURCE = r"""
 # Env switches read ONCE per verify scope (row_exact_verify_scope sets them; None = read live). A verify forward
 # makes ~340 projection calls on the MiniCPM-V-4.7 35B; reading two env vars per call and rebuilding the variant
 # tuple was ~2 ms of the 3.5-6.3 ms Python graph build that the GPU waits on after a DSpark round's sync.
-_SCOPE_ENV = {"order": None, "reg": None}
+# A ContextVar like _SCOPE, so one thread's scope never leaks its snapshot into another thread's reads.
+_SCOPE_ENV: contextvars.ContextVar = contextvars.ContextVar("row_exact_qmv_scope_env", default=None)
 
 
 def _env_order() -> str:
-    v = _SCOPE_ENV["order"]
-    return os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain") if v is None else v
+    v = _SCOPE_ENV.get()
+    return os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain") if v is None else v[0]
 
 
 def _env_reg() -> str:
-    v = _SCOPE_ENV["reg"]
-    return os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip() if v is None else v
+    v = _SCOPE_ENV.get()
+    return os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip() if v is None else v[1]
 
 
 def _register_weights(rows: int) -> bool:
@@ -1047,11 +1049,10 @@ def row_exact_verify_scope():
         return
     _install()
     token = _SCOPE.set(True)
-    saved = dict(_SCOPE_ENV)
-    _SCOPE_ENV.update(order=os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain"),
-                      reg=os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip())
+    env_token = _SCOPE_ENV.set((os.environ.get("VMLX_ROW_EXACT_QMV_ORDER", "multi,plain"),
+                                os.environ.get("VMLX_ROW_EXACT_QMV_REG", "").strip()))
     try:
         yield True
     finally:
+        _SCOPE_ENV.reset(env_token)
         _SCOPE.reset(token)
-        _SCOPE_ENV.update(saved)

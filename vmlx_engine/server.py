@@ -21743,7 +21743,7 @@ async def create_chat_completion(
     response_content = _drop_tool_visible_channel_marker(response_content, tool_calls)
     if not response_content:
         response_content = _native_eos_visible_answer(
-            request_parser, request, output, output.text, response_content, tool_calls
+            request_parser, request, output, output.text, response_content, tool_calls, engine.tokenizer
         )
     response_warnings = _merge_responses_warnings(
         _chat_completion_warnings_for_reasoning_only(
@@ -22245,7 +22245,7 @@ def _responses_terminal_state(
     )
 
 
-def _native_eos_visible_answer(parser, request, output, raw_text, visible_content, tool_calls):
+def _native_eos_visible_answer(parser, request, output, raw_text, visible_content, tool_calls, tokenizer=None):
     """Terminal classification only; never ask the engine for more tokens."""
     from .reasoning.think_parser import BaseThinkingReasoningParser
 
@@ -22261,6 +22261,8 @@ def _native_eos_visible_answer(parser, request, output, raw_text, visible_conten
         visible_content=visible_content,
         has_tool_calls=bool(tool_calls),
         has_user_stop=bool(getattr(request, "stop", None)),
+        generated_token_ids=_output_token_ids_for_reasoning(output),
+        tokenizer=tokenizer,
     )
     if answer is not None:
         parser.reasoning_closed_by_eos = True
@@ -25407,7 +25409,7 @@ async def create_response(
     final_text = _drop_tool_visible_channel_marker(final_text, tool_calls) or ""
     if not final_text:
         final_text = _native_eos_visible_answer(
-            request_parser, request, output, output.text, final_text, tool_calls
+            request_parser, request, output, output.text, final_text, tool_calls, engine.tokenizer
         ) or ""
     if final_text:
         output_items.append(
@@ -27789,7 +27791,7 @@ async def stream_chat_completion(
 
     if not content_was_emitted and not tool_calls_emitted and not suppress_reasoning:
         _eos_answer = _native_eos_visible_answer(
-            request_parser, request, last_output, accumulated_text, streamed_content, tool_calls_emitted
+            request_parser, request, last_output, accumulated_text, streamed_content, tool_calls_emitted, engine.tokenizer
         )
         if _eos_answer is not None:
             _eos_chunk = ChatCompletionChunk(
@@ -30221,7 +30223,7 @@ async def stream_responses_api(
                 display_text = clean_output_text(full_text) if full_text else ""
         if not display_text and not _response_was_cancelled and not suppress_reasoning:
             display_text = _native_eos_visible_answer(
-                request_parser, request, last_output, full_text, display_text, tool_calls
+                request_parser, request, last_output, full_text, display_text, tool_calls, engine.tokenizer
             ) or ""
 
         if (

@@ -129,3 +129,15 @@ def test_suppressed_reasoning_is_not_promoted():
         parser, SimpleNamespace(enable_thinking=False), SimpleNamespace(finish_reason='stop'),
         'ORCHID', None, None
     ) is None
+
+
+@pytest.mark.parametrize('ids', [[42, 10, 11, 99], [9, 42, 99]])
+def test_token_delimiters_hidden_by_detokenizer_are_not_marker_free(ids):
+    class Tokenizer:
+        def encode(self, text, **kwargs):
+            return {'<think>': [9], '</think>': [10, 11], '<thinking>': [12], '</thinking>': [13]}[text]
+    parser = Qwen3ReasoningParser()
+    parser.reset_state(think_in_prompt=True)
+    assert parser.native_eos_answer(
+        'planning', finish_reason='stop', generated_token_ids=ids, tokenizer=Tokenizer()
+    ) is None

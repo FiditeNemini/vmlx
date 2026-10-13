@@ -186,6 +186,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         visible_content: str | None = None,
         has_tool_calls: bool = False,
         has_user_stop: bool = False,
+        generated_token_ids: list[int] | None = None,
+        tokenizer=None,
     ) -> str | None:
         """Classify a marker-free native assistant completion at natural EOS.
 
@@ -207,6 +209,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
             or any(marker in text for marker in self.reasoning_markers)
         ):
             return None
+        # Some detokenizers omit special tokens from text. Generated delimiters
+        # still make this an explicit reasoning block, not a marker-free answer.
+        if generated_token_ids:
+            tags = self.reasoning_tag_token_seqs(tokenizer)
+            for sequence in tags.get("start", []) + tags.get("end", []):
+                if sequence and any(
+                    generated_token_ids[i : i + len(sequence)] == sequence
+                    for i, token in enumerate(generated_token_ids)
+                    if token == sequence[0]
+                ):
+                    return None
         return text
 
     def _direct_rail_without_opener(self, text: str) -> bool:

@@ -6985,9 +6985,10 @@ class MLXMultimodalLM:
         ``_dspark_media_plan``). Video and audio keep the native VLM path."""
         if getattr(self, "_dspark", None) is None or videos or audio:
             return False
+        from ..dspark.minicpm_target import verify_mode
         from ..metal.row_exact_qmv import row_exact_qmv_requested
 
-        if not row_exact_qmv_requested():
+        if verify_mode() == "exact" and not row_exact_qmv_requested():
             # Verify rows would not be bit-equal to decode steps.
             logger.info("DSpark skipped: row-exact verify is off (VMLX_ROW_EXACT_VERIFY_QMV); AR decode")
             return False

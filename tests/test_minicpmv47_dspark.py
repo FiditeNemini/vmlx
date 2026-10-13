@@ -951,3 +951,34 @@ def test_video_dspark_greedy_equals_native_ar(tmp_path, moe):
     finally:
         target.set_media()
     assert out == reference
+
+
+# ------------------------------------------------------------- opt-in fast verify (stock multi-row kernels)
+@pytest.mark.parametrize("moe", [False, True])
+def test_fast_verify_rows_match_the_stock_forward_and_roll_back(tmp_path, monkeypatch, moe):
+    """VMLX_DSPARK_VERIFY=fast: verify returns the stock multi-row forward's logits, and rollback leaves the caches
+    exactly where a forward of only the kept rows would (the GDN replay, KV trim)."""
+    monkeypatch.setenv("VMLX_DSPARK_VERIFY", "fast")
+    target = _tiny_moe_target() if moe else _tiny_target()
+    c1, c2 = target.make_cache(), target.make_cache()
+    for c in (c1, c2):
+        target.prefill(mx.array([PROMPT]), c, (), None)
+    rows = mx.array([[11, 12, 13, 14, 15]])
+    lg, _, sink = target.verify(rows, c1, ())
+    ref, _ = target._stock(rows, c2, (), logits=True)
+    assert mx.array_equal(lg, ref[0])
+    target.rollback(c1, sink, kept=2, total=5)
+    c3 = target.make_cache()
+    target.prefill(mx.array([PROMPT]), c3, (), None)
+    target._stock(rows[:, :2], c3, (), logits=False)
+    nxt = mx.array([[21]])
+    a = target._stock(nxt, c1, (), logits=True)[0]
+    b = target._stock(nxt, c3, (), logits=True)[0]
+    assert mx.allclose(a, b, atol=1e-2).item()
+
+
+def test_fast_verify_keeps_dspark_eligible_without_row_exact(monkeypatch):
+    monkeypatch.setenv("VMLX_ROW_EXACT_VERIFY_QMV", "0")
+    assert MLXMultimodalLM._dspark_eligible(SimpleNamespace(_dspark={"x": 1}), [], [], [], 0.0, {}) is False
+    monkeypatch.setenv("VMLX_DSPARK_VERIFY", "fast")
+    assert MLXMultimodalLM._dspark_eligible(SimpleNamespace(_dspark={"x": 1}), [], [], [], 0.0, {}) is True

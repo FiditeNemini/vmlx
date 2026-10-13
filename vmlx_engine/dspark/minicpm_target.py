@@ -62,6 +62,13 @@ def _moe_rows_stay_on_decode_kernels(block, rows: int) -> bool:
     return rows * top_k < EXPERT_SORT_THRESHOLD
 
 
+def verify_mode() -> str:
+    """exact (default: every verify row bit-equal to its 1-row decode step) or fast (stock multi-row kernels)."""
+    import os
+
+    return "fast" if os.environ.get("VMLX_DSPARK_VERIFY", "exact").strip().lower() == "fast" else "exact"
+
+
 def _cache_offset(cache, idx: int) -> int:
     entry = cache[idx]
     entry = getattr(entry, "_inner", entry)
@@ -205,10 +212,13 @@ class MiniCPMDSparkTarget:
         return self.lm(token.reshape(1, 1), cache=cache).logits[0, -1]
 
     def verify(self, tokens: mx.array, cache, taps: Sequence[int]):
-        """Row-exact forward of (1, k + 1) rows. Returns (logits (k+1, V), feats, gdn_sink)."""
+        """Row-exact forward of (1, k + 1) rows. Returns (logits (k+1, V), feats, gdn_sink).
+        ``VMLX_DSPARK_VERIFY=fast``: the stock multi-row forward instead (``verify_fast``)."""
         rows = int(tokens.shape[1])
         if not 1 <= rows <= MAX_VERIFY_ROWS:
             raise ValueError(f"DSpark verify supports 1..{MAX_VERIFY_ROWS} rows, got {rows}")
+        if verify_mode() == "fast":
+            return self.verify_fast(tokens, cache, taps)
         nm = self.nm
         sink: List[tuple] = []
         gdn = [layer.linear_attn for layer in nm.layers if layer.is_linear]
@@ -245,6 +255,23 @@ class MiniCPMDSparkTarget:
                 for module in gdn:
                     module._rollback_sink = None
         return logits, (mx.concatenate(feats, axis=-1) if feats else None), sink
+
+    def verify_fast(self, tokens: mx.array, cache, taps: Sequence[int]):
+        """Opt-in (VMLX_DSPARK_VERIFY=fast): the served stock forward over all k + 1 rows -- MLX's multi-row qmm, one
+        causal SDPA, the sorted expert route from 64 routed rows -- with the same GDN rollback capture. Every accepted
+        token is still the target's own pick from its logits, so the output is a valid decode of the model, but the
+        multi-row kernels round differently from 1-row decode steps: greedy can differ from AR at near-ties (the
+        dense Qwen 27B family runs speed-first the same way, row_exact_qmv._DENSE_SPEED_FIRST)."""
+        sink: List[tuple] = []
+        gdn = [layer.linear_attn for layer in self.nm.layers if layer.is_linear]
+        for module in gdn:
+            module._rollback_sink = sink
+        try:
+            logits, feats = self._stock(tokens, cache, taps, logits=True)
+        finally:
+            for module in gdn:
+                module._rollback_sink = None
+        return logits[0], feats, sink
 
     def rollback(self, cache, sink: list, kept: int, total: int) -> None:
         """Keep the first ``kept`` of ``total`` verify rows in every cache."""

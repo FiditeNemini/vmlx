@@ -41,6 +41,22 @@ describe('bundled DSpark drafter detection', () => {
     expect(bundledDsparkDefault(bundle(drafter))).toBe(true)
     expect(bundledDsparkDefault(bundle(null, 'dspark', { method: 'dspark', default: true }))).toBe(false)   // shipped without
   })
+
+  it('uses the engine-declared path and does not select unrelated sidecars', () => {
+    const drafter = { architectures: ['Qwen3DSparkModel'] }
+    const declared = bundle(drafter, 'custom-draft', { method: 'dspark', drafter_path: 'custom-draft' })
+    expect(findBundledDsparkDrafter(declared)).toBe(join(declared, 'custom-draft'))
+    expect(findBundledDsparkDrafter(bundle(drafter, 'custom-draft'))).toBeNull()
+    expect(findBundledDsparkDrafter(bundle(drafter, 'dspark', { method: 'dspark', drafter_path: 'missing' }))).toBeNull()
+    expect(findBundledDsparkDrafter(bundle(drafter, 'dspark', { method: 'dflash2' }))).toBeNull()
+  })
+
+  it('does not advertise DSpark for targets the engine does not support', () => {
+    const root = bundle({ architectures: ['DSparkDraftModel'] })
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ model_type: 'mimo' }))
+    expect(findBundledDsparkDrafter(root)).toBeNull()
+    expect(bundledDsparkDefault(root)).toBe(false)
+  })
 })
 
 const flat = (cmd: string) => cmd.replace(/\s*\\\n\s*/g, ' ')

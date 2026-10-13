@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { readFileSync } from 'fs'
+import { join, resolve } from 'path'
 
 /**
  * True when a drafter config.json declares DSpark: openbmb's MiniCPM-V-4.7 drafters (`Qwen3DSparkModel`,
@@ -23,28 +23,32 @@ export function bundledDsparkDefault(modelPath: string | undefined | null): bool
 }
 
 /**
- * A DSpark drafter shipped INSIDE the model bundle (convention `<bundle>/dspark`; any immediate subfolder whose
- * config.json declares DSpark). The engine loads it with the model and runs it on the single-request lane; bundles
- * without one return null and launch exactly as before.
+ * Follow models/mllm.py::_load_dspark_runtime: MiniCPM-V-4.7 only, using the
+ * declared drafter_path or <bundle>/dspark. Finding a different sidecar must
+ * not select a serving lane the engine will not actually use.
  */
 export function findBundledDsparkDrafter(modelPath: string | undefined | null): string | null {
   const root = String(modelPath || '').trim()
   if (!root) return null
-  let entries: string[] = []
   try {
-    entries = readdirSync(root)
+    const target = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8'))
+    if (String(target.model_type || '').toLowerCase() !== 'minicpmv4_7') return null
   } catch {
     return null
   }
-  const ordered = [...entries].sort((a, b) => (a === 'dspark' ? -1 : b === 'dspark' ? 1 : a.localeCompare(b)))
-  for (const entry of ordered) {
-    if (entry.startsWith('.')) continue
-    const cfg = join(root, entry, 'config.json')
-    try {
-      if (existsSync(cfg) && configDeclaresDspark(JSON.parse(readFileSync(cfg, 'utf8')))) return join(root, entry)
-    } catch {
-      /* not a drafter */
-    }
+  let spec: any = {}
+  try {
+    spec = JSON.parse(readFileSync(join(root, 'jang_config.json'), 'utf8')).speculative || {}
+  } catch {
+    // Like the engine, an absent or unreadable optional stamp uses dspark/.
+  }
+  const method = String(spec.method || '').toLowerCase()
+  if (method && method !== 'dspark') return null
+  const drafter = resolve(root, String(spec.drafter_path || 'dspark'))
+  try {
+    if (configDeclaresDspark(JSON.parse(readFileSync(join(drafter, 'config.json'), 'utf8')))) return drafter
+  } catch {
+    // A bundle without its declared drafter stays on plain decoding.
   }
   return null
 }

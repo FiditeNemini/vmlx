@@ -118,6 +118,7 @@ import {
 import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../shared/nativeMtpLaunchArgs'
 import { planSessionConfigSave } from '../shared/sessionConfigLifecycle'
 import { findBundledDflash2Drafter, isDflash2DrafterSelection } from './dflash2Bundle'
+import { findBundledDsparkDrafter } from './dsparkBundle'
 
 
 
@@ -3874,7 +3875,7 @@ export class SessionManager extends EventEmitter {
     'maxTokens', 'maxContextLength', 'mcpConfig',
     'mcpEnabledServers', 'mcpDisabledServers', 'mcpEnabledTools', 'mcpDisabledTools',
     'servedModelName',
-    'speculativeModel', 'numDraftTokens', 'useBundledDflash2', 'smelt', 'smeltExperts',
+    'speculativeModel', 'numDraftTokens', 'useBundledDflash2', 'useBundledDspark', 'smelt', 'smeltExperts',
     'nativeMtpMode',
     'omniBackend',
     'flashMoe', 'flashMoeSlotBank', 'flashMoePrefetch', 'flashMoeIoSplit',
@@ -5253,9 +5254,15 @@ export class SessionManager extends EventEmitter {
       console.log(`[SESSION] Using the DFlash2 drafter bundled with the model: ${bundledDflash2Drafter}`)
     }
     const dflash2Speculative = isDflash2DrafterSelection(effectiveSpeculativeModel)
+    // A DSpark drafter shipped inside the bundle (<bundle>/dspark: MiniCPM-V-4.7, Naive N0.5) is used by default
+    // (useBundledDspark). The engine runs it on the single-request lane, so batching stays off while it is active;
+    // an explicit draft model or a DFlash2 drafter takes precedence.
+    const bundledDsparkDrafter = dsv4Active ? null : findBundledDsparkDrafter(config.modelPath)
+    const dsparkActive = !!bundledDsparkDrafter && (config as any).useBundledDspark !== false &&
+      !config.speculativeModel && !dflash2Speculative
     const cacheStackActive = dsv4Active
       ? true
-      : dflash2Speculative
+      : dflash2Speculative || dsparkActive
         ? false
         : config.continuousBatching !== false
     if (cacheStackActive) {
@@ -5515,6 +5522,11 @@ export class SessionManager extends EventEmitter {
         findBundledDflash2Drafter(config.modelPath)) {
       // The engine also defaults to a bundled drafter; honour the user's "off".
       args.push('--no-bundled-dflash2')
+    }
+    if (bundledDsparkDrafter) {
+      // Explicit either way: the bundle's own speculative.default stamp may say off.
+      args.push('--dspark', dsparkActive ? 'on' : 'off')
+      if (dsparkActive) console.log(`[SESSION] Using the DSpark drafter bundled with the model: ${bundledDsparkDrafter}`)
     }
     if (compatibleExternalSpeculative) {
       args.push('--speculative-model', externalSpeculativeModel)

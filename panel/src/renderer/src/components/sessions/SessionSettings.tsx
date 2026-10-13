@@ -162,6 +162,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--cluster-secret',
   '--speculative-model',
   '--no-bundled-dflash2',
+  '--dspark',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',
@@ -250,6 +251,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--cluster-secret',
   '--speculative-model',
   '--no-bundled-dflash2',
+  '--dspark',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',
@@ -293,6 +295,7 @@ export function buildCommandPreview(
   detectedDflash2Path = '',
   hasBundledDrafter = false,
   explicitDflash2?: boolean,
+  bundledDspark = false,
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -391,9 +394,12 @@ export function buildCommandPreview(
   const dflash2Speculative = !dsv4Active && (config.speculativeModel
     ? (explicitDflash2 ?? /dflash2/i.test(config.speculativeModel))
     : !!detectedDflash2Path)
+  // A bundled DSpark drafter (<bundle>/dspark) runs on the single-request lane, on by default (sessions.ts).
+  const dsparkActive = !dsv4Active && bundledDspark && config.useBundledDspark !== false &&
+    !config.speculativeModel && !dflash2Speculative
   const cacheStackActive = dsv4Active
     ? true
-    : dflash2Speculative
+    : dflash2Speculative || dsparkActive
       ? false
       : config.continuousBatching !== false
   if (cacheStackActive) {
@@ -520,6 +526,9 @@ export function buildCommandPreview(
   if (!config.speculativeModel && config.useBundledDflash2 === false && hasBundledDrafter) {
     parts.push('--no-bundled-dflash2')
   }
+  if (bundledDspark && !dsv4Active) {
+    parts.push('--dspark', dsparkActive ? 'on' : 'off')
+  }
   if (compatibleExternalSpeculative) {
     parts.push('--speculative-model', effectiveSpeculativeModel)
     const numDraftTokens = finitePositiveInteger(config.numDraftTokens)
@@ -594,6 +603,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [previewMetadataState, setPreviewMetadataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
   const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null>(null)
   const [previewDrafters, setPreviewDrafters] = useState<Array<{ path: string; bundled?: boolean }>>([])
+  const [previewDspark, setPreviewDspark] = useState(false)
   const explicitDflash2 = useDflash2Selection(config.speculativeModel || '')
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
@@ -604,6 +614,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
     resetRequestRef.current += 1
     setDetectedConfig(null)
     setPreviewDrafters([])
+    setPreviewDspark(false)
     setPreviewMetadataState('loading')
     const load = async () => {
       const s = await window.api.sessions.get(sessionId)
@@ -632,13 +643,15 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         }
         // Load auto-detected config for preview resolution
         try {
-          const [det, drafters] = await Promise.all([
+          const [det, drafters, dspark] = await Promise.all([
             window.api.models.detectConfig(s.modelPath),
             window.api.models.dflash2Drafters(s.modelPath, false).catch(() => []),
+            window.api.models.dsparkDrafter ? window.api.models.dsparkDrafter(s.modelPath).catch(() => null) : null,
           ])
           if (active) {
             setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
             setPreviewDrafters(drafters)
+            setPreviewDspark(!!dspark)
             setDetectedConfig(det && det.family !== 'unknown' ? det : null)
             setPreviewMetadataState(det && det.family !== 'unknown' ? 'ready' : 'unavailable')
           }
@@ -899,7 +912,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
                     <p role="status" className="mb-2 text-xs text-muted-foreground">{t('sessions.settings.cliMetadataUnavailable')}</p>
                   )}
                   <pre className="p-3 bg-background/80 text-primary text-xs font-mono rounded-lg overflow-x-auto whitespace-pre-wrap">
-                    {buildCommandPreview(session.modelPath, config, detectedConfig, previewDrafters.find(d => config.speculativeModel ? d.path === config.speculativeModel : d.bundled && config.useBundledDflash2 !== false)?.path || '', previewDrafters.some(d => d.bundled), explicitDflash2)}
+                    {buildCommandPreview(session.modelPath, config, detectedConfig, previewDrafters.find(d => config.speculativeModel ? d.path === config.speculativeModel : d.bundled && config.useBundledDflash2 !== false)?.path || '', previewDrafters.some(d => d.bundled), explicitDflash2, previewDspark)}
                   </pre>
                 </>
               )}

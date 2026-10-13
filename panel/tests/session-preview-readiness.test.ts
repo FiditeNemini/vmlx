@@ -17,6 +17,8 @@ function loadFixture(config: string, detectConfig: () => Promise<unknown>) {
       dflash2Drafters: async () => [],
     } } },
     setPreviewDrafters: () => {},
+    // The loader also checks the bundle for a DSpark drafter (<bundle>/dspark) for the preview.
+    setPreviewDspark: () => {},
     DEFAULT_CONFIG: { port: 8000 }, setConfig,
     setSession: (value: any) => { state.session = value },
     setDirty: (value: boolean) => { state.dirty = value },

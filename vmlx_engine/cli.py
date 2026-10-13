@@ -2916,6 +2916,10 @@ def serve_command(args):
         if ignored:
             print(f"  NOTE: These settings require --continuous-batching and will be ignored: {', '.join(ignored)}")
 
+    # --dspark on/off overrides the bundle's speculative.default stamp (read by models/mllm._load_dspark_runtime).
+    _dspark_mode = getattr(args, "dspark", "auto")
+    if _dspark_mode in ("on", "off"):
+        os.environ["VMLX_DSPARK"] = "1" if _dspark_mode == "on" else "0"
     # DSpark (a drafter shipped inside the bundle, loaded with the model): its multi-turn session tier lives in the
     # same managed SSD pool and budget as the block cache; off with --disable-block-disk-cache (dspark/session.py).
     try:
@@ -4516,6 +4520,14 @@ Examples:
         default=False,
         help="Ignore a DFlash2 drafter shipped inside the model bundle "
              "(<bundle>/dflash2) and use the bundle's native MTP instead.",
+    )
+    serve_parser.add_argument(
+        "--dspark",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="DSpark drafter shipped inside the bundle (<bundle>/dspark, MiniCPM-V-4.7 / Naive N0.5): auto = the "
+             "bundle's speculative.default stamp, on = use it, off = AR only. Runs on the single-request lane "
+             "(--no-continuous-batching); text requests only.",
     )
     serve_parser.add_argument(
         "--num-draft-tokens",

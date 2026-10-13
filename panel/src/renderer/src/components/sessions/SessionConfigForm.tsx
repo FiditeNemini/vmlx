@@ -86,6 +86,8 @@ export interface SessionConfig {
   speculativeModel: string
   /** Use a DFlash2 drafter shipped inside the model bundle when present. */
   useBundledDflash2?: boolean
+  /** Use a DSpark drafter shipped inside the model bundle (<bundle>/dspark) when present. */
+  useBundledDspark?: boolean
   numDraftTokens: number
   nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'
   smelt: boolean
@@ -189,6 +191,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   servedModelName: '',
   speculativeModel: '',
   useBundledDflash2: true,
+  useBundledDspark: true,
   numDraftTokens: 3,
   nativeMtpMode: undefined,
   smelt: false,
@@ -453,15 +456,29 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     return () => { alive = false }
   }, [bundlePath, qwen38Dense27b, isImage])
   const bundledDflash2 = dflash2Drafters.find(d => d.bundled) || null
+  // DSpark drafter shipped inside the bundle (<bundle>/dspark: MiniCPM-V-4.7, Naive N0.5): on by default.
+  const [bundledDspark, setBundledDspark] = useState<{ name: string; path: string } | null>(null)
+  useEffect(() => {
+    setBundledDspark(null)
+    if (isImage || !bundlePath) return
+    let alive = true
+    const api = (window as any).api?.models
+    if (typeof api?.dsparkDrafter !== 'function') return
+    api.dsparkDrafter(bundlePath)
+      .then((found: unknown) => { if (alive) setBundledDspark((found as { name: string; path: string } | null) || null) })
+      .catch(() => { /* advisory only */ })
+    return () => { alive = false }
+  }, [bundlePath, isImage])
   const bundledDflash2Active = !!bundledDflash2 && config.useBundledDflash2 !== false && !config.speculativeModel
   const effectiveDraftModel = config.speculativeModel || (bundledDflash2Active ? bundledDflash2!.path : '')
   const selectedDflash2 = useDflash2Selection(effectiveDraftModel)
   const dflash2Speculative = selectedDflash2 || (!config.speculativeModel && bundledDflash2Active)
+  const dsparkActive = !!bundledDspark && config.useBundledDspark !== false && !config.speculativeModel && !dflash2Speculative
   const hybridCacheActive =
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'rotating_kv'
-  const effectiveContinuousBatching = dsv4Active ? true : dflash2Speculative ? false : config.continuousBatching
+  const effectiveContinuousBatching = dsv4Active ? true : dflash2Speculative || dsparkActive ? false : config.continuousBatching
   const batchingOff = !effectiveContinuousBatching
   const effectivelyNoBatching = batchingOff
   const effectivePrefixCacheEnabled = config.enablePrefixCache
@@ -1841,6 +1858,16 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         <Field label={t('sessions.config.draftModel')} tooltip={t('sessions.config.draftModelTooltip')}>
           <input type="text" value={config.speculativeModel} onChange={e => onChange('speculativeModel', e.target.value)} placeholder={t('sessions.config.specModelPlaceholder')} className="cfg-input" disabled={dsv4Active || (!multimodalActive && config.continuousBatching)} />
         </Field>
+        {bundledDspark && (
+          <div data-vmlx-control="use-bundled-dspark">
+            <CheckField
+              label={t('sessions.config.useBundledDspark', { name: bundledDspark.name })}
+              tooltip={t('sessions.config.useBundledDsparkTooltip')}
+              checked={config.useBundledDspark !== false}
+              onChange={v => onChange('useBundledDspark', v)}
+            />
+          </div>
+        )}
         {bundledDflash2 && (
           <CheckField
             label={t('sessions.config.useBundledDflash2', { name: bundledDflash2.name })}

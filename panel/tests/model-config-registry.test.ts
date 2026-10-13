@@ -6,6 +6,7 @@ import { loadLocalModelPaths } from './helpers/local-model-paths'
 import { detectModelConfigFromDir } from '../src/main/model-config-registry'
 import { resolveEffectiveToolParser } from '../src/shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
+import { isRuntimeVideoCapable } from '../src/shared/videoCapableFamilies'
 
 const createdDirs: string[] = []
 
@@ -301,6 +302,22 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       isMultimodal: true,
     })
     expect(detectModelConfigFromDir(dir).forceTextOnly).toBeUndefined()
+  })
+
+  it.each([true, false])('reads MiniCPM boolean-map video capabilities before startup (video=%s)', (video) => {
+    const dir = makeModelDir({ model_type: 'minicpmv4_7', vision_config: {} }, {
+      format: 'jang_v2',
+      capabilities: {
+        modalities: { text: true, vision: true, video, audio: false },
+        has_vision: true, has_video: video, has_audio: false,
+      },
+    })
+    const detected = detectModelConfigFromDir(dir)
+    expect(detected.runtimeModalities).toEqual(video ? ['text', 'vision', 'video'] : ['text', 'vision'])
+    expect(isRuntimeVideoCapable({
+      normalizedFamily: detected.family,
+      runtimeModalities: detected.runtimeModalities,
+    })).toBe(video)
   })
 
   it.each([true, false])('reads GLM video capability booleans without a modalities array (video=%s)', (video) => {

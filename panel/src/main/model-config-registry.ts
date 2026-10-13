@@ -1723,6 +1723,20 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
   }
 }
 
+function declaredJangModalities(modalities: unknown): string[] {
+  if (Array.isArray(modalities)) {
+    return modalities.map(item => String(item || '').toLowerCase()).filter(Boolean)
+  }
+  // JANG producers use both a list and a boolean map. A false capability
+  // must stay disabled, especially when selecting video controls pre-load.
+  if (modalities && typeof modalities === 'object') {
+    return Object.entries(modalities)
+      .filter(([, enabled]) => enabled === true)
+      .map(([name]) => name.toLowerCase())
+  }
+  return []
+}
+
 function applyJangCapabilities(
   detected: DetectedConfig,
   jangCfg: any,
@@ -1756,13 +1770,11 @@ function applyJangCapabilities(
   }
   if (!caps || typeof caps !== 'object') return next
 
-  const runtimeModalities = Array.isArray(caps.modalities)
-    ? caps.modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
+  const declaredModalities = declaredJangModalities(caps.modalities)
+  const runtimeModalities = declaredModalities.length > 0
+    ? declaredModalities
     : next.family === 'glm5-next' && [caps.has_vision, caps.has_video].some(value => typeof value === 'boolean')
       ? ['text', ...(caps.has_vision === true ? ['vision'] : []), ...(caps.has_video === true ? ['video'] : [])]
-    : next.family === 'mimo_v2' && jangCfg.weight_format === 'mixed_affine_mxfp4'
-      && caps.modalities && typeof caps.modalities === 'object'
-      ? Object.keys(caps.modalities).filter(key => caps.modalities[key] === true)
     : []
   const unwiredModalities = Array.isArray(caps.unwired_modalities)
     ? caps.unwired_modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
@@ -1940,9 +1952,7 @@ function resolveJangMultimodal(jangCfg: any, parsedConfig: any, modelPath: strin
       && existsSync(join(modelPath, 'audio_tokenizer', 'model.safetensors'))
     return visual || audio
   }
-  const capsModalities = Array.isArray(jangCfg?.capabilities?.modalities)
-    ? jangCfg.capabilities.modalities.map((item: any) => String(item || '').toLowerCase()).filter(Boolean)
-    : []
+  const capsModalities = declaredJangModalities(jangCfg?.capabilities?.modalities)
   if (
     capsModalities.length > 0 &&
     !capsModalities.some((item: string) =>

@@ -90,7 +90,7 @@ class ARFallback:
     burst = 8
     probe_every = 24
 
-    # Width choice from MEASURED round costs (VMLX_DSPARK_MEASURED_WIDTH=0: the static choose_width model). The static
+    # Width choice from MEASURED round costs (opt-in VMLX_DSPARK_MEASURED_WIDTH=1; default the static choose_width model). The static
     # model prices a round at 1 + 0.12 * (T - 1) decode steps and ignores the drafter; measured on the 35B-A3B (600-token
     # context) a round is drafter 5.4 ms (~0.53 AR step) + verify 11 / 16 / 18-21 / 26 ms at T = 1 / 2 / 4 / 7 rows
     # (~0.5 AR step for the second row, ~0.2 for each later one): the static model makes 7-row verifies look nearly
@@ -144,8 +144,11 @@ class ARFallback:
     def choose_width(self, conf: Sequence[float], max_draft: int, cost_per_row: float) -> int:
         """Draft count k maximizing E[tokens | k] / measured round seconds(k + 1 rows); the static model until a
         timing exists."""
-        if self.round_seconds(2) is None or os.environ.get("VMLX_DSPARK_MEASURED_WIDTH", "1").strip().lower() in \
-                {"0", "false", "off", "no"}:
+        # Opt-in (VMLX_DSPARK_MEASURED_WIDTH=1): the sustained multi-turn A/B on the 35B (ab-1013-0135, 2 reps per arm,
+        # 5-16k context) measured static x0.979 / x1.005 of AR vs measured x0.967 / x0.986 (greedy / thinking T1.0):
+        # no gain, so the static model stays the default.
+        if self.round_seconds(2) is None or os.environ.get("VMLX_DSPARK_MEASURED_WIDTH", "0").strip().lower() not in \
+                {"1", "true", "on", "yes"}:
             return choose_width(conf, max_draft, cost_per_row)
         best, best_k, run, expected = 0.0, 1, 1.0, 1.0
         for k in range(1, min(max_draft, len(conf)) + 1):

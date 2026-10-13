@@ -850,9 +850,10 @@ def test_real_drafter_keeps_greedy_equal_to_ar(tmp_path, monkeypatch, candidates
 
 
 # ------------------------------------------------------------- width choice from measured round costs
-def test_measured_round_costs_pick_a_narrower_width_than_the_static_model():
+def test_measured_round_costs_pick_a_narrower_width_than_the_static_model(monkeypatch):
     from vmlx_engine.dspark.generate import ARFallback, choose_width
 
+    monkeypatch.setenv("VMLX_DSPARK_MEASURED_WIDTH", "1")
     conf = [0.8] * 6
     policy = ARFallback()
     assert policy.round_seconds(2) is None                         # nothing measured: the static model decides
@@ -864,12 +865,10 @@ def test_measured_round_costs_pick_a_narrower_width_than_the_static_model():
     policy.record_draft(4, 0.045, rows=7)
     assert abs(policy.round_seconds(4) - 0.030) < 1e-12
     assert policy.choose_width(conf, 6, 0.12) == 3                 # E 2.95 / 30 ms beats 1.8 / 20 ms and 3.95 / 45 ms
-    import os
-    os.environ["VMLX_DSPARK_MEASURED_WIDTH"] = "0"
-    try:
-        assert policy.choose_width(conf, 6, 0.12) == 5             # A/B switch: the static model
-    finally:
-        del os.environ["VMLX_DSPARK_MEASURED_WIDTH"]
+    monkeypatch.setenv("VMLX_DSPARK_MEASURED_WIDTH", "0")
+    assert policy.choose_width(conf, 6, 0.12) == 5                 # off: the static model
+    monkeypatch.delenv("VMLX_DSPARK_MEASURED_WIDTH")
+    assert policy.choose_width(conf, 6, 0.12) == 5                 # unset = static (the default)
 
 
 def test_measured_width_choice_keeps_greedy_equal_to_ar(tmp_path):
@@ -898,9 +897,10 @@ def test_pipelined_rounds_keep_greedy_equal_to_ar(tmp_path, monkeypatch, moe):
     assert real == reference
 
 
-def test_planned_width_follows_the_acceptance_history():
+def test_planned_width_follows_the_acceptance_history(monkeypatch):
     from vmlx_engine.dspark.generate import ARFallback
 
+    monkeypatch.setenv("VMLX_DSPARK_MEASURED_WIDTH", "1")
     policy = ARFallback()
     policy.ar_seconds = 0.01
     policy.record_draft(3, 0.020, rows=2)

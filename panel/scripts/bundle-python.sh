@@ -366,9 +366,11 @@ echo "==> Installing MLX $MLX_VERSION wheels for $MLX_WHEEL_PLATFORM..."
 "$PYTHON" -m pip install "$WHEELHOUSE"/mlx-"$MLX_VERSION"-*.whl "$WHEELHOUSE"/mlx_metal-"$MLX_VERSION"-*.whl
 
 echo "==> Installing dependencies..."
+# Match the qualified native MiniCPM-V-4.7 processor environment. The former
+# <5.13 ceiling silently selected a text-only fallback for its media requests.
 "$PYTHON" -m pip install --only-binary=:all: \
   "mlx==$MLX_VERSION" "mlx-lm==$MLX_LM_VERSION" "mlx-vlm==$MLX_VLM_VERSION" \
-  "transformers>=4.40.0,<5.13" "tokenizers>=0.19.0" "huggingface-hub==$HUGGINGFACE_HUB_VERSION" \
+  "transformers==5.19.0" "tokenizers==0.23.2" "huggingface-hub==$HUGGINGFACE_HUB_VERSION" \
   "numpy>=1.24.0" "pillow>=10.0.0" \
   "opencv-python==$OPENCV_VERSION" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \

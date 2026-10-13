@@ -58,7 +58,7 @@ dependencies = [
     # and crashed Qwen3.8 prefill. The bundle pins 0.5.0 (bundle-python.sh).
     "mlx-vlm>=0.5.0,<0.6; sys_platform == 'darwin'",
     "mlx-vlm>=0.4.3; sys_platform != 'darwin'",
-    "transformers>=4.40.0",
+    "transformers>=5.18.0",
     "tokenizers>=0.19.0",
     # Kimi K2.6 tokenizer remote code imports tiktoken during chat-template
     # rendering; this is needed for core text/tool/reasoning paths, not only

@@ -801,6 +801,18 @@ except Exception as e:
     print(f"  FAIL mlx_vlm remap check: {type(e).__name__}: {e}")
     sys.exit(1)
 
+# MiniCPM-V-4.7 text can load through tokenizer fallback even if its native
+# processor is missing. Qualify the actual media processor before signing.
+try:
+    from transformers import MiniCPMV4_7Processor
+    from vmlx_engine.models.minicpmv4_7.processing import MiniCPMV47ProcessorLoader
+    assert callable(MiniCPMV4_7Processor.from_pretrained)
+    assert callable(MiniCPMV47ProcessorLoader.from_pretrained)
+    print("  ok   MiniCPM-V-4.7 native media processor available")
+except Exception as e:
+    print(f"  FAIL MiniCPM-V-4.7 native media processor: {type(e).__name__}: {e}")
+    sys.exit(1)
+
 print()
 print("bundled-python: all critical imports ok")
 PYEOF

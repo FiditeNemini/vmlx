@@ -305,7 +305,7 @@ MLX_LM_VERSION="0.31.3"
 MLX_VLM_VERSION="0.5.0"
 MFLUX_VERSION="0.19.0"
 OPENCV_VERSION="4.13.0.92"
-MLX_AUDIO_VERSION="0.4.6"
+MLX_AUDIO_VERSION="0.5.8"
 # Keep the downloader/tokenizer dependency on the version qualified with the
 # bundled runtime. A lower bound silently upgraded it during a source-only
 # rebuild, invalidating the retained dependency comparison.

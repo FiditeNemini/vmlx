@@ -568,7 +568,7 @@ def test_bundle_python_uses_one_pinned_binary_opencv_distribution():
     pyproject = Path("pyproject.toml").read_text()
 
     assert 'OPENCV_VERSION="4.13.0.92"' in bundler
-    assert 'MLX_AUDIO_VERSION="0.4.6"' in bundler
+    assert 'MLX_AUDIO_VERSION="0.5.8"' in bundler
     assert '"opencv-python==$OPENCV_VERSION"' in bundler
     assert '"mlx-audio==$MLX_AUDIO_VERSION"' in bundler
     assert "opencv-python-headless" not in bundler

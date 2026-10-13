@@ -600,6 +600,10 @@ app.on('before-quit', async (e) => {
       }
     }
   } catch (_) { /* non-fatal */ }
+  // Captured so a cancelled quit (an engine that would not stop) can bring these back.
+  const gatewayWasRunning = apiGateway.running
+  const gatewayPort = apiGateway.activePort
+  const gatewayHost = apiGateway.activeHost
   try {
     stopMemoryEnforcer()
     destroyTray()
@@ -615,6 +619,14 @@ app.on('before-quit', async (e) => {
     console.error('[QUIT] Error stopping processes:', err)
     isQuitting = false
     sessionManager.startGlobalMonitor()
+    // The app stays open, so restore everything the quit already stopped.
+    if (db.getSetting('tray_enabled') !== '0') createTray(processManager, () => mainWindow)
+    startMemoryEnforcer(processManager)
+    if (gatewayWasRunning) {
+      apiGateway.start(gatewayPort, gatewayHost).catch(restartErr => {
+        console.error('[gateway] Failed to restart after a cancelled quit:', restartErr?.message || restartErr)
+      })
+    }
     dialog.showErrorBox(tMain('main.dialog.slowStopTitle'), String(err))
     return
   }

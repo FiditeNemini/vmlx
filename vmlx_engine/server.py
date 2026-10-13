@@ -13913,6 +13913,22 @@ def _health_status_value() -> str:
     return "healthy" if _engine is not None else "no_model"
 
 
+def _loaded_dspark_health_status(engine) -> dict | None:
+    """Report the loaded VLM drafter, not the unrelated generic draft registry."""
+    if engine is None or getattr(engine, "_loaded", False) is not True:
+        return None
+    runtime = getattr(getattr(engine, "_model", None), "_dspark", None)
+    if not isinstance(runtime, dict) or runtime.get("drafter") is None or runtime.get("target") is None:
+        return None
+    return {
+        "enabled": True,
+        "method": "dspark",
+        "draft_model_loaded": True,
+        "num_draft_tokens": runtime.get("max_draft"),
+        "request_dependent": True,
+    }
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -14118,6 +14134,10 @@ async def health():
         spec_info = get_spec_stats()
     except ImportError:
         pass
+
+    dspark_info = _loaded_dspark_health_status(_engine)
+    if dspark_info is not None:
+        spec_info = {"speculative_decoding": dspark_info}
 
     if _model_type == "image":
         result = {

@@ -31,6 +31,24 @@ def _run(coro):
 class TestHealthEndpoint:
     """Tests for the health() async handler."""
 
+    def test_dspark_status_requires_a_loaded_target_and_drafter(self):
+        from vmlx_engine.server import _loaded_dspark_health_status
+
+        runtime = {"target": object(), "drafter": object(), "max_draft": 6}
+        engine = SimpleNamespace(_loaded=True, _model=SimpleNamespace(_dspark=runtime))
+        assert _loaded_dspark_health_status(engine) == {
+            "enabled": True, "method": "dspark", "draft_model_loaded": True,
+            "num_draft_tokens": 6, "request_dependent": True,
+        }
+        engine._loaded = False
+        assert _loaded_dspark_health_status(engine) is None
+        engine._loaded = True
+        runtime["drafter"] = None
+        assert _loaded_dspark_health_status(engine) is None
+        engine._model = SimpleNamespace()
+        assert _loaded_dspark_health_status(engine) is None
+        assert _loaded_dspark_health_status(None) is None
+
     def test_image_health_does_not_advertise_text_cache_or_sampling(self, monkeypatch, tmp_path):
         from vmlx_engine import server
         monkeypatch.setattr(server, "_model_type", "image")

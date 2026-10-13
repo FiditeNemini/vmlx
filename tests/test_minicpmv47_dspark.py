@@ -800,3 +800,49 @@ def test_salted_media_keys_follow_the_media_identity():
     assert a[:2] == b[:2] == tokens[:2] and a[5:] == b[5:] == tokens[5:]       # text positions keep their ids
     assert all(a[i] != b[i] for i in (2, 3, 4))                                # other media: diverge at the first
     assert len(set(a[2:5])) == 3 and all(k >= 0x80000000 for k in a[2:5])      # per position, above any vocab id
+
+
+# ------------------------------------------------------------- candidate-only Markov drafting
+def _real_drafter(tmp_path, hidden=16):
+    return load_drafter(_save_drafter(tmp_path / "real", _drafter_config(hidden=hidden)), bits=16)
+
+
+def _draft_inputs(drafter, target, seed=2):
+    block = mx.random.normal((1, drafter.block, target.lm_head.weight.shape[-1] if hasattr(target.lm_head, "weight")
+                              else 16), key=mx.random.key(seed)).astype(mx.bfloat16)
+    return drafter(block), mx.array([17])
+
+
+def test_candidate_markov_equals_full_chain_when_the_bias_cannot_reorder(tmp_path):
+    target = _tiny_target()
+    drafter = _real_drafter(tmp_path)
+    hidden, anchor = _draft_inputs(drafter, target)
+    w2 = drafter.markov_head.markov_w2
+    w2.weight = mx.zeros_like(w2.weight)                    # no Markov bias: argmax of the base logits
+    full, full_conf = drafter.draft(hidden, anchor, target.lm_head, 7, candidates=0)
+    cand, cand_conf = drafter.draft(hidden, anchor, target.lm_head, 7, candidates=4)
+    assert full.tolist() == cand.tolist()
+    assert mx.allclose(full_conf, cand_conf, atol=1e-5).item()
+
+
+def test_candidate_markov_samples_within_the_candidates(tmp_path):
+    from vmlx_engine.sampling import make_sampler
+
+    target = _tiny_target()
+    drafter = _real_drafter(tmp_path)
+    hidden, anchor = _draft_inputs(drafter, target, seed=3)
+    logits = target.lm_head(hidden[:, :7])[0].astype(mx.float32)
+    top = mx.argpartition(-logits, kth=5, axis=-1)[:, :6]
+    mx.random.seed(0)
+    toks, _ = drafter.draft(hidden, anchor, target.lm_head, 7, sampler=make_sampler(temp=1.0), candidates=6)
+    for i, t in enumerate(toks.tolist()):
+        assert t in top[i].tolist()
+
+
+@pytest.mark.parametrize("candidates", ["0", "32"])
+def test_real_drafter_keeps_greedy_equal_to_ar(tmp_path, monkeypatch, candidates):
+    monkeypatch.setenv("VMLX_DSPARK_MARKOV_CANDIDATES", candidates)
+    target = _tiny_target()
+    reference = generate_ar(target, PROMPT, 24, set())
+    drafter = _real_drafter(tmp_path)
+    assert generate_dspark(target, drafter, PROMPT, 24, set()) == reference

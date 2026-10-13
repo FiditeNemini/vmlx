@@ -191,12 +191,23 @@ class DSparkDrafter(nn.Module):
             h = h + layer.mlp.down_proj(nn.silu(layer.mlp.gate_proj(y)) * layer.mlp.up_proj(y))
         return self.norm(h)
 
-    def draft(self, block_hidden: mx.array, anchor: mx.array, lm_head, count: int, sampler=None):
+    def draft(self, block_hidden: mx.array, anchor: mx.array, lm_head, count: int, sampler=None,
+              candidates: Optional[int] = None):
         """Sequential Markov chain over block positions 0..count-1.
 
         Returns (tokens (count,), confidences (count,) float32). With
         ``sampler`` (log-prob -> token) the chain samples instead of argmax.
+
+        ``candidates`` K (default ``VMLX_DSPARK_MARKOV_CANDIDATES``; 0 / unset = full vocabulary): the Markov rescoring
+        runs on the top-K base-logit candidates of each position only (Naive N0.5 prototype ``draft_cand``, 2026-10-09).
+        The full-vocab bias is one (rank x vocab) matvec per drafted position, sequentially -- on MiniCPM-V-4.7 a
+        256 x 248,144 bf16 matrix, 127 MB per position, ~0.9 GB per 7-token draft -- and becomes two K-row gathers.
+        It differs from the full chain only when the bias would promote a token outside the base top-K. Drafts are
+        always verified by the target, so this changes acceptance, never the output.
         """
+        k = _markov_candidates() if candidates is None else int(candidates)
+        if 0 < k < int(self.markov_head.markov_w2.weight.shape[0]):
+            return self._draft_candidates(block_hidden, anchor, lm_head, count, sampler, k)
         logits = lm_head(block_hidden[:, :count, :])[0].astype(mx.float32)
         w1 = self.markov_head.markov_w1
         w2 = self.markov_head.markov_w2
@@ -218,6 +229,39 @@ class DSparkDrafter(nn.Module):
             tokens.append(tok)
             prev = tok
         return mx.concatenate(tokens), mx.stack(confs)
+
+
+    def _draft_candidates(self, block_hidden, anchor, lm_head, count: int, sampler, k: int):
+        logits = lm_head(block_hidden[:, :count, :])[0].astype(mx.float32)          # (count, V)
+        cand = mx.argpartition(-logits, kth=k - 1, axis=-1)[:, :k]                   # (count, K)
+        base = mx.take_along_axis(logits, cand, axis=-1)                              # (count, K)
+        w1 = self.markov_head.markov_w1.weight                                        # (V, r)
+        w2 = self.markov_head.markov_w2.weight                                        # (draft V, r)
+        proj = self.confidence_head.proj
+        conf_w = proj.weight.astype(mx.float32)
+        conf_b = proj.bias.astype(mx.float32)
+        prev = anchor.reshape(())
+        tokens, confs = [], []
+        for i in range(count):
+            lat = w1[prev].astype(mx.float32)                                         # (r,)
+            row = base[i] + w2[cand[i]].astype(mx.float32) @ lat                      # (K,)
+            feat = mx.concatenate([block_hidden[0, i].astype(mx.float32), lat])
+            confs.append(mx.sigmoid(feat @ conf_w[0] + conf_b[0]))
+            if sampler is None:
+                pick = mx.argmax(row)
+            else:
+                pick = sampler((row - mx.logsumexp(row))[None]).reshape(())
+            tok = cand[i][pick]
+            tokens.append(tok.reshape(1))
+            prev = tok
+        return mx.concatenate(tokens), mx.stack(confs)
+
+
+def _markov_candidates() -> int:
+    try:
+        return max(0, int(os.environ.get("VMLX_DSPARK_MARKOV_CANDIDATES", "0")))
+    except ValueError:
+        return 0
 
 
 QUANT_SKIP = ("markov_head", "confidence_head")

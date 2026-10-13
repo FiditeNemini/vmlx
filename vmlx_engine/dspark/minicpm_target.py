@@ -153,6 +153,12 @@ class MiniCPMDSparkTarget:
             feats.append(f)
         return logits[0, -1], (mx.concatenate(feats, axis=1) if feats else None)
 
+    def ar_step(self, token: mx.array, cache, taps: Sequence[int]):
+        """One AR step that also returns the tap features (DSpark's AR fallback keeps the drafter context complete).
+        The stock one-row forward (the prefill path's last-token call); bit-equal to ``decode`` (tests)."""
+        logits, feats = self._stock(token.reshape(1, 1), cache, taps, logits=True)
+        return logits[0, -1], feats
+
     def decode(self, token: mx.array, cache):
         """One AR step through the served language-model call (reference path)."""
         return self.lm(token.reshape(1, 1), cache=cache).logits[0, -1]

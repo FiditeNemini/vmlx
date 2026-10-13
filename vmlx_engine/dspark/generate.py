@@ -28,6 +28,7 @@ class DSparkStats:
     rounds: int = 0
     drafted: int = 0
     accepted: int = 0
+    ar_tokens: int = 0
     tokens: int = 0
     prefill_s: float = 0.0
     decode_s: float = 0.0
@@ -35,7 +36,7 @@ class DSparkStats:
 
     @property
     def tokens_per_round(self) -> float:
-        return (self.tokens - 1) / self.rounds if self.rounds else 0.0
+        return (self.tokens - 1 - self.ar_tokens) / self.rounds if self.rounds else 0.0
 
     @property
     def acceptance(self) -> float:
@@ -43,7 +44,7 @@ class DSparkStats:
 
     def as_dict(self) -> dict:
         return {
-            "rounds": self.rounds, "drafted": self.drafted, "accepted": self.accepted,
+            "rounds": self.rounds, "drafted": self.drafted, "accepted": self.accepted, "ar_tokens": self.ar_tokens,
             "tokens": self.tokens, "tokens_per_round": round(self.tokens_per_round, 3),
             "acceptance": round(self.acceptance, 4), "prefill_s": round(self.prefill_s, 3),
             "decode_s": round(self.decode_s, 3),
@@ -69,6 +70,61 @@ def choose_width(conf: Sequence[float], max_draft: int, cost_per_row: float = 0.
     return best_k
 
 
+class ARFallback:
+    """When to stop drafting (the DFlash2 lane's AdaptiveSpec policy, measured costs only).
+
+    A draft round costs the drafter (fixed, ~5.4 ms on the 35B) plus a verify whose sparse-MoE cost grows with width,
+    and pays only when enough drafts are accepted: on low-acceptance text (multilingual, thinking at T1.0) DSpark ran
+    x0.62-0.86 of AR on the 35B even after the stock-block verify. The loop times every draft round and every AR step
+    (synced wall time, EMA); when an AR step's measured rate beats the recent draft-round rate by ``margin`` it runs an
+    AR burst of ``burst`` tokens, and every ``probe_every`` AR tokens one draft round re-measures the text. The first
+    action is a draft round; the second is one AR step to seed its cost. Exactness is unaffected: AR steps and verify
+    rows both equal decode steps; only the schedule changes.
+    """
+
+    alpha = 0.3
+    margin = 0.05
+    burst = 8
+    probe_every = 24
+
+    def __init__(self):
+        self.draft_rate: Optional[float] = None     # committed tokens per second of draft rounds (EMA)
+        self.ar_seconds: Optional[float] = None     # seconds per AR step (EMA)
+        self.ar_left = 0
+        self.since_probe = 0
+        self.rounds = 0
+        self.probe = False                           # the next action must be a draft round
+
+    def next_is_ar(self) -> bool:
+        if self.probe:
+            self.probe = False
+            return False
+        if self.ar_left > 0:
+            return True
+        if self.rounds >= 1 and self.ar_seconds is None:
+            self.ar_left = 1                         # seed the AR cost once
+            return True
+        if self.draft_rate is not None and self.ar_seconds is not None \
+                and 1.0 / self.ar_seconds > self.draft_rate * (1.0 + self.margin):
+            self.ar_left = self.burst
+            return True
+        return False
+
+    def record_draft(self, tokens: int, seconds: float) -> None:
+        self.rounds += 1
+        self.since_probe = 0
+        rate = tokens / max(seconds, 1e-9)
+        self.draft_rate = rate if self.draft_rate is None else self.draft_rate + self.alpha * (rate - self.draft_rate)
+
+    def record_ar(self, seconds: float) -> None:
+        self.ar_seconds = seconds if self.ar_seconds is None else self.ar_seconds + self.alpha * (seconds - self.ar_seconds)
+        self.ar_left = max(0, self.ar_left - 1)
+        self.since_probe += 1
+        if self.since_probe >= self.probe_every:
+            self.ar_left = 0
+            self.probe = True                        # one draft round re-measures the text
+
+
 def _pick(logits: mx.array, sampler: Optional[Callable]) -> mx.array:
     if sampler is None:
         return mx.argmax(logits, axis=-1)
@@ -89,8 +145,10 @@ def iter_dspark(
     cost_per_row: float = 0.12,
     fixed_width: Optional[int] = None,
     stats: Optional[DSparkStats] = None,
+    ar_fallback: Optional[ARFallback] = None,
 ) -> Iterator[List[int]]:
-    """Yield the token ids committed by each round (prefill yields the first)."""
+    """Yield the token ids committed by each round (prefill yields the first). ``ar_fallback`` (a policy instance,
+    or None for draft rounds only) interleaves AR steps when drafting measures slower than plain decoding."""
     max_draft = max(1, min(int(max_draft), MAX_VERIFY_ROWS - 1, drafter.block))
     stats = stats if stats is not None else DSparkStats()
     taps = drafter.target_layer_ids
@@ -112,6 +170,24 @@ def iter_dspark(
     produced = 1
     while produced < max_new:
         room = max_new - produced
+        if ar_fallback is not None and fixed_width is None and ar_fallback.next_is_ar():
+            t_step = time.perf_counter()
+            logits, feats = target.ar_step(anchor, cache, taps)
+            pick = _pick(logits[None], sampler).reshape(1)
+            mx.eval(pick, feats)
+            drafter.add_context(feats)
+            anchor = pick.astype(anchor.dtype)
+            new = [int(pick.item())]
+            ar_fallback.record_ar(time.perf_counter() - t_step)
+            stats.ar_tokens += 1
+            produced += 1
+            stats.tokens = produced
+            stats.decode_s = time.perf_counter() - t1
+            yield new
+            if new[0] in eos:
+                return
+            continue
+        t_round = time.perf_counter()
         block = mx.concatenate(
             [target.embed_tokens(anchor.reshape(1, 1)),
              mx.broadcast_to(mask_embed, (1, drafter.block - 1, mask_embed.shape[-1]))], axis=1)
@@ -142,6 +218,8 @@ def iter_dspark(
         stats.rounds += 1
         stats.drafted += k
         stats.accepted += accepted
+        if ar_fallback is not None:
+            ar_fallback.record_draft(len(new), time.perf_counter() - t_round)
         stats.widths[k + 1] = stats.widths.get(k + 1, 0) + 1
         cut = next((i for i, t in enumerate(new) if t in eos), None)
         if cut is not None:

@@ -420,3 +420,76 @@ def test_moe_verify_routes_below_and_at_the_expert_sort_threshold(monkeypatch):
     same7, *_ = _verify_vs_decode(target, 7)
     same8, *_ = _verify_vs_decode(target, 8)
     assert all(same7) and all(same8)
+
+
+# ------------------------------------------------------------- AR fallback (measured-cost policy)
+def test_ar_step_equals_decode_and_returns_taps():
+    for make in (_tiny_target, _tiny_moe_target):
+        target = make()
+        taps = (0, 2, 3)
+        c1, c2 = target.make_cache(), target.make_cache()
+        target.prefill(mx.array([PROMPT]), c1, taps, None)
+        target.prefill(mx.array([PROMPT]), c2, taps, None)
+        for tok in (500, 501, 502):
+            a, feats = target.ar_step(mx.array([tok]), c1, taps)
+            b = target.decode(mx.array([tok]), c2)
+            assert bool(mx.array_equal(a, b).item()) and feats.shape[:2] == (1, 1)
+
+
+class _ScriptedFallback:
+    """Forces a fixed action sequence (True = AR step) to exercise every interleaving."""
+
+    def __init__(self, plan):
+        self.plan, self.i = list(plan), 0
+
+    def next_is_ar(self):
+        out = self.plan[self.i % len(self.plan)]
+        self.i += 1
+        return out
+
+    def record_draft(self, tokens, seconds):
+        pass
+
+    def record_ar(self, seconds):
+        pass
+
+
+@pytest.mark.parametrize("plan", [[False, True], [True, True, False], [False, False, True, True, True]])
+@pytest.mark.parametrize("moe", [False, True])
+def test_dspark_with_ar_steps_interleaved_equals_ar(tmp_path, plan, moe):
+    target = _tiny_moe_target() if moe else _tiny_target()
+    hidden = 64 if moe else 16
+    reference = generate_ar(target, PROMPT, 30, set())
+    src = _save_drafter(tmp_path / "d", _drafter_config(hidden=hidden))
+    drafter = _OracleDrafter(_drafter_config(hidden=hidden), reference, len(PROMPT))
+    drafter.load_weights(tree_flatten(load_drafter(src, bits=16).parameters()), strict=True)
+    stats = DSparkStats()
+    out = generate_dspark(target, drafter, PROMPT, 30, set(), stats=stats, ar_fallback=_ScriptedFallback(plan))
+    assert out == reference
+    assert stats.ar_tokens > 0 and stats.rounds > 0
+
+
+def test_ar_fallback_policy_switches_on_measured_rates():
+    from vmlx_engine.dspark.generate import ARFallback
+
+    p = ARFallback()
+    assert not p.next_is_ar()                     # first action: a draft round
+    p.record_draft(tokens=2, seconds=0.030)       # ~67 tok/s drafting
+    assert p.next_is_ar()                         # second action: one AR step seeds its cost
+    p.record_ar(0.010)                            # 100 tok/s AR > 67 * 1.05 -> burst
+    assert p.next_is_ar() and p.ar_left == p.burst
+    actions = []
+    for _ in range(p.probe_every + 2):            # AR steps until the probe is due, then exactly one draft round
+        is_ar = p.next_is_ar()
+        actions.append(is_ar)
+        if is_ar:
+            p.record_ar(0.010)
+        else:
+            p.record_draft(tokens=2, seconds=0.030)
+    assert False in actions, "the policy never re-probed drafting"
+    first_draft = actions.index(False)
+    assert all(actions[:first_draft]) and actions[first_draft + 1] is True   # back to AR after one probe round
+    q = ARFallback()
+    q.record_draft(tokens=6, seconds=0.030)       # 200 tok/s drafting
+    q.ar_seconds = 0.010
+    assert not q.next_is_ar()                     # drafting pays: stay on draft rounds

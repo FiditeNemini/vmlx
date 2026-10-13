@@ -6978,6 +6978,7 @@ class MLXMultimodalLM:
         from mlx_vlm.tokenizer_utils import make_streaming_detokenizer
 
         from ..dspark import DSparkStats, iter_dspark
+        from ..dspark.generate import ARFallback
         from ..utils.prefill_step import prefill_step_size
 
         runtime = self._dspark
@@ -7010,6 +7011,9 @@ class MLXMultimodalLM:
                 runtime["target"], runtime["drafter"], prompt_ids, int(max_tokens), eos,
                 prefill_step=step, sampler=sampler, max_draft=runtime["max_draft"],
                 cost_per_row=runtime["cost_per_row"], stats=stats,
+                # AR steps when drafting measures slower (low-acceptance text); VMLX_DSPARK_AR_FALLBACK=0 = A/B off.
+                ar_fallback=(None if os.environ.get("VMLX_DSPARK_AR_FALLBACK", "1").strip().lower() in
+                             {"0", "false", "off", "no"} else ARFallback()),
             ):
                 for token in chunk:
                     if token in eos:

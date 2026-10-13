@@ -982,3 +982,25 @@ def test_fast_verify_keeps_dspark_eligible_without_row_exact(monkeypatch):
     assert MLXMultimodalLM._dspark_eligible(SimpleNamespace(_dspark={"x": 1}), [], [], [], 0.0, {}) is False
     monkeypatch.setenv("VMLX_DSPARK_VERIFY", "fast")
     assert MLXMultimodalLM._dspark_eligible(SimpleNamespace(_dspark={"x": 1}), [], [], [], 0.0, {}) is True
+
+
+@pytest.mark.parametrize("window", ["0", "4"])
+def test_draft_window_keeps_greedy_equal_to_ar(tmp_path, monkeypatch, window):
+    monkeypatch.setenv("VMLX_DSPARK_DRAFT_WINDOW", window)
+    target = _tiny_target()
+    reference = generate_ar(target, PROMPT, 24, set())
+    assert generate_dspark(target, _real_drafter(tmp_path), PROMPT, 24, set()) == reference
+
+
+def test_draft_window_limits_the_attended_context(tmp_path, monkeypatch):
+    target = _tiny_target()
+    drafter = _real_drafter(tmp_path)
+    drafter.reset()
+    drafter.add_context(mx.random.normal((1, 40, drafter.fc.weight.shape[-1]), key=mx.random.key(3)).astype(mx.bfloat16))
+    block = mx.random.normal((1, drafter.block, 16), key=mx.random.key(4)).astype(mx.bfloat16)
+    full = drafter(block)
+    monkeypatch.setenv("VMLX_DSPARK_DRAFT_WINDOW", "40")
+    assert mx.array_equal(drafter(block), full)                  # window >= context: identical
+    monkeypatch.setenv("VMLX_DSPARK_DRAFT_WINDOW", "4")
+    assert not mx.array_equal(drafter(block), full)              # a real restriction
+    assert drafter.ctx_len == 40                                 # context untouched

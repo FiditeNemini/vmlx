@@ -173,6 +173,7 @@ class DSparkDrafter(nn.Module):
         h = block_embeds
         length = int(h.shape[1])
         start = self.ctx_len
+        window = _draft_window()
         for li, layer in enumerate(self.layers):
             attn = layer.self_attn
             x = layer.input_layernorm(h)
@@ -185,6 +186,10 @@ class DSparkDrafter(nn.Module):
             # off again below (the next add_context overwrites them), so no per-round copy of the context.
             k, v = self._ctx[li].update_and_fetch(k, v)
             self._ctx[li].trim(length)
+            if window and int(k.shape[2]) > window + length:
+                # Opt-in recent-context window (TensorFold's DSV4 drafter attends the last 128 rows): the draft
+                # block's attention reads O(window) instead of the whole conversation. Draft-side only.
+                k, v = k[:, :, -(window + length):], v[:, :, -(window + length):]
             o = mx.fast.scaled_dot_product_attention(q, k, v, scale=attn.head_dim**-0.5, mask=None)
             h = h + attn.o_proj(o.transpose(0, 2, 1, 3).reshape(1, length, -1))
             y = layer.post_attention_layernorm(h)
@@ -255,6 +260,15 @@ class DSparkDrafter(nn.Module):
             tokens.append(tok.reshape(1))
             prev = tok
         return mx.concatenate(tokens), mx.stack(confs)
+
+
+def _draft_window() -> int:
+    """VMLX_DSPARK_DRAFT_WINDOW=N: the draft block attends the last N context rows (0 / unset = all). Changes
+    acceptance only (drafts are verified); positions stay absolute."""
+    try:
+        return max(0, int(os.environ.get("VMLX_DSPARK_DRAFT_WINDOW", "0")))
+    except ValueError:
+        return 0
 
 
 def _markov_candidates() -> int:

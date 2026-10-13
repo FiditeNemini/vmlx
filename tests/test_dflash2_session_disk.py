@@ -309,3 +309,36 @@ def test_delta_pack_does_not_make_the_next_append_copy_the_live_buffer(tmp_path,
     finally:
         gate.set()
         ssd.store.close()
+
+
+@pytest.mark.parametrize("draft_delta", [True, False])
+def test_dspark_drafter_context_is_a_delta_and_restores_bit_identical(ssd, draft_delta):
+    """DSpark's drafter context (one append-only KVCache per drafter layer, token-aligned with the target) rides the
+    target's parent chain when the entry opts in (draft_delta); without it the context is stored whole (DFlash2)."""
+    from vmlx_engine.dflash2_session_disk import signature_for
+
+    system = [IM_START] + list(range(10, 200))                                # a long history...
+    turn = system + [IM_START, 7, 8, IM_END]                                  # ...and a short new turn
+    target, ctx = _target(len(system)), KVCache()
+    ctx.update_and_fetch(mx.random.normal((1, 2, len(system), 64)), mx.random.normal((1, 2, len(system), 64)))
+    r1 = ssd.put({"kind": "system", "tokens": system, "cache_len": len(system), "target_cache": target,
+                  "draft_cache": [ctx], "draft_delta": draft_delta})
+    n_more = len(turn) - len(system)
+    _grow(target, n_more)
+    ctx.update_and_fetch(mx.random.normal((1, 2, n_more, 64)), mx.random.normal((1, 2, n_more, 64)))
+    r2 = ssd.put({"kind": "turn", "tokens": turn, "cache_len": len(turn), "target_cache": target,
+                  "draft_cache": [ctx], "draft_delta": draft_delta, "ssd_parent": dict(r1.vmlx_ssd_ref, receipt=r1)})
+    assert ssd.flush() and r2.result()["durable"]
+    got = ssd.take_matching(turn + [IM_START, 7], im_start_id=IM_START, eos_ids=[IM_END],
+                            make_target=lambda: [KVCache(), ArraysCache(size=2)], make_draft=lambda: [KVCache()])
+    assert got is not None and got["draft_cache"] is not None
+    d = got["draft_cache"][0]
+    assert d.offset == len(turn)
+    for a, b in zip(ctx.state, d.state):
+        assert mx.array_equal(a, b)
+    size = ssd.store.paths(signature_for(turn))[0].stat().st_size
+    whole_ctx = 2 * len(turn) * 2 * 64 * 4                                    # keys + values, fp32
+    if draft_delta:
+        assert size < whole_ctx // 4                                          # only the new context rows
+    else:
+        assert size > whole_ctx

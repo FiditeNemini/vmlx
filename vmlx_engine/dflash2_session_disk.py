@@ -305,7 +305,12 @@ class DFlash2SessionSSD:
             try:
                 d_arrays: dict = {}
                 d_layers: list = []
-                _pack("d", entry["draft_cache"], d_arrays, d_layers)
+                # DSpark (entry["draft_delta"]): the drafter context is an append-only KVCache aligned with the
+                # target's token positions, so it is a delta against the same parent; without this every entry
+                # rewrote the whole context (35B: 10 KB/token, 140 MB of a 284 MB entry at 14k tokens). DFlash2
+                # drafter state (rotating window, a context that can lag the target by one row) stays whole.
+                d_base = int(parent["len"]) if parent is not None and entry.get("draft_delta") else 0
+                _pack("d", entry["draft_cache"], d_arrays, d_layers, d_base)
             except (AttributeError, TypeError):
                 d_layers = None
             if d_layers is not None:
@@ -439,12 +444,17 @@ class DFlash2SessionSSD:
                     self.stats["chain_misses"] += 1
                     continue
                 target = _unpack_chain("t", "target", make_target, links)
-                del links
                 if target is None:
                     continue
                 draft = None
                 if meta.get("draft") is not None:
-                    draft = _unpack("d", make_draft, arrays, meta["draft"])
+                    if any("delta" in info for info in meta["draft"]):
+                        draft = _unpack_chain("d", "draft", make_draft, links)     # DSpark drafter-context delta
+                        if draft is None:
+                            continue
+                    else:
+                        draft = _unpack("d", make_draft, arrays, meta["draft"])
+                del links
                 mx.eval([a for k, a in arrays.items() if not k.startswith("t")])
             except Exception:
                 logger.warning("DFlash2 SSD entry unreadable; treating as a miss", exc_info=True)

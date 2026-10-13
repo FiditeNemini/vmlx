@@ -131,6 +131,7 @@ def store(entry: dict, parent: Optional[dict] = None) -> Future:
     from ..glm_dflash2 import ssd_only_ram_release_enabled
 
     st = _store()
+    entry.setdefault("draft_delta", True)      # the drafter context is append-only and token-aligned: SSD delta
     ssd_only = SSD is not None and ssd_only_ram_release_enabled()
     if not ssd_only:
         st.put(entry)

@@ -490,7 +490,9 @@ _MULTIMODAL_RUNTIME_ONLY_MODEL_TYPES = frozenset({"minicpmv4_7"})
 
 def _multimodal_runtime_only(model_name: str) -> bool:
     try:
-        with open(os.path.join(model_name, "config.json")) as f:
+        # Match ordinary detection for cached Hub IDs as well as local paths.
+        # This resolver reads local caches only; it never downloads a model.
+        with open(os.path.join(resolve_to_local_path(model_name), "config.json")) as f:
             cfg = json.load(f)
     except Exception:
         return False

@@ -745,3 +745,12 @@ class TestResolveToLocalPath:
 
         result = resolve_to_local_path("org/partial-model")
         assert result == str(complete)
+
+
+def test_text_only_multimodal_runtime_resolves_cached_model_id(tmp_path, monkeypatch):
+    import json
+    import vmlx_engine.api.utils as utils
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "minicpmv4_7"}))
+    monkeypatch.setattr(utils, "resolve_to_local_path", lambda name: str(tmp_path))
+    assert utils.is_mllm_model("org/cached-minicpm", force_text_only=True)

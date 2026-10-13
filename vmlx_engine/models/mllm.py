@@ -4489,7 +4489,10 @@ def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
         raise ValueError("DSpark drafter vocabulary is larger than the target's")
     if max(drafter.target_layer_ids) >= int(text_cfg.get("num_hidden_layers", 0)):
         raise ValueError("DSpark drafter taps layers the target does not have")
-    max_draft = max(1, min(int(spec.get("max_draft", MAX_VERIFY_ROWS - 1)), MAX_VERIFY_ROWS - 1))
+    # MoE targets: stay below the expert sort threshold (minicpm_target.preferred_max_draft: 6 at top-8), where the
+    # stock multi-row block is row-exact and ~1.7x cheaper than the per-row route the threshold needs.
+    max_draft = max(1, min(int(spec.get("max_draft", target.preferred_max_draft)), MAX_VERIFY_ROWS - 1,
+                           int(target.preferred_max_draft)))
     logger.info(
         "DSpark drafter loaded from %s: block %d, taps %s, max draft %d per round",
         drafter_dir, drafter.block, drafter.target_layer_ids, max_draft,

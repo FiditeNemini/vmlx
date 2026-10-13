@@ -13,14 +13,16 @@ Three forwards over the module's own vendored Qwen3.5 layers:
   BF16, JANG_8M and JANGH4, MLX 0.32.3). Requires the stock GDN path (fused
   GDN decode kernels off, the default). Dense JANGH projections are switched
   to their per-row decode kernel for verify rows (``row_exact_verify``).
-  MoE (35B-A3B): each verify row's sparse MoE block runs as its own one-row
-  call, i.e. exactly the decode step's computation (router, top-k, experts,
-  any fused one-row expert kernel, shared expert). The stock multi-row block
-  is NOT row-exact: at 8 rows x 8 experts SwitchGLU reaches MLX's 64-index
-  sort threshold and switches to the sorted gather_qmm (measured on a 35B-shape
-  block, affine 8 and JANGH 2/4: wrong at 8 rows, exact to 7). Per-row blocks
-  cost 1.0-1.2 ms per layer for 8 rows vs 0.26 ms per decode step (M5 Max,
-  synthetic), still well below 8 decode steps.
+  MoE (35B-A3B): below the expert sort threshold (rows x top_k < 64 routed
+  rows, the switch point of MLX's SwitchGLU and of JANGH's TQSwitchGLU) the
+  stock multi-row sparse block keeps every (row, expert) pair on the one-row
+  gather decode kernels, so it is row-exact (measured bit-equal to per-row
+  decode on a 35B-shape block for affine 4/8 and JANGH 2/4 through 7 rows).
+  At the threshold (8 rows x top-8) the experts switch to the sorted
+  gather_qmm and the rows are NOT exact; verify then runs each row's block as
+  its own one-row call (exact by construction, ~1.7x the stock block's cost
+  at 6-8 rows on the real 35B). ``preferred_max_draft`` keeps DSpark below the
+  threshold (6 drafts at top-8).
 - ``rollback``: rejected rows are undone by trimming the attention KV and
   replaying the GatedDeltaNet recurrence over the accepted rows only, from
   the state the verify started from (captured through the vendored GDN's
@@ -41,6 +43,18 @@ from mlx_lm.models.gated_delta import gated_delta_update
 from ..metal.row_exact_qmv import MAX_ROWS, rotary_rows_like_decode, row_exact_verify_scope
 
 MAX_VERIFY_ROWS = MAX_ROWS
+# Routed (row, expert) pairs at which MLX's SwitchGLU (``do_sort = indices.size >= 64``) and JANGH's TQSwitchGLU
+# (``SORT_THRESHOLD``) leave the one-row gather decode kernels for the sorted multi-row path.
+EXPERT_SORT_THRESHOLD = 64
+
+
+def _moe_rows_stay_on_decode_kernels(block, rows: int) -> bool:
+    """True when a ``rows``-row call of this sparse block runs every (row, expert) pair on the one-row kernels."""
+    top_k = int(block.top_k)
+    use_sorted = getattr(block.switch_mlp, "_use_sorted", None)
+    if callable(use_sorted):
+        return not use_sorted(rows * top_k, top_k)
+    return rows * top_k < EXPERT_SORT_THRESHOLD
 
 
 def _cache_offset(cache, idx: int) -> int:
@@ -60,6 +74,12 @@ class MiniCPMDSparkTarget:
         self.moe = bool(getattr(self.lm.args, "num_experts", 0))
         if self.moe and not all(hasattr(layer.mlp, "switch_mlp") for layer in self.nm.layers):
             raise ValueError("DSpark MoE target: every decoder layer must hold a sparse MoE block")
+        top_k = int(getattr(self.lm.args, "num_experts_per_tok", 1) or 1) if self.moe else 1
+        # Widest verify that stays on the one-row expert kernels: rows * top_k < SORT_THRESHOLD.
+        self.preferred_max_draft = (
+            max(1, min(MAX_VERIFY_ROWS, (EXPERT_SORT_THRESHOLD - 1) // top_k) - 1) if self.moe
+            else MAX_VERIFY_ROWS - 1
+        )
         from ..models.minicpmv4_7.language import _CanvasLanguageMixin
 
         if not isinstance(self.lm, _CanvasLanguageMixin):
@@ -164,8 +184,8 @@ class MiniCPMDSparkTarget:
                         r = self._row_exact_attention(layer.self_attn, self.qlang, x, c, pos, pe)
                     h = h + r
                     xn = layer.post_attention_layernorm(h)
-                    if self.moe and rows > 1:
-                        # One-row calls: bit-equal to decode by construction (see the module docstring).
+                    if self.moe and rows > 1 and not _moe_rows_stay_on_decode_kernels(layer.mlp, rows):
+                        # At the sort threshold: one-row calls, bit-equal to decode by construction.
                         m = mx.concatenate([layer.mlp(mx.contiguous(xn[:, r:r + 1])) for r in range(rows)], axis=1)
                     else:
                         m = layer.mlp(xn)

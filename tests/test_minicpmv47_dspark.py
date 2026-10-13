@@ -342,7 +342,7 @@ def _verify_vs_decode(target, width):
 
 
 @pytest.mark.parametrize("eval_mode", [True, False])
-@pytest.mark.parametrize("width", [2, 5, 8])
+@pytest.mark.parametrize("width", [2, 5, 7, 8])
 def test_moe_verify_rows_and_rollback_equal_decode_steps(width, eval_mode):
     target = _tiny_moe_target(eval_mode=eval_mode)
     assert target.moe
@@ -392,3 +392,31 @@ def test_load_dspark_runtime_honours_the_stamped_default(tmp_path, monkeypatch, 
     root = _bundle(tmp_path, default=default)
     runtime = _load_dspark_runtime(_tiny_model(), root)
     assert (runtime is not None) == engaged
+
+
+def test_moe_verify_routes_below_and_at_the_expert_sort_threshold(monkeypatch):
+    """Stock multi-row block below rows x top_k = 64 (one-row expert kernels, cheaper), one-row blocks at it."""
+    from vmlx_engine.dspark import minicpm_target as T
+
+    target = _tiny_moe_target()
+    assert target.preferred_max_draft == 6                    # 7 rows x top-8 = 56 < 64
+    block = target.nm.layers[0].mlp
+    assert T._moe_rows_stay_on_decode_kernels(block, 7) and not T._moe_rows_stay_on_decode_kernels(block, 8)
+    calls = []
+    real = type(block).__call__
+
+    def spy(self, x):
+        calls.append(int(x.shape[1]))
+        return real(self, x)
+    monkeypatch.setattr(type(block), "__call__", spy)
+    rows = mx.array([[11, 22, 33, 44, 55, 66, 77, 88]])
+    for width, expected_calls in ((7, [7]), (8, [1] * 8)):
+        cache = target.make_cache()
+        target.prefill(mx.array([PROMPT]), cache, (), None)
+        calls.clear()
+        logits, _, _ = target.verify(rows[:, :width], cache, ())
+        mx.eval(logits)
+        assert calls == expected_calls * len(target.nm.layers), (width, calls[:10])
+    same7, *_ = _verify_vs_decode(target, 7)
+    same8, *_ = _verify_vs_decode(target, 8)
+    assert all(same7) and all(same8)

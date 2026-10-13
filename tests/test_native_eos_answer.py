@@ -88,7 +88,14 @@ async def test_stream_terminal_classification(monkeypatch, surface, stream, fini
             content = ''.join(part.text for item in response.output if item.type == 'message' for part in item.content)
         assert content == expected
         assert engine.calls == 1
-        assert ('reasoning_closed_by_eos' in response.model_dump_json(exclude_none=True)) == (text == 'ORCHID' and finish == 'stop')
+        classified = text == 'ORCHID' and finish == 'stop'
+        assert ('reasoning_closed_by_eos' in response.model_dump_json(exclude_none=True)) == classified
+        if surface == 'chat':
+            reasoning = response.choices[0].message.reasoning
+        else:
+            reasoning = ''.join(part.text for item in response.output if item.type == 'reasoning' for part in item.summary)
+        # A classified answer is not returned twice; truncated thinking stays reasoning.
+        assert (reasoning or '') == ('' if classified else ('ORCHID' if finish == 'length' else 'plan'))
         return
     if surface == 'chat':
         iterator = server._terminal_finish_guard(iterator)

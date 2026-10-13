@@ -21745,6 +21745,10 @@ async def create_chat_completion(
         response_content = _native_eos_visible_answer(
             request_parser, request, output, output.text, response_content, tool_calls, engine.tokenizer
         )
+        if response_content is not None:
+            # These tokens are the answer now (usage reasoning_tokens is 0 and history drops them); do not return
+            # them a second time as reasoning.
+            reasoning_text = None
     response_warnings = _merge_responses_warnings(
         _chat_completion_warnings_for_reasoning_only(
             response_content,
@@ -25411,6 +25415,9 @@ async def create_response(
         final_text = _native_eos_visible_answer(
             request_parser, request, output, output.text, final_text, tool_calls, engine.tokenizer
         ) or ""
+        if final_text:
+            # Same as Chat Completions: the answer owns these tokens, so no duplicate reasoning item.
+            output_items = [item for item in output_items if not isinstance(item, ResponsesReasoningItem)]
     if final_text:
         output_items.append(
             ResponsesOutputMessage(

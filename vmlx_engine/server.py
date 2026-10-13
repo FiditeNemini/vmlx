@@ -6640,7 +6640,7 @@ security = HTTPBearer(auto_error=False)
 @app.middleware("http")
 async def track_request_time(request: Request, call_next):
     """Track last request time, JIT wake from sleep, gate text endpoints on image servers."""
-    global _last_request_time, _standby_state, _inference_endpoints, _wake_timeout
+    global _last_request_time, _standby_state, _inference_endpoints, _wake_timeout, _wake_lock
     path = request.url.path
     # Identify actual inference endpoints (not metadata like /v1/models, /v1/cache, /v1/mcp/tools)
     # This list drives BOTH idle timer reset AND JIT wake
@@ -6654,9 +6654,13 @@ async def track_request_time(request: Request, call_next):
     if is_inference:
         _last_request_time = time.time()
 
-    # JIT wake: if in standby and an inference request comes in, auto-wake first
-    if _standby_state is not None and is_inference:
-        global _wake_lock
+    # Deep sleep holds the lifecycle mutex while asynchronously tearing down
+    # the engine, before publishing standby=deep. Requests arriving in that
+    # interval must wait too; otherwise they can enter a half-unloaded engine.
+    if is_inference and (
+        _standby_state is not None
+        or (_wake_lock is not None and _wake_lock.locked())
+    ):
         if _wake_lock is None:
             _wake_lock = asyncio.Lock()
 

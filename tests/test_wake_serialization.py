@@ -67,3 +67,45 @@ def test_public_admin_wake_owns_shared_lock():
 
     assert "async with _wake_lock" in endpoint
     assert "return await _wake_with_lock_held()" in endpoint
+
+
+def test_inference_waits_for_in_progress_deep_sleep(monkeypatch):
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    async def scenario():
+        lock = asyncio.Lock()
+        monkeypatch.setattr(server, '_wake_lock', lock)
+        monkeypatch.setattr(server, '_standby_state', None)
+        monkeypatch.setattr(server, '_model_type', 'mllm')
+        entered = []
+
+        async def wake():
+            assert lock.locked()
+            assert server._standby_state == 'deep'
+            entered.append('wake')
+            server._standby_state = None
+            return {'status': 'active'}
+
+        async def serve(request):
+            entered.append('generate')
+            return JSONResponse({'ok': True})
+
+        monkeypatch.setattr(server, '_wake_with_lock_held', wake)
+        request = Request({'type': 'http', 'method': 'POST', 'path': '/v1/responses', 'headers': []})
+        async with lock:
+            # admin_deep_sleep owns this mutex before its first asynchronous
+            # teardown, but does not set standby=deep until teardown completes.
+            task = asyncio.create_task(server.track_request_time(request, serve))
+            try:
+                await asyncio.sleep(0)
+                assert not entered, 'request entered the engine during teardown'
+                server._standby_state = 'deep'
+            except BaseException:
+                task.cancel()
+                raise
+        response = await task
+        assert response.status_code == 200
+        assert entered == ['wake', 'generate']
+
+    asyncio.run(scenario())

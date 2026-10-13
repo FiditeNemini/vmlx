@@ -409,7 +409,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   )
   const dsv4Active = normalizedEffectiveFamily === 'deepseek-v4'
   const glmSingleActive = isGlmSingleActiveFamily(normalizedDetectedFamily)
-  const singleActiveControls = dsv4Active || glmSingleActive
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
@@ -475,6 +474,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const selectedDflash2 = useDflash2Selection(effectiveDraftModel)
   const dflash2Speculative = selectedDflash2 || (!config.speculativeModel && bundledDflash2Active)
   const dsparkActive = !!bundledDspark && (config.useBundledDspark ?? bundledDspark.default) && !config.speculativeModel && !dflash2Speculative
+  const nativeSpeculativeCache = dflash2Speculative || dsparkActive
+  const singleActiveControls = dsv4Active || glmSingleActive || nativeSpeculativeCache
   const hybridCacheActive =
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||
@@ -797,7 +798,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {/* Product-wide cache contract: the retained paged-RAM tier is locked off
           and SSD is authoritative. Keep this visible outside the collapsed
           section so users can confirm the launched memory policy at a glance. */}
-      {!isImage && <InfoNote text={t(dflash2Speculative ? 'sessions.config.nativeDflashCacheNote' : 'sessions.config.ramCacheTradeoffNotice')} />}
+      {!isImage && <InfoNote text={t(dflash2Speculative || dsparkActive ? 'sessions.config.nativeDflashCacheNote' : 'sessions.config.ramCacheTradeoffNotice', { runtime: dsparkActive ? 'DSpark' : 'DFlash2' })} />}
 
       {/* Server Settings */}
       <Section title={t('sessions.config.serverSettings')} sectionKey="server" expanded={expandedSections.server} onToggle={() => toggleSection('server')}>
@@ -1014,14 +1015,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             : t('sessions.config.continuousBatchingTooltip')}
           checked={effectiveContinuousBatching}
           onChange={v => onChange('continuousBatching', v)}
-          disabled={dsv4Active || dflash2Speculative}
+          disabled={dsv4Active || dflash2Speculative || dsparkActive}
         />
         {!singleActiveControls && <PerformanceHint text={t('sessions.config.continuousBatchingHint')} />}
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4BatchPathNote')} />}
-        {!effectiveContinuousBatching && !dflash2Speculative && effectivePrefixCacheEnabled && (
+        {!effectiveContinuousBatching && !dflash2Speculative && !dsparkActive && effectivePrefixCacheEnabled && (
           <InfoNote text={t('sessions.config.cacheFlagsOmittedNote')} />
         )}
-        {!effectiveContinuousBatching && !dflash2Speculative && (
+        {!effectiveContinuousBatching && !dflash2Speculative && !dsparkActive && (
           <InfoNote text={t('sessions.config.batchingOffDisablesNote')} />
         )}
         <InfoNote text={t('sessions.config.metalWiredLimitHelp')} />
@@ -1048,8 +1049,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguTypedCacheNote')} />}
         {nativeGlmSsdActive && !dflash2Speculative && <div data-vmlx-section="nativeGlmSsd"><InfoNote text={t('sessions.config.glmNativeSsdNote')} /></div>}
-        {batchingOff && !dflash2Speculative && <IncompatWarning text={t('sessions.config.prefixCacheRequiresBatching')} />}
-        <CheckField label={t('sessions.config.enablePrefixCache')} tooltip={t('sessions.config.enablePrefixCacheTooltip')} checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
+        {batchingOff && !dflash2Speculative && !dsparkActive && <IncompatWarning text={t('sessions.config.prefixCacheRequiresBatching')} />}
+        <CheckField label={t('sessions.config.enablePrefixCache')} tooltip={t('sessions.config.enablePrefixCacheTooltip')} checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} disabled={nativeSpeculativeCache} />
         {!nativeGlmSsdActive && !dsv4Active && !blockDiskOnly && !cachePolicy.legacyDiskCacheChecked && effectivePrefixCacheEnabled && (
           <>
             {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguMemoryAwareNote')} />}
@@ -1142,7 +1143,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           ? t('sessions.config.dsv4SsdOnlyNote')
           : t('sessions.config.dsv4RamL1Note')} />}
         {nativeOmniStage1 && cachePolicy.blockDiskCacheChecked && <div data-vmlx-section="omni-native-ssd-note"><InfoNote text={t('sessions.config.omniNativeSsdNote')} /></div>}
-        {architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !nativeOmniStage1 && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
+        {architectureBlockDiskOnlySupported && !nativeSpeculativeCache && !nativeGlmSsdActive && !nativeOmniStage1 && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
           ? stepMixedSwaBlockDiskOnly
             ? t('sessions.config.stepSsdOnlyNote')
             : t('sessions.config.mixedSwaSsdOnlyNote')
@@ -1151,7 +1152,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           ? t('sessions.config.m3SsdOnlyNote')
           : t('sessions.config.m3NativeMsaNote')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguNoPagedNote')} />}
-        {!nativeGlmSsdActive && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
+        {!nativeGlmSsdActive && !nativeSpeculativeCache && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
           <>
             <InfoNote text={effectiveBlockDiskCapacityText} />
             <SliderField settingKey="pagedCacheBlockSize"
@@ -1262,7 +1263,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             </div>
           </>
         )}
-        {batchingOff && !dflash2Speculative && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
+        {batchingOff && !dflash2Speculative && !dsparkActive && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
         {!batchingOff && prefixOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresPrefix')} />}
         {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text={t('sessions.config.mixedSwaAutoHint')} />}
         {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text={t('sessions.config.hy3AutoHint')} />}

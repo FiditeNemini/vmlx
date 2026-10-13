@@ -479,7 +479,8 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                 }
               />
             )}
-            {health.mtp?.mode && health.mtp.status !== 'not_configured' && (
+            {/* No MTP mode for a bundle that carries none (status dropped: MiniCPM-V-4.7, Naive N0.5 -- DSpark models). */}
+            {health.mtp?.mode && health.mtp.status !== 'not_configured' && health.mtp.status !== 'dropped' && (
               <InfoCard
                 label={t('sessions.performance.mtpMode')}
                 value={health.mtp.mode === 'adaptive'

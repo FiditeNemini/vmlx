@@ -85,6 +85,18 @@ export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, 
   const [runtimeModalities, setRuntimeModalities] = useState<string[] | null>(null)
   const [attachNotice, setAttachNotice] = useState<string | null>(null)
 
+  // Re-read on every engine start/stop of this session: a restart can change the modalities (e.g. Multimodal
+  // Force Off -> Auto) without remounting the chat, which left a stale list refusing attachments.
+  const [engineGeneration, setEngineGeneration] = useState(0)
+  useEffect(() => {
+    const sessions = (window as any).api?.sessions
+    if (!sessionId || !sessions?.onReady || !sessions?.onStopped) return
+    const bump = (data: any) => { if (data?.sessionId === sessionId) setEngineGeneration(g => g + 1) }
+    const offReady = sessions.onReady(bump)
+    const offStopped = sessions.onStopped(bump)
+    return () => { offReady?.(); offStopped?.() }
+  }, [sessionId])
+
   // The running engine's advertised modalities (same read-only, incarnation-keyed query as the server drawer).
   useEffect(() => {
     let cancelled = false
@@ -94,7 +106,7 @@ export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, 
       if (!cancelled) setRuntimeModalities(apiCapabilityModalities(reply?.capabilities))
     }).catch(() => { /* unknown: allow every kind */ })
     return () => { cancelled = true }
-  }, [sessionId, loading])
+  }, [sessionId, loading, engineGeneration])
 
   useEffect(() => {
     if (!attachNotice) return

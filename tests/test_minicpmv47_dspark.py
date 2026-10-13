@@ -911,3 +911,43 @@ def test_planned_width_follows_the_acceptance_history():
     for _ in range(40):
         policy.record_acceptance(6, 0)                 # first draft always rejected
     assert policy.planned_width(6, 0.12) == 1 < wide
+
+
+
+def _video_inputs():
+    """One 8x8-patch video frame (4 tokens in 16x) inside a text prompt; MiniCPM video takes the processor's native
+    videos= path (pixel_values_videos / target_sizes_videos), not frames-as-images."""
+    from tests.test_minicpmv47_runtime import MARKERS, VIDEO_PAD
+
+    ids = mx.array([[5, 6, MARKERS[2]] + [VIDEO_PAD] * 4 + [MARKERS[3], 198, 7, 8]])
+    kw = {"pixel_values_videos": mx.random.normal((1, 3, 14, 64 * 14), key=mx.random.key(5)),
+          "target_sizes_videos": mx.array([[8, 8]], dtype=mx.int32)}
+    return ids, kw
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_video_dspark_greedy_equals_native_ar(tmp_path, moe):
+    from mlx_vlm.models.cache import make_prompt_cache
+
+    target = _tiny_moe_target() if moe else _tiny_target()
+    model, lm = target.model, target.model.language_model
+    ids, kw = _video_inputs()
+    cache = make_prompt_cache(lm)
+    tok = mx.argmax(model(ids, cache=cache, **kw).logits[0, -1]).reshape(1)
+    reference = [int(tok.item())]
+    while len(reference) < 20:
+        tok = mx.argmax(lm(tok.reshape(1, 1), cache=cache).logits[0, -1]).reshape(1)
+        reference.append(int(tok.item()))
+    lm.reset_position_state()
+    feats = model.get_input_embeddings(ids, None, **kw)
+    positions, delta = lm._position_ids, int(lm._rope_deltas.reshape(-1)[0].item())
+    lm.reset_position_state()
+    assert delta != 0
+    drafter = _drafter_for(target, tmp_path, reference, 64 if moe else 16)
+    drafter.prompt_len = int(ids.shape[1])
+    target.set_media(feats.inputs_embeds, positions, delta)
+    try:
+        out = generate_dspark(target, drafter, ids[0].tolist(), 20, set())
+    finally:
+        target.set_media()
+    assert out == reference

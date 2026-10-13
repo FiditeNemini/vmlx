@@ -6611,9 +6611,12 @@ class MLXMultimodalLM:
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
 
+        # MiniCPM video arrives as native clips (processor videos= path): DSpark plans it like images.
         _dspark_media = None
-        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs) and (
-            not all_images or (_dspark_media := self._dspark_media_plan(formatted_prompt, all_images, kwargs)) is not None
+        _dspark_videos = native_video_clips or []
+        if self._dspark_eligible(all_images, [] if _dspark_videos else videos, all_audio, temperature, kwargs) and (
+            not (all_images or _dspark_videos)
+            or (_dspark_media := self._dspark_media_plan(formatted_prompt, all_images, kwargs, _dspark_videos)) is not None
         ):
             final = None
             text = ""
@@ -7005,34 +7008,95 @@ class MLXMultimodalLM:
             return False
         return True
 
-    def _dspark_media_plan(self, formatted_prompt: str, images: list, kwargs: dict) -> dict | None:
-        """Image-request inputs for the DSpark lane, or None (native VLM path).
+    def _dspark_media_plan(self, formatted_prompt: str, images: list, kwargs: dict,
+                           videos: list | None = None) -> dict | None:
+        """Image / native-video request inputs for the DSpark lane (MiniCPM-V-4.7), or None (native VLM path).
 
-        The DFlash2 media plan: the same mlx-vlm ``prepare_inputs`` as the native route, then (deferred in
-        ``materialize``) the model's own ``get_input_embeddings`` -- vision tower, merged features, canvas M-RoPE
-        positions and the rope delta of the text after the prompt. MiniCPM's crops cannot be paired with grid rows, so
-        the session key is ``_dspark_salted_media_keys`` (whole-request media identity in every placeholder position):
-        a follow-up turn about the same image(s) resumes through them, any other media diverges at the first
-        placeholder. VMLX_DSPARK_MEDIA=0 keeps image requests on the native path (A/B).
+        The same mlx-vlm ``prepare_inputs`` call as the native route (``stream_generate``: images, native video clips,
+        ``add_special_tokens=True``); then, deferred in ``materialize``, the model's own ``get_input_embeddings`` --
+        vision tower on image crops and video frames, merged features, canvas M-RoPE positions and the rope delta of
+        the text after the prompt (the DFlash2 media plan's shape). MiniCPM's crops cannot be paired with grid rows, so
+        the session key is ``_dspark_salted_media_keys`` over a hash of every processed media tensor and its crop
+        geometry: a follow-up turn about the same media resumes through it, any other media diverges at the first
+        placeholder. VMLX_DSPARK_MEDIA=0 keeps media requests on the native path (A/B).
         """
+        import hashlib
+
+        import mlx.core as mx
+        import numpy as np
+
         if os.environ.get("VMLX_DSPARK_MEDIA", "1").strip().lower() in {"0", "false", "off", "no"}:
             return None
-        self._guard_simple_image_prefill(
-            formatted_prompt, True, images=images, resize_shape=kwargs.get("resize_shape"),
-        )
-        plan = self._dflash2_media_plan(formatted_prompt, images, kwargs)
-        if plan is None or not int(plan.get("media_end") or 0):
+        language_model = getattr(self.model, "language_model", None)
+        if (language_model is None or not hasattr(language_model, "get_rope_index")
+                or not hasattr(self.model, "get_input_embeddings")):
             return None
-        if plan.get("key_tokens") is None:
-            config = self.model.config
-            media_ids = {
-                int(v) for v in (getattr(config, name, None) for name in (
-                    "image_token_index", "video_token_index", "image_token_id", "video_token_id"))
-                if v is not None
-            }
-            plan["key_tokens"] = _dspark_salted_media_keys(plan["prompt_tokens"], media_ids, plan["salt"])
-        plan["image_count"] = len(images)
-        return plan
+        if images:
+            self._guard_simple_image_prefill(
+                formatted_prompt, True, images=images, resize_shape=kwargs.get("resize_shape"),
+            )
+        from mlx_vlm.utils import prepare_inputs
+
+        try:
+            from mlx_vlm.generate import normalize_resize_shape
+        except ImportError:  # older mlx-vlm
+            normalize_resize_shape = lambda shape: shape  # noqa: E731
+        config = self.model.config
+        inputs = prepare_inputs(
+            self.processor,
+            images=images or None,
+            videos=videos or None,
+            prompts=formatted_prompt,
+            image_token_index=getattr(config, "image_token_index", None),
+            resize_shape=normalize_resize_shape(kwargs.get("resize_shape")),
+            add_special_tokens=True,
+        )
+        input_ids = inputs["input_ids"]
+        pixel_values = inputs.get("pixel_values")
+        attention_mask = inputs.get("attention_mask")
+        extra = {k: v for k, v in inputs.items() if k not in ("input_ids", "pixel_values", "attention_mask")}
+
+        def materialize() -> dict:
+            features = self.model.get_input_embeddings(input_ids, pixel_values, mask=attention_mask, **extra)
+            embeds = getattr(features, "inputs_embeds", features)
+            positions = getattr(language_model, "_position_ids", None)
+            rope_delta = getattr(language_model, "_rope_deltas", None)
+            # The VLM's next forward must not reuse this request's rope state.
+            language_model._position_ids = None
+            language_model._rope_deltas = None
+            if positions is None or rope_delta is None or positions.shape[-1] != input_ids.shape[-1]:
+                raise ValueError("DSpark media plan incomplete: no full-prompt M-RoPE positions")
+            mx.eval(embeds, positions, rope_delta)
+            return {"embeds": embeds, "positions": positions, "rope_delta": int(rope_delta.reshape(-1)[0].item())}
+
+        tokens = [int(t) for t in input_ids[0].tolist()]
+        media_ids = {
+            int(v) for v in (getattr(config, name, None) for name in (
+                "image_token_index", "video_token_index", "image_token_id", "video_token_id"))
+            if v is not None
+        }
+        media_end = max((i + 1 for i, t in enumerate(tokens) if t in media_ids), default=0)
+        if not media_end:
+            return None
+        digest = hashlib.sha256()
+        for key, value in (("pixel_values", pixel_values),) + tuple(
+                (k, extra.get(k)) for k in ("pixel_values_videos", "target_sizes", "target_sizes_videos",
+                                            "image_grid_thw", "video_grid_thw")):
+            if value is None:
+                continue
+            arr = np.asarray(value.astype(mx.float32) if getattr(value, "dtype", None) == mx.bfloat16 else value)
+            digest.update(key.encode() + str(arr.shape).encode() + arr.tobytes())
+        salt = digest.hexdigest()[:32]
+        return {
+            "prompt_tokens": tokens,
+            "key_tokens": _dspark_salted_media_keys(tokens, media_ids, salt),
+            "materialize": materialize,
+            "media_end": media_end,
+            "first_media_index": next(i for i, t in enumerate(tokens) if t in media_ids),
+            "salt": salt,
+            "image_count": len(images or []),
+            "video_count": len(videos or []),
+        }
 
     def _stream_dspark(self, formatted_prompt: str, max_tokens: int, temperature: float, kwargs: dict,
                        media: dict | None = None):
@@ -7125,7 +7189,9 @@ class MLXMultimodalLM:
 
         session = {}
         logger.info("DSpark %s chat active for %s (prompt %d tokens, %d restored from %s)",
-                    "media (%d image(s))" % int(media.get("image_count") or 0) if media is not None else "text",
+                    "media (%d image(s), %d video(s))" % (int(media.get("image_count") or 0),
+                                                         int(media.get("video_count") or 0))
+                    if media is not None else "text",
                     self.model_name, len(prompt_ids), cache_len, (resume or {}).get("source", "none"))
         with _MaybeVLMStream(), _dspark_media_cleared(target):
             for chunk in iter_dspark(
@@ -7338,9 +7404,12 @@ class MLXMultimodalLM:
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
 
+        # MiniCPM video arrives as native clips (processor videos= path): DSpark plans it like images.
         _dspark_media = None
-        if self._dspark_eligible(all_images, videos, all_audio, temperature, kwargs) and (
-            not all_images or (_dspark_media := self._dspark_media_plan(formatted_prompt, all_images, kwargs)) is not None
+        _dspark_videos = native_video_clips or []
+        if self._dspark_eligible(all_images, [] if _dspark_videos else videos, all_audio, temperature, kwargs) and (
+            not (all_images or _dspark_videos)
+            or (_dspark_media := self._dspark_media_plan(formatted_prompt, all_images, kwargs, _dspark_videos)) is not None
         ):
             yield from self._stream_dspark(formatted_prompt, max_tokens, temperature, kwargs, media=_dspark_media)
             return

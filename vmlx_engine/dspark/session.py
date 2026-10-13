@@ -13,7 +13,8 @@ dflash2_session_disk) to DSpark, reusing its store, cut finders, cache-clone hel
   end-of-turn entry (exactly the tokens the caches hold, ``iter_dspark(session=...)``);
 - SSD tier (same managed pool and budget as the block cache), with the SSD-only RAM release policy: an entry is
   dropped from RAM once its SSD copy is durable, and a later request restores it from SSD (RAM stays at the
-  model's size). Media requests take the AR route and never reach this store.
+  model's size). Image and video requests key their entries with salted placeholder ids (models/mllm.py
+  ``_dspark_salted_media_keys``) and carry the canvas ``rope_delta``; audio requests take the native path.
 VMLX_DSPARK_PREFIX_REUSE=0 disables reuse; VMLX_DSPARK_SSD=0 keeps the RAM tier only.
 """
 from __future__ import annotations

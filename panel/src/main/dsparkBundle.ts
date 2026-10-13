@@ -14,22 +14,12 @@ export function configDeclaresDspark(cfg: any): boolean {
 }
 
 /**
- * The bundle's own DSpark default: `jang_config.json` `speculative.default` (method dspark). The builder stamps it from
- * a measured served comparison against AR; a missing stamp means on (the engine's rule in
- * models/mllm._load_dspark_runtime).
+ * DSpark default for a bundle: ON whenever the bundle ships a drafter (Eric 2026-10-13: "check model files if it has
+ * or not ... enabled if it has it and if not don't use it"). The jang_config `speculative.default` stamp is
+ * informational only; the engine applies the same rule (`--dspark auto`, models/mllm._load_dspark_runtime).
  */
 export function bundledDsparkDefault(modelPath: string | undefined | null): boolean {
-  const root = String(modelPath || '').trim()
-  if (!root) return false
-  try {
-    const spec = JSON.parse(readFileSync(join(root, 'jang_config.json'), 'utf8'))?.speculative
-    if (spec && typeof spec === 'object' && String(spec.method || 'dspark').toLowerCase() === 'dspark') {
-      return spec.default !== false
-    }
-  } catch {
-    /* no stamp */
-  }
-  return true
+  return findBundledDsparkDrafter(modelPath) !== null
 }
 
 /**

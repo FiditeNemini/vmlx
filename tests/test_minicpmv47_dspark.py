@@ -250,15 +250,18 @@ def test_load_dspark_runtime_contract(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "kwargs, outcome",
     [
-        ({"spec": False}, None),
+        ({"spec": False}, "engaged"),              # the drafter FILES decide; no stamp needed
         ({"model_type": "qwen3_5"}, None),
-        ({"drafter": False}, FileNotFoundError),
+        ({"drafter": False}, None),                # declared but shipped without the drafter: AR, never an error
+        ({"spec": False, "drafter": False}, None),
         ({"hidden": 32}, ValueError),
     ],
 )
-def test_load_dspark_runtime_requires_the_declared_drafter(tmp_path, kwargs, outcome):
+def test_load_dspark_runtime_follows_the_drafter_files(tmp_path, kwargs, outcome):
     root = _bundle(tmp_path, **kwargs)
-    if outcome is None:
+    if outcome == "engaged":
+        assert _load_dspark_runtime(_tiny_model(), root) is not None
+    elif outcome is None:
         assert _load_dspark_runtime(_tiny_model(), root) is None
     else:
         with pytest.raises(outcome):
@@ -396,9 +399,11 @@ def test_moe_dspark_greedy_equals_ar(tmp_path, fixed_width):
 
 
 @pytest.mark.parametrize("default, env, engaged", [
-    (None, None, True), (True, None, True), (False, None, False), (False, "1", True), (True, "0", False),
+    (None, None, True), (True, None, True), (False, None, True), (False, "1", True), (True, "0", False),
+    (None, "0", False),
 ])
-def test_load_dspark_runtime_honours_the_stamped_default(tmp_path, monkeypatch, default, env, engaged):
+def test_load_dspark_runtime_default_on_when_the_drafter_ships(tmp_path, monkeypatch, default, env, engaged):
+    """A shipped drafter is used by default whatever the stamp says; VMLX_DSPARK=0 (serve --dspark off) opts out."""
     if env is None:
         monkeypatch.delenv("VMLX_DSPARK", raising=False)
     else:

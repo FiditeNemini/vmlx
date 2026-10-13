@@ -34,12 +34,12 @@ describe('bundled DSpark drafter detection', () => {
     expect(findBundledDsparkDrafter('')).toBeNull()
   })
 
-  it("reads the bundle's measured default from jang_config speculative.default", () => {
+  it('defaults ON whenever the bundle ships a drafter, whatever the stamp says', () => {
     const drafter = { architectures: ['Qwen3DSparkModel'] }
-    expect(bundledDsparkDefault(bundle(drafter, 'dspark', { method: 'dspark', default: false }))).toBe(false)
+    expect(bundledDsparkDefault(bundle(drafter, 'dspark', { method: 'dspark', default: false }))).toBe(true)
     expect(bundledDsparkDefault(bundle(drafter, 'dspark', { method: 'dspark', default: true }))).toBe(true)
-    expect(bundledDsparkDefault(bundle(drafter, 'dspark', { method: 'dspark' }))).toBe(true)
     expect(bundledDsparkDefault(bundle(drafter))).toBe(true)
+    expect(bundledDsparkDefault(bundle(null, 'dspark', { method: 'dspark', default: true }))).toBe(false)   // shipped without
   })
 })
 

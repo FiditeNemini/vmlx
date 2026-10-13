@@ -49,11 +49,19 @@ describe('bundled DSpark launch wiring', () => {
     expect(command).toContain('--no-continuous-batching')
   })
 
-  it('a bundle stamped off keeps the batching lane, flag auto', async () => {
+  it('a shipped drafter is on by default even when the stamp says false (the files decide)', async () => {
     const manager = new SessionManager()
     const row = await manager.createSession(bundle(false), { port: 8125 })
     const command = args(manager, row)
     expect(flag(command, '--dspark')).toBe('auto')
+    expect(command).toContain('--no-continuous-batching')
+  })
+
+  it('a bundle shipped without the drafter keeps the batching lane and gets no DSpark flag', async () => {
+    const manager = new SessionManager()
+    const row = await manager.createSession(bundle(true, false), { port: 8130 })
+    const command = args(manager, row)
+    expect(command).not.toContain('--dspark')
     expect(command).toContain('--continuous-batching')
   })
 

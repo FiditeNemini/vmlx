@@ -203,7 +203,7 @@ class DSparkDrafter(nn.Module):
         Returns (tokens (count,), confidences (count,) float32). With
         ``sampler`` (log-prob -> token) the chain samples instead of argmax.
 
-        ``candidates`` K (default ``VMLX_DSPARK_MARKOV_CANDIDATES``; 0 / unset = full vocabulary): the Markov rescoring
+        ``candidates`` K (default ``VMLX_DSPARK_MARKOV_CANDIDATES``, 32; 0 = full vocabulary): the Markov rescoring
         runs on the top-K base-logit candidates of each position only (Naive N0.5 prototype ``draft_cand``, 2026-10-09).
         The full-vocab bias is one (rank x vocab) matvec per drafted position, sequentially -- on MiniCPM-V-4.7 a
         256 x 248,144 bf16 matrix, 127 MB per position, ~0.9 GB per 7-token draft -- and becomes two K-row gathers.
@@ -273,9 +273,10 @@ def _draft_window() -> int:
 
 def _markov_candidates() -> int:
     try:
-        return max(0, int(os.environ.get("VMLX_DSPARK_MARKOV_CANDIDATES", "0")))
+        # Default 32 (sustained multi-turn A/Bs 2026-10-13: drafter 3.5 -> 2.4 ms on the 35B; 1B x0.917 vs x0.906).
+        return max(0, int(os.environ.get("VMLX_DSPARK_MARKOV_CANDIDATES", "32")))
     except ValueError:
-        return 0
+        return 32
 
 
 QUANT_SKIP = ("markov_head", "confidence_head")

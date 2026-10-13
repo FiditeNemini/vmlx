@@ -4459,12 +4459,11 @@ def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
     ``vmlx_engine.dspark.write_quantized_drafter``). Only text requests use it
     (see ``_dspark_eligible``).
 
-    On/off: the bundle's ``speculative.default`` decides (absent = on), and
-    ``VMLX_DSPARK`` overrides it either way (``1`` engages a drafter a bundle
-    stamps ``default: false``; ``0`` keeps every bundle on AR). The shipped
-    MiniCPM-V-4.7 bundles stamp ``default: false`` because DSpark measured
-    slower than AR on the 1B (x0.54-0.98 served); that stamp was not honoured
-    before, so those bundles ran DSpark.
+    On/off follows the FILES (Eric 2026-10-13: "check model files if it has or not ... enabled if it has it and if
+    not don't use it"): a drafter directory present in the bundle (``<bundle>/dspark``, or the stamp's
+    ``drafter_path``) is used by default; a bundle shipped without it serves AR (never an error, even when
+    ``jang_config`` still declares DSpark). ``VMLX_DSPARK=0`` / ``serve --dspark off`` keeps the bundle on AR. The
+    stamp's ``speculative.default`` is informational only.
     """
     override = os.environ.get("VMLX_DSPARK", "").strip().lower()
     if override in {"0", "false", "off", "no"}:
@@ -4476,21 +4475,20 @@ def _load_dspark_runtime(model: Any, model_path: str | Path) -> dict | None:
         return None
     if str(cfg.get("model_type", "")).lower() not in _DSPARK_MODEL_TYPES:
         return None
+    spec = {}
     stamp_path = root / "jang_config.json"
-    if not stamp_path.is_file():
-        return None
-    spec = (json.loads(stamp_path.read_text()).get("speculative") or {})
-    if str(spec.get("method", "")).lower() != "dspark":
-        return None
-    if spec.get("default", True) is False and override not in {"1", "true", "on", "yes"}:
-        logger.info(
-            "DSpark drafter declared but the bundle stamps speculative.default=false; serving AR "
-            "(VMLX_DSPARK=1 engages it)",
-        )
+    if stamp_path.is_file():
+        try:
+            spec = json.loads(stamp_path.read_text()).get("speculative") or {}
+        except Exception:
+            spec = {}
+    if spec and str(spec.get("method", "")).lower() not in ("", "dspark"):
         return None
     drafter_dir = root / str(spec.get("drafter_path") or "dspark")
     if not (drafter_dir / "config.json").is_file():
-        raise FileNotFoundError(f"speculative.method=dspark but {drafter_dir}/config.json is missing")
+        if spec:
+            logger.info("DSpark declared in jang_config but the bundle ships no drafter (%s); serving AR", drafter_dir)
+        return None
     from ..dspark import load_drafter
     from ..dspark.minicpm_target import MAX_VERIFY_ROWS, MiniCPMDSparkTarget
 

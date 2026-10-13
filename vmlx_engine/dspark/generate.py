@@ -282,9 +282,11 @@ def iter_dspark(
     if first in eos or max_new <= 1:
         return
     mask_embed = target.embed_tokens(mx.array([[drafter.mask_token_id]]))
-    # VMLX_DSPARK_PIPELINE=1: one sync per draft round (planned width; drafter overlapped with verify graph building).
+    # Pipelined rounds (default; VMLX_DSPARK_PIPELINE=0 = two syncs per round): planned width, drafter overlapped with
+    # verify graph building. Sustained multi-turn A/Bs 2026-10-13: 1B x0.922 / x0.954 vs x0.902 / x0.909 static,
+    # 35B neutral to positive (best config x1.044 greedy). Exact either way.
     pipelined = (ar_fallback is not None and hasattr(ar_fallback, "planned_width")
-                 and os.environ.get("VMLX_DSPARK_PIPELINE", "0").strip().lower() in {"1", "true", "on", "yes"})
+                 and os.environ.get("VMLX_DSPARK_PIPELINE", "1").strip().lower() not in {"0", "false", "off", "no"})
     t1 = time.perf_counter()
     produced = 1
     while produced < max_new:

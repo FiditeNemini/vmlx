@@ -4525,9 +4525,9 @@ Examples:
         "--dspark",
         choices=("auto", "on", "off"),
         default="auto",
-        help="DSpark drafter shipped inside the bundle (<bundle>/dspark, MiniCPM-V-4.7 / Naive N0.5): auto = the "
-             "bundle's speculative.default stamp, on = use it, off = AR only. Runs on the single-request lane "
-             "(--no-continuous-batching); text requests only.",
+        help="DSpark drafter shipped inside the bundle (<bundle>/dspark, MiniCPM-V-4.7 / Naive N0.5): auto / on = use "
+             "it whenever the bundle ships one (a bundle without it serves AR), off = AR only. Runs on the "
+             "single-request lane (--no-continuous-batching); text, image and video requests.",
     )
     serve_parser.add_argument(
         "--num-draft-tokens",

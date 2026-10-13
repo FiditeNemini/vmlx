@@ -125,7 +125,7 @@ describe('GLM native SSD defaults preserve runtime route and saved choices', () 
     expect(form).toContain('const nativeGlmSsdActive = usesGlmNativeSsdPool({')
     expect(form).toContain('isMultimodal: detectedIsMultimodal, forceTextOnly: detectedForceTextOnly')
     expect(form).toContain('!nativeGlmSsdActive && !dsv4Active && !blockDiskOnly')
-    expect(form).toContain('!nativeGlmSsdActive && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked)')
+    expect(form).toContain('!nativeGlmSsdActive && !nativeSpeculativeCache && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked)')
     expect(form).toContain('!nativeGlmSsdActive && (exactTypedPromptDiskCache || cachePolicy.legacyDiskCacheChecked)')
     expect(form).toContain('data-vmlx-section="nativeGlmSsd"')
     for (const language of ['en', 'zh', 'ko', 'ja', 'es']) {

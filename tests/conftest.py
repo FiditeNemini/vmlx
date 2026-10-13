@@ -65,3 +65,21 @@ def pytest_collection_modifyitems(config, items):
 def server_url(request):
     """Get server URL from command line."""
     return request.config.getoption("--server-url")
+
+
+@pytest.fixture(autouse=True)
+def _restore_stock_switchglu_after_mimo_fast_path():
+    """MiMo-V2 capability discovery (models/mllm.py, model_type mimo_v2 only) installs a process-global SwitchGLU
+    decode fast path. A serving process loads one model, but in the suite it leaked into later tests that compute a
+    stock SwitchGLU reference (GLM exact-MoE, MiniCPM DSpark verify), which then compared against the wrong arithmetic.
+    Undo it after any test that installed it."""
+    yield
+    try:
+        from mlx_lm.models.switch_layers import SwitchGLU
+    except Exception:
+        return
+    original = SwitchGLU.__dict__.get("_vmlx_mimo_original_affine_decode_call")
+    if original is not None:
+        SwitchGLU.__call__ = original
+        del SwitchGLU._vmlx_mimo_original_affine_decode_call
+        SwitchGLU._vmlx_mimo_affine_decode_fast_path = False

@@ -4447,7 +4447,14 @@ def test_release_regression_manifest_real_ui_live_model_script_exists_and_uses_r
     assert "if (current?.status === 'stopped') return resolve(current)" in source
     assert "for the active local session" in source
     assert "'[data-vmlx-control=\"session-start\"][data-vmlx-session-id=\"'" in source
-    assert "window.api.chat.sendMessage" in source
+    assert "window.api.chat.sendMessage" not in source
+    composer = source.split("const sendMessageThroughVisibleComposer =", 1)[1].split(
+        "const sendMessageWithCapture =", 1
+    )[0]
+    assert "setter.call(textarea, prompt)" in composer
+    assert "isVisible(sibling)" in composer
+    assert "sendButton.click()" in composer
+    assert "events.complete.length > completedBefore" in composer
     assert "window.api.performance.health" in source
     assert "window.api.cache.stats" in source
     assert "native_cache_status" in source
@@ -4559,7 +4566,10 @@ def test_release_regression_manifest_real_ui_script_preserves_tool_probe_file_ev
     assert "const toolProbeFiles = {}" in source
     assert "function cacheReconstructionClean(result)" in source
     assert "worker-side paged cache reconstruction failed" in source
-    result_block = source.split("const result = {", 2)[2].split("result.provenSurfaces", 1)[0]
+    result_block = source.rsplit("const result = {", 1)[1].split(
+        "result.visibleAssistantTurnsComplete", 1
+    )[0]
+    assert "status: rendererResult.rendererFailureStage" in result_block
     assert result_block.index("...rendererResult") < result_block.index("toolProbeFiles")
     semantics_block = source.split("function namedToolProbeSemanticsOk(result)", 1)[1].split(
         "function countMatches",
@@ -4747,11 +4757,11 @@ def test_release_regression_manifest_real_ui_script_records_request_contract_on_
     script = Path("panel/scripts/live-real-ui-model-proof.mjs")
     source = script.read_text(encoding="utf-8")
 
-    failure_block = source.split("const result = {", 2)[1].split(
-        "result.visibleAssistantTurnsComplete",
-        1,
+    failure_prefix, failure_tail = source.split("failureStage: 'renderer_real_ui_chat'", 1)
+    failure_block = failure_prefix.rsplit("const result = {", 1)[1] + failure_tail.split(
+        "result.visibleAssistantTurnsComplete", 1
     )[0]
-    assert "failureStage: 'renderer_real_ui_chat'" in failure_block
+    assert "status: 'fail'" in failure_block
     assert "requestContract" in failure_block
     assert "promptOne" in failure_block
     assert "promptTwo" in failure_block

@@ -4,6 +4,16 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.78] - 2026-10-13
+
+- Add MiniCPM-V-4.7 text, image and video support, with bundled DSpark detection and exact verification by default. Bundles without a drafter use ordinary decoding; explicit opt-out remains available.
+- Add Naive N0.5 and GLM-5.3 Flash JANGHT execution improvements, GLM DFlash2 integration, and further Qwen speculative-decoding and prefill improvements. Performance depends on the bundle, sampling and workload.
+- Publish completed responses before background SSD persistence finishes, and synchronize dependent continuations with their cache writes. Reduce redundant snapshot copies, store changed prefix rows, and group compatible block files for faster restoration.
+- Preserve native recurrent and attention state across SSD restoration, media turns and restart; reduce retained snapshot memory and shared-pool reconciliation overhead.
+- Surface marker-free native answers that end naturally inside template-open thinking, without changing generated tokens or sampling. Truncated thinking, explicit reasoning delimiters, tool calls and user stop sequences retain their existing semantics.
+- Fix image attachment capability detection, DSpark health and cache administration, and native speculative-session settings that previously showed inapplicable batching controls.
+- Improve cache, prefill and tool-turn statistics, and preserve native generation controls across the Chat Completions and Responses APIs.
+
 ## [1.6.77] - 2026-10-08
 
 - Fix stalled batched vision requests with explicit stop strings, including stop sequences completed during final text decoding.

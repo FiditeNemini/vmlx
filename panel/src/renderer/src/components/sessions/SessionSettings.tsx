@@ -295,7 +295,7 @@ export function buildCommandPreview(
   detectedDflash2Path = '',
   hasBundledDrafter = false,
   explicitDflash2?: boolean,
-  bundledDspark = false,
+  bundledDspark: false | { default: boolean } = false,
 ): string {
   const parts = ['vmlx-engine serve', modelPath]
   const requestedDistributed = !!(config as any).distributedEnabled
@@ -395,7 +395,8 @@ export function buildCommandPreview(
     ? (explicitDflash2 ?? /dflash2/i.test(config.speculativeModel))
     : !!detectedDflash2Path)
   // A bundled DSpark drafter (<bundle>/dspark) runs on the single-request lane, on by default (sessions.ts).
-  const dsparkActive = !dsv4Active && bundledDspark && config.useBundledDspark !== false &&
+  const dsparkChoice = config.useBundledDspark
+  const dsparkActive = !dsv4Active && !!bundledDspark && (dsparkChoice ?? bundledDspark.default) &&
     !config.speculativeModel && !dflash2Speculative
   const cacheStackActive = dsv4Active
     ? true
@@ -426,12 +427,13 @@ export function buildCommandPreview(
   // One shared builder owns every cache-tier and SSD-budget token shown here
   // and spawned by sessions.ts. Do not rebuild this fragment in the renderer.
   const cacheLaunch = buildCacheLaunchArgs({
-    nativeSpeculativeCache: dflash2Speculative,
+    // DSpark's multi-turn session tier is native speculative state like DFlash2's: it keeps the SSD settings.
+    nativeSpeculativeCache: dflash2Speculative || dsparkActive,
     continuousBatching: cacheStackActive,
     enablePrefixCache: config.enablePrefixCache !== false,
     usePagedCache: false,
-    enableDiskCache: !dflash2Speculative && !!diskControls.enableDiskCache,
-    enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
+    enableDiskCache: !dflash2Speculative && !dsparkActive && !!diskControls.enableDiskCache,
+    enableBlockDiskCache: dflash2Speculative || dsparkActive ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
     noMemoryAwareCache: !!config.noMemoryAwareCache,
     forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
     prefixCacheSize: config.prefixCacheSize,
@@ -527,7 +529,8 @@ export function buildCommandPreview(
     parts.push('--no-bundled-dflash2')
   }
   if (bundledDspark && !dsv4Active) {
-    parts.push('--dspark', dsparkActive ? 'on' : 'off')
+    const dsparkOverridden = !!config.speculativeModel || dflash2Speculative
+    parts.push('--dspark', dsparkOverridden ? 'off' : dsparkChoice === undefined ? 'auto' : dsparkActive ? 'on' : 'off')
   }
   if (compatibleExternalSpeculative) {
     parts.push('--speculative-model', effectiveSpeculativeModel)
@@ -603,7 +606,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
   const [previewMetadataState, setPreviewMetadataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
   const [detectedConfig, setDetectedConfig] = useState<{ toolParser?: string; reasoningParser?: string; supportsThinking?: boolean; cacheType?: string; cacheSubtype?: string; isMultimodal?: boolean; forceTextOnly?: boolean; runtimeModalities?: string[]; isTurboQuant?: boolean; usePagedCache?: boolean; enableAutoToolChoice?: boolean; family?: string; nativeGlmSsd?: boolean; dsv4PoolQuantDefault?: boolean; architectureHints?: Record<string, string | number | boolean>; maxContextLength?: number; nativeMtp?: { supported?: boolean; depth?: number; depthSource?: string; defaultMode?: 'auto' | 'off'; blockedReason?: string } } | null>(null)
   const [previewDrafters, setPreviewDrafters] = useState<Array<{ path: string; bundled?: boolean }>>([])
-  const [previewDspark, setPreviewDspark] = useState(false)
+  const [previewDspark, setPreviewDspark] = useState<false | { default: boolean }>(false)
   const explicitDflash2 = useDflash2Selection(config.speculativeModel || '')
   const sessionIdRef = useRef(sessionId)
   const resetRequestRef = useRef(0)
@@ -651,7 +654,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
           if (active) {
             setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
             setPreviewDrafters(drafters)
-            setPreviewDspark(!!dspark)
+            setPreviewDspark(dspark ? { default: dspark.default !== false } : false)
             setDetectedConfig(det && det.family !== 'unknown' ? det : null)
             setPreviewMetadataState(det && det.family !== 'unknown' ? 'ready' : 'unavailable')
           }

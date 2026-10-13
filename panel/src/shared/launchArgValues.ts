@@ -60,6 +60,7 @@ export const ADDITIONAL_ARG_VALUE_FLAGS = new Set([
   '--mcp-enabled-tools',
   '--mflux-class',
   '--model-family',
+  '--dspark',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',

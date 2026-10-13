@@ -86,7 +86,7 @@ export interface SessionConfig {
   speculativeModel: string
   /** Use a DFlash2 drafter shipped inside the model bundle when present. */
   useBundledDflash2?: boolean
-  /** Use a DSpark drafter shipped inside the model bundle (<bundle>/dspark) when present. */
+  /** Use a DSpark drafter shipped inside the model bundle (<bundle>/dspark). Unset = the bundle's measured default. */
   useBundledDspark?: boolean
   numDraftTokens: number
   nativeMtpMode?: 'adaptive' | 'off' | 'auto' | 'deterministic'
@@ -191,7 +191,6 @@ export const DEFAULT_CONFIG: SessionConfig = {
   servedModelName: '',
   speculativeModel: '',
   useBundledDflash2: true,
-  useBundledDspark: true,
   numDraftTokens: 3,
   nativeMtpMode: undefined,
   smelt: false,
@@ -234,6 +233,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
 export const RESET_CONFIG = {
   ...DEFAULT_CONFIG,
   blockDiskCacheMaxGb: undefined,
+  useBundledDspark: undefined,
   enableAutoToolChoice: undefined,
   modelFamily: undefined,
   idleTimeoutSoftMin: undefined,
@@ -456,8 +456,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     return () => { alive = false }
   }, [bundlePath, qwen38Dense27b, isImage])
   const bundledDflash2 = dflash2Drafters.find(d => d.bundled) || null
-  // DSpark drafter shipped inside the bundle (<bundle>/dspark: MiniCPM-V-4.7, Naive N0.5): on by default.
-  const [bundledDspark, setBundledDspark] = useState<{ name: string; path: string } | null>(null)
+  // DSpark drafter shipped inside the bundle (<bundle>/dspark: MiniCPM-V-4.7, Naive N0.5); `default` is the bundle's
+  // measured stamp, used until the user sets the checkbox.
+  const [bundledDspark, setBundledDspark] = useState<{ name: string; path: string; default: boolean } | null>(null)
   useEffect(() => {
     setBundledDspark(null)
     if (isImage || !bundlePath) return
@@ -465,7 +466,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     const api = (window as any).api?.models
     if (typeof api?.dsparkDrafter !== 'function') return
     api.dsparkDrafter(bundlePath)
-      .then((found: unknown) => { if (alive) setBundledDspark((found as { name: string; path: string } | null) || null) })
+      .then((found: unknown) => { if (alive) setBundledDspark((found as { name: string; path: string; default: boolean } | null) || null) })
       .catch(() => { /* advisory only */ })
     return () => { alive = false }
   }, [bundlePath, isImage])
@@ -473,7 +474,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const effectiveDraftModel = config.speculativeModel || (bundledDflash2Active ? bundledDflash2!.path : '')
   const selectedDflash2 = useDflash2Selection(effectiveDraftModel)
   const dflash2Speculative = selectedDflash2 || (!config.speculativeModel && bundledDflash2Active)
-  const dsparkActive = !!bundledDspark && config.useBundledDspark !== false && !config.speculativeModel && !dflash2Speculative
+  const dsparkActive = !!bundledDspark && (config.useBundledDspark ?? bundledDspark.default) && !config.speculativeModel && !dflash2Speculative
   const hybridCacheActive =
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||
@@ -546,12 +547,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const architectureRequiresPagedCache = false
   const zayaSsdReuseUnavailable = zayaCcaActive && !batchingOff && !prefixOff
   const cacheControlState = {
-    nativeSpeculativeCache: dflash2Speculative,
+    nativeSpeculativeCache: dflash2Speculative || dsparkActive,
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
     usePagedCache: exactTypedPromptDiskCache ? false : config.usePagedCache,
-    enableDiskCache: dsv4Active || dflash2Speculative ? false : !!diskControls.enableDiskCache,
-    enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
+    enableDiskCache: dsv4Active || dflash2Speculative || dsparkActive ? false : !!diskControls.enableDiskCache,
+    enableBlockDiskCache: dflash2Speculative || dsparkActive ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }
@@ -1863,7 +1864,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <CheckField
               label={t('sessions.config.useBundledDspark', { name: bundledDspark.name })}
               tooltip={t('sessions.config.useBundledDsparkTooltip')}
-              checked={config.useBundledDspark !== false}
+              checked={config.useBundledDspark ?? bundledDspark.default}
               onChange={v => onChange('useBundledDspark', v)}
             />
           </div>

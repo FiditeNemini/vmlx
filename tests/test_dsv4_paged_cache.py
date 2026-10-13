@@ -605,7 +605,7 @@ def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
     # DSV4 forces continuous batching on (DFlash2 speculative sessions force it
     # off; that branch is the DFlash2 lane's, checked by its own tests).
     assert (
-        "const effectiveContinuousBatching = dsv4Active ? true : dflash2Speculative ? false : config.continuousBatching"
+        "const effectiveContinuousBatching = dsv4Active ? true : dflash2Speculative || dsparkActive ? false : config.continuousBatching"
         in form
     )
     assert "dsv4PrefixCache: false" in form
@@ -662,19 +662,19 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
     cache_policy = Path("panel/src/shared/cacheControlPolicy.ts").read_text()
 
     for source in (settings, sessions):
-        # DFlash2 speculative sessions run the SimpleEngine lane, which
-        # deliberately keeps the paged cache stack off (its multiturn reuse
-        # lives in the dflash2_runtime session store instead).
+        # DFlash2 and bundled-DSpark speculative sessions run the SimpleEngine
+        # lane, which deliberately keeps the paged cache stack off (their
+        # multiturn reuse lives in the native session stores instead).
         assert (
             "const cacheStackActive = dsv4Active\n"
             "      ? true\n"
-            "      : dflash2Speculative\n"
+            "      : dflash2Speculative || dsparkActive\n"
             "        ? false\n"
             "        : config.continuousBatching !== false"
         ) in source or (
             "const cacheStackActive = dsv4Active\n"
             "    ? true\n"
-            "    : dflash2Speculative\n"
+            "    : dflash2Speculative || dsparkActive\n"
             "      ? false\n"
             "      : config.continuousBatching !== false"
         ) in source

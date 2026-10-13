@@ -19,7 +19,7 @@ import { db } from "../database";
 import { detectModelConfigFromDir } from "../model-config-registry";
 import { configDeclaresDflash2 } from "../../shared/dflash2Drafter";
 import { findBundledDflash2Drafter, isDflash2DrafterSelection } from "../dflash2Bundle";
-import { findBundledDsparkDrafter } from "../dsparkBundle";
+import { bundledDsparkDefault, findBundledDsparkDrafter } from "../dsparkBundle";
 import { getBundledPythonPath, getDevelopmentProjectVenv } from "../engine-manager";
 import {
   getImageModelEncoderType,
@@ -1153,7 +1153,7 @@ export function registerModelHandlers(): void {
   // DSpark drafter shipped inside the bundle (<bundle>/dspark): one directory listing.
   ipcMain.handle("models:dsparkDrafter", (_e, bundlePath?: string) => {
     const found = bundlePath ? findBundledDsparkDrafter(bundlePath) : null;
-    return found ? { name: drafterLabel(found), path: found } : null;
+    return found ? { name: drafterLabel(found), path: found, default: bundledDsparkDefault(bundlePath) } : null;
   });
   // Scan for available models in all configured directories
   ipcMain.handle("models:dflash2Drafters", async (_e, bundlePath?: string, scanLibrary: boolean = true) => {

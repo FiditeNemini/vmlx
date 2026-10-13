@@ -14,6 +14,25 @@ export function configDeclaresDspark(cfg: any): boolean {
 }
 
 /**
+ * The bundle's own DSpark default: `jang_config.json` `speculative.default` (method dspark). The builder stamps it from
+ * a measured served comparison against AR; a missing stamp means on (the engine's rule in
+ * models/mllm._load_dspark_runtime).
+ */
+export function bundledDsparkDefault(modelPath: string | undefined | null): boolean {
+  const root = String(modelPath || '').trim()
+  if (!root) return false
+  try {
+    const spec = JSON.parse(readFileSync(join(root, 'jang_config.json'), 'utf8'))?.speculative
+    if (spec && typeof spec === 'object' && String(spec.method || 'dspark').toLowerCase() === 'dspark') {
+      return spec.default !== false
+    }
+  } catch {
+    /* no stamp */
+  }
+  return true
+}
+
+/**
  * A DSpark drafter shipped INSIDE the model bundle (convention `<bundle>/dspark`; any immediate subfolder whose
  * config.json declares DSpark). The engine loads it with the model and runs it on the single-request lane; bundles
  * without one return null and launch exactly as before.

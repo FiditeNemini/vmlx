@@ -118,7 +118,7 @@ import {
 import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../shared/nativeMtpLaunchArgs'
 import { planSessionConfigSave } from '../shared/sessionConfigLifecycle'
 import { findBundledDflash2Drafter, isDflash2DrafterSelection } from './dflash2Bundle'
-import { findBundledDsparkDrafter } from './dsparkBundle'
+import { bundledDsparkDefault, findBundledDsparkDrafter } from './dsparkBundle'
 
 
 
@@ -594,6 +594,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--cluster-secret',
   '--speculative-model',
   '--no-bundled-dflash2',
+  '--dspark',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',
@@ -682,6 +683,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--cluster-secret',
   '--speculative-model',
   '--no-bundled-dflash2',
+  '--dspark',
   '--num-draft-tokens',
   '--native-mtp-depth',
   '--native-mtp-depth-policy',
@@ -5254,11 +5256,13 @@ export class SessionManager extends EventEmitter {
       console.log(`[SESSION] Using the DFlash2 drafter bundled with the model: ${bundledDflash2Drafter}`)
     }
     const dflash2Speculative = isDflash2DrafterSelection(effectiveSpeculativeModel)
-    // A DSpark drafter shipped inside the bundle (<bundle>/dspark: MiniCPM-V-4.7, Naive N0.5) is used by default
-    // (useBundledDspark). The engine runs it on the single-request lane, so batching stays off while it is active;
-    // an explicit draft model or a DFlash2 drafter takes precedence.
+    // A DSpark drafter shipped inside the bundle (<bundle>/dspark: MiniCPM-V-4.7, Naive N0.5) follows the bundle's
+    // measured stamp (jang_config speculative.default) unless the user set useBundledDspark. The engine runs it on
+    // the single-request lane, so batching stays off while it is active; an explicit draft model or a DFlash2 drafter
+    // takes precedence.
     const bundledDsparkDrafter = dsv4Active ? null : findBundledDsparkDrafter(config.modelPath)
-    const dsparkActive = !!bundledDsparkDrafter && (config as any).useBundledDspark !== false &&
+    const dsparkChoice: boolean | undefined = (config as any).useBundledDspark
+    const dsparkActive = !!bundledDsparkDrafter && (dsparkChoice ?? bundledDsparkDefault(config.modelPath)) &&
       !config.speculativeModel && !dflash2Speculative
     const cacheStackActive = dsv4Active
       ? true
@@ -5352,14 +5356,15 @@ export class SessionManager extends EventEmitter {
       console.log(`[SESSION] DSV4-Flash detected: overriding pagedCacheBlockSize ${config.pagedCacheBlockSize} -> ${DSV4_PAGED_CACHE_BLOCK_SIZE} (native SWA+CSA/HCA composite cache)`)
     }
     const cacheLaunch = buildCacheLaunchArgs({
-      nativeSpeculativeCache: dflash2Speculative,
+      // DSpark's multi-turn session tier is native speculative state like DFlash2's: it keeps the SSD settings.
+      nativeSpeculativeCache: dflash2Speculative || dsparkActive,
       continuousBatching: cacheStackActive,
       enablePrefixCache: config.enablePrefixCache !== false,
       // Accepted for migration compatibility only. The shared builder always
       // emits --no-paged-cache and never its positive counterpart.
       usePagedCache: false,
-      enableDiskCache: !dflash2Speculative && !!diskControls.enableDiskCache,
-      enableBlockDiskCache: dflash2Speculative ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
+      enableDiskCache: !dflash2Speculative && !dsparkActive && !!diskControls.enableDiskCache,
+      enableBlockDiskCache: dflash2Speculative || dsparkActive ? config.enableBlockDiskCache !== false : exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
       noMemoryAwareCache: !!config.noMemoryAwareCache,
       forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
       prefixCacheSize: config.prefixCacheSize,
@@ -5524,8 +5529,9 @@ export class SessionManager extends EventEmitter {
       args.push('--no-bundled-dflash2')
     }
     if (bundledDsparkDrafter) {
-      // Explicit either way: the bundle's own speculative.default stamp may say off.
-      args.push('--dspark', dsparkActive ? 'on' : 'off')
+      // The user's choice when set; otherwise the bundle's stamp (auto), which is what the lane above followed.
+      const dsparkOverridden = !!config.speculativeModel || dflash2Speculative
+      args.push('--dspark', dsparkOverridden ? 'off' : dsparkChoice === undefined ? 'auto' : dsparkActive ? 'on' : 'off')
       if (dsparkActive) console.log(`[SESSION] Using the DSpark drafter bundled with the model: ${bundledDsparkDrafter}`)
     }
     if (compatibleExternalSpeculative) {

@@ -256,7 +256,11 @@ class _VLMGDNStateCapture:
     def rollback(self, cache, accepted, trim) -> None:
         block_size = int(trim) + int(accepted) + 1
         rollback = getattr(self.adapter._target, "rollback_speculative_cache", None)
-        if rollback is not None:
+        # accepted == -1 (an AR step launched past the last emitted token, _checkpoint_correction) must undo the
+        # whole forward. mlx_vlm's rollback would replay q[:, :0] -> a zero-row gated_delta_update whose lazy state
+        # fails at eval (session store, then the next turn's first forward). The count == 0 branch below restores
+        # the forward's initial state and conv window instead.
+        if rollback is not None and int(accepted) >= 0:
             rollback(cache, self.adapter.gdn_states, int(accepted), block_size)
             return
 

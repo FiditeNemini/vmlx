@@ -359,3 +359,40 @@ def test_system_end_cut_marks_the_first_tag_after_a_system_message():
     assert _system_end_cut(Tok(), sys_prompt, 0) == 6
     assert _system_end_cut(Tok(), sys_prompt, 6) is None          # already cached
     assert _system_end_cut(Tok(), [900, 12, 8, 901, 900, 13], 0) is None   # no system message
+
+
+def test_full_undo_rollback_restores_the_forward_start_on_mlx_vlm_targets():
+    # An AR burst that launched one step past EOS rolls back with accepted=-1 (_checkpoint_correction(1, 0)).
+    # mlx_vlm's rollback_speculative_cache would replay a zero-row GDN update whose lazy state fails at eval; the
+    # capture must restore the forward's initial state and conv window itself.
+    import mlx.core as mx
+    from types import SimpleNamespace
+    from mlx_lm.models.cache import ArraysCache, KVCache
+    from mlx_vlm.models.qwen3_5.language import LanguageModel
+
+    from vmlx_engine.dflash2_runtime import _VLMGDNStateCapture
+
+    assert _checkpoint_correction(1, 0) == (-1, 1)
+    B, T, H, D, K = 1, 1, 2, 4, 4
+    initial = mx.random.normal((B, H, D, D))
+    conv_input = mx.random.normal((B, T + K - 1, 8))
+    rows = [mx.random.normal((B, T, H, D)) for _ in range(3)]
+    gdn = (*rows, mx.random.normal((B, T, H)), mx.random.normal((B, T, H)), mx.zeros((H,)), mx.zeros((H,)),
+           initial, None, conv_input, K)
+    delegated = []
+
+    def rollback_speculative_cache(caches, gdn_states, accepted, block_size):
+        delegated.append(accepted)
+        return LanguageModel.rollback_speculative_cache(None, caches, gdn_states, accepted, block_size)
+
+    capture = _VLMGDNStateCapture(SimpleNamespace(
+        _target=SimpleNamespace(rollback_speculative_cache=rollback_speculative_cache), gdn_states=[gdn]))
+    kv, ssm = KVCache(), ArraysCache(size=2)
+    kv.update_and_fetch(mx.zeros((B, H, 5, D)), mx.zeros((B, H, 5, D)))
+    ssm[0], ssm[1] = mx.zeros((B, K - 1, 8)), mx.zeros_like(initial)
+    capture.rollback([kv, ssm], -1, 1)
+    mx.eval(ssm[0], ssm[1])
+    assert delegated == []
+    assert kv.offset == 4
+    assert mx.array_equal(ssm[1], initial).item()
+    assert mx.array_equal(ssm[0], conv_input[:, : K - 1]).item()

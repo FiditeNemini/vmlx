@@ -7172,7 +7172,12 @@ class MLXMultimodalLM:
                                        "rope_delta": _entry_delta(len(forwarded))},
                                       parent=parent)
         summary = stats.as_dict()
-        spec = {"kind": "dspark", **summary, "generation_tps": summary.get("decode_tok_s")}
+        # Same keys as the DFlash2 lane's spec_stats (the Perf panel's Last-request card reads kind / lane / cycles /
+        # emitted_per_cycle / acceptance / ar_tokens / widths), plus the DSpark-specific counters.
+        spec = {"kind": "dspark", "lane": "minicpm" + ("-media" if media is not None else ""), **summary,
+                "cycles": summary["rounds"], "emitted_per_cycle": summary["tokens_per_round"],
+                "widths": {str(k): v for k, v in summary["widths"].items()},
+                "generation_tps": summary.get("decode_tok_s")}
         logger.info(
             "DSpark generation stats: prompt_tokens=%d output_tokens=%d rounds=%d tokens_per_round=%.3f "
             "acceptance=%.1f%% decode_tps=%s widths=%s total_s=%.2f finish=%s",

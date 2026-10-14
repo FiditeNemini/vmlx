@@ -4,6 +4,15 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.79] - 2026-10-14
+
+- Preserve model-native and explicit output limits when projected memory estimates are conservative; retain adaptive prefill chunking and memory advisories.
+- Fix native-EOS reasoning/tool classification, remove duplicate reasoning rails, and refresh attachment capabilities after engine restarts.
+- Correct DFlash2 cache rollback at EOS, chain SSD snapshots across pending final tokens, and isolate MiniCPM media-cache keys by crop so appending media preserves earlier prefixes.
+- Preserve explicit API seeds on the model worker, protect active requests during sleep and cache administration, and restore gateway services after cancelled or overlapping shutdown.
+- Report the active GLM DFlash2 native SSD cache accurately, label MTP acceptance by its measured phase, and expose DSpark terminal costs without changing decoding policy.
+- Load text-only MiniCPM sessions through their supported runtime, validate bundled drafter detection, and stop DSpark prefill cooperatively at existing chunk boundaries.
+
 ## [1.6.78] - 2026-10-13
 
 - Add MiniCPM-V-4.7 text, image and video support, with bundled DSpark detection and exact verification by default. Bundles without a drafter use ordinary decoding; explicit opt-out remains available.

@@ -12456,6 +12456,49 @@ def _native_cache_status(
         or cache_subtype in {"glm5_next_native_v1", "glm5_next_native_v2"}
         or getattr(scheduler, "_glm5_next_cache_unsupported", False)
     ):
+        # SimpleEngine DFlash2 owns its typed SSD checkpoints directly, not
+        # through a scheduler. Inspect its configured backend only: no cache
+        # lookup, budget refresh, tensor work or extra disk IO on status calls.
+        if scheduler is None and _engine is not None:
+            from .speculative import is_dflash2_enabled
+
+            if is_dflash2_enabled():
+                from . import glm_dflash2
+
+                disk_config = glm_dflash2._PREFIX_DISK
+                if disk_config.get("root") and disk_config.get("model_key"):
+                    return {
+                        "family": "glm5_next",
+                        "schema": glm_dflash2.PrefixDiskTier.FORMAT,
+                        "schema_implemented": True,
+                        "cache_type": "native_mixed_state_exact_boundary",
+                        "cache_subtype": "glm_dflash2_native_ssd",
+                        "cache_backend": "glm-dflash2",
+                        "components": ["kda_conv_state", "kda_recurrent_state",
+                                       "mla_native_state", "dsa_indexer_state",
+                                       "drafter_hidden", "next_logits"],
+                        "reason": None,
+                        "cache_store_policy": {
+                            "native_checkpoint_ssd": "typed_native_state_delta_snapshots",
+                            "generic_prefix_restore": "unsupported",
+                            "generic_paged_blocks": "unsupported",
+                            "prompt_disk_l2": "disabled_native_pool_instead",
+                            "every_request_recomputes_full_prefix": False,
+                            "recompute_when_no_compatible_checkpoint": True,
+                        },
+                        "generic_turboquant_kv": {
+                            "enabled": False,
+                            "reason": "mixed_path_dependent_native_state",
+                        },
+                        "prefix_configured": True,
+                        "block_disk_l2_configured": True,
+                        "prompt_disk_l2_configured": False,
+                        "prefix": True, "paged": False,
+                        "prompt_disk_l2": False, "block_disk_l2": False,
+                        "native_checkpoint_ssd": True,
+                        "configured_pool": "block_disk_cache",
+                    }
+
         # GLM's executable cache is a mixed, path-dependent structure: KDA
         # convolution/recurrent state plus MLA KV and DSA indexer state. Only
         # the exact N-1 typed snapshot/prompt-disk path may advertise reuse;
@@ -15102,6 +15145,14 @@ async def cache_stats():
             turboquant_status=result["turboquant_kv_cache"],
         )
         if native_cache:
+            result["native_cache"] = native_cache
+
+    if _engine is not None and scheduler is None:
+        _mc = _current_model_config()
+        native_cache = _native_cache_status(
+            family=getattr(_mc, "family_name", None), cfg=_mc,
+        )
+        if native_cache.get("native_checkpoint_ssd") is True:
             result["native_cache"] = native_cache
 
     # Disk cache (L2) stats — prompt-level

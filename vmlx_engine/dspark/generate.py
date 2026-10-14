@@ -188,6 +188,14 @@ class ARFallback:
     def record_ar(self, seconds: float) -> None:
         self.record_ar_burst(1, seconds)
 
+    def cost_snapshot(self) -> dict:
+        """Read-only measured costs for end-of-request diagnostics."""
+        return {
+            "ar_step_seconds": self.ar_seconds,
+            "draft_tokens_per_second": self.draft_rate,
+            "round_seconds_by_rows": dict(self.width_seconds),
+        }
+
     def burst_size(self) -> int:
         """AR steps to run now: the rest of the current burst, cut at the next draft probe."""
         return max(1, min(self.ar_left, self.probe_every - self.since_probe))

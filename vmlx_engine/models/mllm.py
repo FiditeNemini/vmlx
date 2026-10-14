@@ -7305,6 +7305,8 @@ class MLXMultimodalLM:
             snapshots.append((kind, cut, _dsession.clone(cache, target.make_cache), _dsession.clone(draft_caches, _make_draft)))
 
         session = {}
+        ar_policy = (None if os.environ.get("VMLX_DSPARK_AR_FALLBACK", "1").strip().lower() in
+                     {"0", "false", "off", "no"} else ARFallback())
         logger.info("DSpark %s chat active for %s (prompt %d tokens, %d restored from %s)",
                     "media (%d image(s), %d video(s))" % (int(media.get("image_count") or 0),
                                                          int(media.get("video_count") or 0))
@@ -7316,8 +7318,7 @@ class MLXMultimodalLM:
                 prefill_step=step, sampler=sampler, max_draft=runtime["max_draft"],
                 cost_per_row=runtime["cost_per_row"], stats=stats,
                 # AR steps when drafting measures slower (low-acceptance text); VMLX_DSPARK_AR_FALLBACK=0 = A/B off.
-                ar_fallback=(None if os.environ.get("VMLX_DSPARK_AR_FALLBACK", "1").strip().lower() in
-                             {"0", "false", "off", "no"} else ARFallback()),
+                ar_fallback=ar_policy,
                 resume=resume, snapshot_cuts=[c for _, c in cuts], on_snapshot=_on_snapshot, session=session,
             ):
                 for token in chunk:
@@ -7355,6 +7356,9 @@ class MLXMultimodalLM:
                                        "rope_delta": _entry_delta(len(forwarded))},
                                       parent=parent)
         summary = stats.as_dict()
+        if ar_policy is not None:
+            logger.info("DSpark adaptive measured costs: %s ar_tokens=%d rounds=%d",
+                        ar_policy.cost_snapshot(), stats.ar_tokens, stats.rounds)
         # Same keys as the DFlash2 lane's spec_stats (the Perf panel's Last-request card reads kind / lane / cycles /
         # emitted_per_cycle / acceptance / ar_tokens / widths), plus the DSpark-specific counters.
         spec = {"kind": "dspark", "lane": "minicpm" + ("-media" if media is not None else ""), **summary,

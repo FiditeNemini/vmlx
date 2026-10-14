@@ -168,11 +168,15 @@ class MiniCPMDSparkTarget:
 
     def prefill(self, ids: mx.array, cache, taps: Sequence[int], prefill_step: Optional[int]):
         """Returns (last-row logits (V,), tap features (1, P, n_taps * H))."""
+        from ..utils.generation_cancellation import raise_if_generation_cancelled
+
+        raise_if_generation_cancelled()
         length = int(ids.shape[1])
         feats = []
         if prefill_step is not None and length > prefill_step:
             start = 0
             while length - start > 1:
+                raise_if_generation_cancelled()
                 n = min(int(prefill_step), length - start - 1)
                 _, f = self._stock(ids[:, start:start + n], cache, taps, logits=False)
                 mx.eval([c.state for c in cache])
@@ -180,9 +184,11 @@ class MiniCPMDSparkTarget:
                     mx.eval(f)
                     feats.append(f)
                 start += n
+            raise_if_generation_cancelled()
             logits, f = self._stock(ids[:, -1:], cache, taps, logits=True)
         else:
             logits, f = self._stock(ids, cache, taps, logits=True)
+        raise_if_generation_cancelled()
         if f is not None:
             feats.append(f)
         return logits[0, -1], (mx.concatenate(feats, axis=1) if feats else None)
@@ -190,15 +196,19 @@ class MiniCPMDSparkTarget:
     def prefill_segment(self, ids: mx.array, cache, taps: Sequence[int], prefill_step: Optional[int]):
         """Forward a prompt segment that ends at a session-snapshot cut (no logits), in ``prefill_step`` chunks.
         Returns its tap features (1, n, n_taps * H) or None without taps."""
+        from ..utils.generation_cancellation import raise_if_generation_cancelled
+
         length = int(ids.shape[1])
         step = int(prefill_step) if prefill_step else length
         feats = []
         for start in range(0, length, max(1, step)):
+            raise_if_generation_cancelled()
             _, f = self._stock(ids[:, start:start + step], cache, taps, logits=False)
             mx.eval([c.state for c in cache])
             if f is not None:
                 mx.eval(f)
                 feats.append(f)
+        raise_if_generation_cancelled()
         return mx.concatenate(feats, axis=1) if feats else None
 
     def ar_step(self, token: mx.array, cache, taps: Sequence[int]):

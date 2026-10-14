@@ -34,6 +34,10 @@ from ..utils.chat_template_kwargs import (
     build_chat_template_kwargs,
     ensure_thinking_off_sentinel,
 )
+from ..utils.generation_cancellation import (
+    GenerationCancelled,
+    generation_cancellation_scope,
+)
 from .base import BaseEngine, GenerationOutput
 
 logger = logging.getLogger(__name__)
@@ -1318,13 +1322,29 @@ class SimpleEngine(BaseEngine):
                     _sentinel = object()
                     def _next():
                         try:
-                            return next(stream_iter)
+                            with generation_cancellation_scope(lambda: self._abort_requested):
+                                return next(stream_iter)
                         except StopIteration:
                             return _sentinel
 
                     while True:
                         try:
                             chunk = await self._run_model_call(_next)
+                        except GenerationCancelled:
+                            self._abort_requested = False
+                            logger.info("SimpleEngine: MLLM prefill aborted by request")
+                            await self._run_model_call(
+                                lambda: clear_mlx_memory_cache(log=logger)
+                            )
+                            yield GenerationOutput(
+                                text=accumulated_text,
+                                new_text="",
+                                prompt_tokens=last_prompt_tokens,
+                                completion_tokens=token_count,
+                                finished=True,
+                                finish_reason="abort",
+                            )
+                            return
                         except Exception as e:
                             logger.error(f"MLLM generation error: {type(e).__name__}: {e}")
                             clear_mlx_memory_cache(log=logger)

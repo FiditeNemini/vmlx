@@ -39,7 +39,7 @@ def test_no_verified_template_prefix():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('surface', ['chat', 'responses'])
 @pytest.mark.parametrize('stream', [False, True])
-@pytest.mark.parametrize('finish,text,expected', [('stop', 'ORCHID', 'ORCHID'), ('length', 'ORCHID', ''), ('stop', 'plan</think>ORCHID', 'ORCHID')])
+@pytest.mark.parametrize('finish,text,expected', [('stop', 'ORCHID', 'ORCHID'), ('stop', '\nORCHID\n', '\nORCHID\n'), ('length', 'ORCHID', ''), ('stop', 'plan</think>ORCHID', 'ORCHID')])
 async def test_stream_terminal_classification(monkeypatch, surface, stream, finish, text, expected):
     import json
     from types import SimpleNamespace
@@ -88,7 +88,7 @@ async def test_stream_terminal_classification(monkeypatch, surface, stream, fini
             content = ''.join(part.text for item in response.output if item.type == 'message' for part in item.content)
         assert content == expected
         assert engine.calls == 1
-        classified = text == 'ORCHID' and finish == 'stop'
+        classified = text.strip() == 'ORCHID' and finish == 'stop'
         assert ('reasoning_closed_by_eos' in response.model_dump_json(exclude_none=True)) == classified
         if surface == 'chat':
             reasoning = response.choices[0].message.reasoning
@@ -113,7 +113,7 @@ async def test_stream_terminal_classification(monkeypatch, surface, stream, fini
         assert terminal[0]['type'] == ('response.incomplete' if finish == 'length' else 'response.completed')
     assert content == expected
     assert engine.calls == 1
-    assert ('reasoning_closed_by_eos' in json.dumps(events)) == (text == 'ORCHID' and finish == 'stop')
+    assert ('reasoning_closed_by_eos' in json.dumps(events)) == (text.strip() == 'ORCHID' and finish == 'stop')
 
 
 def test_classification_history_does_not_duplicate_tokens():

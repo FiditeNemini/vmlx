@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatMtpScope, reportedCount, formatWeightQuant } from '../src/renderer/src/components/sessions/PerformancePanel'
+import { formatMtpScope, reportedCount, formatWeightQuant, lastRequestItems } from '../src/renderer/src/components/sessions/PerformancePanel'
 
 // Cache/Perf display audit (2026-09-07): an absent MTP measurement must read as
 // unknown, never as zero, and the MTP cards must say which request they describe.
@@ -47,5 +47,23 @@ describe('JANGH component labels', () => {
     const janght = {quantization:{runtime_component_label:'JANGHT',weight_format:'jangtq2',mixed_precision:true,config_bits:8}} as Parameters<typeof formatWeightQuant>[0]
     expect(formatWeightQuant(janght, key => key)).toBe('JANGHT mixed')
     expect(health.quantization!.weight_format).toBe('jangtq2')
+  })
+})
+
+
+describe('Native MTP measurement scope', () => {
+  it('labels phase acceptance without changing whole-request decode or finish', () => {
+    const t = (key: string) => key
+    const rows = lastRequestItems({finish_reason: 'stop', decode: {tokens: 100, seconds: 2, tps: 50},
+      speculative: {kind: 'mtp', scope: 'last_native_mtp_phase', acceptance: 0.75, final_depth: 2}}, t)
+    expect(rows.find(x => x.key === 'speculative')?.value).toContain('sessions.perf.lrLastMtpPhase')
+    expect(rows.find(x => x.key === 'decode')?.value).toBe('50.0 t/s (100 tok / 2.00 s)')
+    expect(rows.find(x => x.key === 'request')?.value).toBe('stop')
+  })
+  it('does not invent a phase scope for legacy or external drafter records', () => {
+    for (const kind of ['mtp', 'dflash2', 'dspark']) {
+      const rows = lastRequestItems({speculative: {kind, acceptance: 0.5}}, key => key)
+      expect(rows.find(x => x.key === 'speculative')?.value).not.toContain('sessions.perf.lrLastMtpPhase')
+    }
   })
 })

@@ -132,11 +132,14 @@ class _Tracker:
 
 
 def mtp_spec_stats(record: Any) -> Optional[dict]:
-    """A finished request's native-MTP record (text mlx_lm patch or MLLM batch generator, same schema) as the
-    ``speculative`` block of last_request."""
+    """Project native-MTP counters, preserving their reported measurement scope.
+
+    A batched MLLM record describes its last MTP phase; request-wide finish and
+    decode timing remain in the parent last_request record.
+    """
     if not isinstance(record, dict):
         return None
-    return {
+    projected = {
         "kind": "mtp",
         "cycles": record.get("cycles"),
         "drafted": record.get("drafted_tokens"),
@@ -147,6 +150,9 @@ def mtp_spec_stats(record: Any) -> Optional[dict]:
         "finish_reason": record.get("finish_reason"),
         "fallback_reason": record.get("fallback_reason"),
     }
+    if record.get("scope"):
+        projected["scope"] = record["scope"]
+    return projected
 
 
 def last() -> Optional[dict]:

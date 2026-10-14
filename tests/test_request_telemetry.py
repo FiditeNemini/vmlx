@@ -219,3 +219,33 @@ def test_mllm_scheduler_attaches_the_finished_requests_mtp_record():
                                             ._process_batch_responses))
     assert 'str(_mtp.get("request_id")) == str(request_id)' in src
     assert "output.spec_stats = mtp_spec_stats(_mtp)" in src
+
+
+def test_mtp_phase_scope_survives_projection_without_mutating_record():
+    record = {"request_id": "phase-row", "scope": "last_native_mtp_phase",
+              "cycles": 2, "drafted_tokens": 4, "accepted_tokens": 3,
+              "acceptance_rate": 0.75, "finish_reason": "ar_calibration"}
+    before = dict(record)
+    projected = RT.mtp_spec_stats(record)
+    assert projected["scope"] == "last_native_mtp_phase"
+    assert projected["cycles"] == 2
+    assert projected["finish_reason"] == "ar_calibration"
+    assert record == before
+
+
+def test_last_request_finish_and_timing_are_not_mtp_phase_finish(monkeypatch):
+    monkeypatch.setattr(RT, "_LAST", None)
+    monkeypatch.setattr(RT, "_SEQ", 0)
+    phase = RT.mtp_spec_stats({"scope": "last_native_mtp_phase", "cycles": 2,
+                              "finish_reason": "ar_calibration", "accepted_tokens": 3})
+    tracker = RT._Tracker("stream_chat", "batched", "mllm")
+    tracker.start = 1000.0
+    tracker.observe(_out(1001.0, 1))
+    tracker.observe(_out(1002.0, 51, finished=True, spec_stats=phase))
+    tracker.record()
+    rec = RT.last()
+    assert rec["finish_reason"] == "stop"
+    assert rec["completion_tokens"] == 51
+    assert rec["speculative"]["scope"] == "last_native_mtp_phase"
+    assert rec["speculative"]["finish_reason"] == "ar_calibration"
+    assert rec["decode"]["tokens"] == 50

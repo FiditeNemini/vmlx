@@ -28,6 +28,7 @@ interface HealthData {
     batch_generator?: {
       last_native_mtp?: {
         request_id?: string
+        scope?: string
         finish_reason?: string
         final_depth?: number
         cycles?: number
@@ -297,6 +298,7 @@ export type LastRequest = {
   decode?: { tokens?: number; seconds?: number; tps?: number | null } | null
   speculative?: {
     kind?: string; lane?: string; cycles?: number; emitted_per_cycle?: number; drafted?: number; accepted?: number
+    scope?: string
     acceptance?: number | null; widths?: Record<string, number>; ar_tokens?: number; generation_tps?: number
     final_depth?: number | null; fallback_reason?: string | null
   } | null
@@ -533,13 +535,15 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             )}
             {lastNativeMtp && (
               <InfoCard
-                label={t('sessions.performance.mtpScope')}
+                label={t(lastNativeMtp.scope === 'last_native_mtp_phase'
+                  ? 'sessions.performance.mtpPhaseScope' : 'sessions.performance.mtpScope')}
                 value={formatMtpScope(lastNativeMtp)}
               />
             )}
             {lastNativeMtp && (
               <InfoCard
-                label={t('sessions.performance.mtpAccept')}
+                label={t(lastNativeMtp.scope === 'last_native_mtp_phase'
+                  ? 'sessions.performance.mtpPhaseAccept' : 'sessions.performance.mtpAccept')}
                 value={`${reportedCount(lastNativeMtp.accepted_tokens)}/${reportedCount(lastNativeMtp.drafted_tokens)} (${formatPercent(lastNativeMtp.acceptance_rate)})`}
               />
             )}
@@ -979,6 +983,7 @@ export function lastRequestItems(lr: LastRequest, t: Translate): Array<{ key: st
   const spec = s && s.kind
     ? [
         `${s.kind}${s.lane ? ` (${s.lane})` : ''}`,
+        s.scope === 'last_native_mtp_phase' ? t('sessions.perf.lrLastMtpPhase') : null,
         finite(s.acceptance) ? t('sessions.perf.lrAcceptance', { pct: (s.acceptance * 100).toFixed(1) }) : null,
         finite(s.emitted_per_cycle) ? t('sessions.perf.lrPerCycle', { n: s.emitted_per_cycle.toFixed(2) }) : null,
         finite(s.ar_tokens) && s.ar_tokens > 0 ? t('sessions.perf.lrArTokens', { n: s.ar_tokens }) : null,

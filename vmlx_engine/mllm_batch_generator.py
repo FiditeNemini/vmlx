@@ -8292,6 +8292,9 @@ class MLLMBatchStats:
             final_depth=final_depth,
             fallback_reason=fallback_reason,
         )
+        # Re-entry creates fresh phase stats. This record is the most recent
+        # completed MTP phase, not an aggregate over the request's AR/MTP work.
+        self.last_native_mtp["scope"] = "last_native_mtp_phase"
 
     @property
     def prompt_tps(self) -> float:

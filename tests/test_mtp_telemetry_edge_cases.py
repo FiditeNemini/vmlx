@@ -754,3 +754,22 @@ def test_both_native_mtp_env_spellings_reach_every_reader(monkeypatch):
     monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
     monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
     assert native_mtp_disabled_by_env() is False
+
+
+def test_mllm_reentry_record_explicitly_reports_only_last_phase():
+    from vmlx_engine.mllm_batch_generator import MLLMBatchStats, MLLMNativeMTPStats
+    publisher = MLLMBatchStats()
+    first = MLLMNativeMTPStats(cycles=10, drafted_tokens=20, accepted_tokens=12)
+    publisher.record_native_mtp(request_id="same-request", stats=first,
+                                finish_reason="fallback_to_ar", final_depth=2)
+    original = first.to_dict(request_id="same-request", finish_reason="fallback_to_ar",
+                             final_depth=2)
+    second = MLLMNativeMTPStats(cycles=2, drafted_tokens=4, accepted_tokens=3)
+    publisher.record_native_mtp(request_id="same-request", stats=second,
+                                finish_reason="ar_calibration", final_depth=1)
+    record = publisher.to_dict()["last_native_mtp"]
+    assert record["scope"] == "last_native_mtp_phase"
+    assert record["cycles"] == 2 and record["drafted_tokens"] == 4
+    assert record["finish_reason"] == "ar_calibration"
+    assert first.to_dict(request_id="same-request", finish_reason="fallback_to_ar",
+                         final_depth=2) == original

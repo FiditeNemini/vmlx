@@ -4685,6 +4685,87 @@ def _dflash2_media_key_tokens(tokens: list, media_ids: set, grid, pixel_values):
         ]
     return key_tokens
 
+def _dspark_crop_media_keys(tokens: list, config, pixel_values, extra: dict):
+    """Match MiniCPM NaViT strips to crop runs without touching model inputs.
+
+    The vision tower consumes (1,C,P,sum(h*w)*P); each crop has one pad
+    run of h*w/divisor tokens. Hash only that crop's processed bytes and
+    geometry, so appending media never changes an earlier crop's identity.
+    Unknown layouts retain the existing whole-request identity.
+    """
+    import hashlib
+
+    import mlx.core as mx
+    import numpy as np
+
+    mode = extra.get("downsample_mode") or getattr(config, "downsample_mode", None)
+    if mode not in ("4x", "16x"):
+        return None
+    divisor = 4 if mode == "4x" else 16
+    vision = getattr(config, "vision_config", None)
+    patch = getattr(vision, "patch_size", None)
+    channels = getattr(vision, "num_channels", None)
+    if not patch or not channels:
+        return None
+    keys = list(tokens)
+    matched = set()
+    for modality, token_id, pixels, sizes in (
+        ("image", getattr(config, "image_token_id", None), pixel_values, extra.get("target_sizes")),
+        ("video", getattr(config, "video_token_id", None), extra.get("pixel_values_videos"), extra.get("target_sizes_videos")),
+    ):
+        runs, start = [], None
+        for i, token in enumerate(list(tokens) + [None]):
+            if token_id is not None and token == token_id and start is None:
+                start = i
+            elif token != token_id and start is not None:
+                runs.append((start, i))
+                start = None
+        if not runs and pixels is None and sizes is None:
+            continue
+        if not runs or pixels is None or sizes is None:
+            return None
+        grid = np.asarray(sizes)
+        if grid.ndim != 2 or grid.shape[1] != 2 or len(runs) != len(grid):
+            return None
+        rows = [tuple(int(v) for v in row) for row in grid.tolist()]
+        spans = [h * w for h, w in rows]
+        if any(h <= 0 or w <= 0 for h, w in rows):
+            return None
+        if pixels.ndim != 4 or pixels.shape[0] < 1 or tuple(pixels.shape[1:]) != (
+            channels, patch, sum(spans) * patch,
+        ):
+            return None
+        if any(span % divisor or end - begin != span // divisor
+               or end - begin < _DFLASH2_MIN_MEDIA_KEY_RUN
+               for (begin, end), span in zip(runs, spans)):
+            return None
+        # The native vision path uses batch row0. BF16 is hashed as raw bits;
+        # NumPy cannot represent BF16, and widening it creates an unnecessary
+        # full-media FP32 copy solely for identity hashing.
+        dtype = str(pixels.dtype)
+        first = pixels[:1]
+        bits = first.view(mx.uint16) if first.dtype == mx.bfloat16 else first
+        data = np.asarray(bits)
+        offset = 0
+        for (begin, end), span, row in zip(runs, spans, rows):
+            payload = data[..., offset * patch:(offset + span) * patch]
+            header = repr(("dspark-crop-v1", modality, mode, patch, channels, dtype, row)).encode()
+            stream = hashlib.shake_256(header + payload.tobytes()).digest(4 * (end - begin))
+            keys[begin:end] = [
+                0x80000000 | (int.from_bytes(stream[4*j:4*j+4], "big") & 0x3FFFFFFF)
+                for j in range(end - begin)
+            ]
+            offset += span
+        matched.add(int(token_id))
+    expected = {int(v) for v in (
+        getattr(config, "image_token_id", None), getattr(config, "video_token_id", None),
+        getattr(config, "image_token_index", None), getattr(config, "video_token_index", None),
+    ) if v is not None}
+    if not matched or any(t in expected - matched for t in tokens):
+        return None
+    return keys
+
+
 def _dspark_salted_media_keys(tokens: list, media_ids: set, salt: str) -> list:
     """Session-key tokens for a DSpark media request: every media placeholder position carries a pseudo id from a
     SHAKE-256 stream of the request's media salt (30 bits per position, above any vocab id; text positions keep their
@@ -7034,10 +7115,9 @@ class MLXMultimodalLM:
         The same mlx-vlm ``prepare_inputs`` call as the native route (``stream_generate``: images, native video clips,
         ``add_special_tokens=True``); then, deferred in ``materialize``, the model's own ``get_input_embeddings`` --
         vision tower on image crops and video frames, merged features, canvas M-RoPE positions and the rope delta of
-        the text after the prompt (the DFlash2 media plan's shape). MiniCPM's crops cannot be paired with grid rows, so
-        the session key is ``_dspark_salted_media_keys`` over a hash of every processed media tensor and its crop
-        geometry: a follow-up turn about the same media resumes through it, any other media diverges at the first
-        placeholder. VMLX_DSPARK_MEDIA=0 keeps media requests on the native path (A/B).
+        the text after the prompt (the DFlash2 media plan's shape). Known NaViT strips use per-crop processed-pixel
+        identity; appending media preserves earlier crops' prefix keys. Unmatched layouts retain the whole-request
+        salt. VMLX_DSPARK_MEDIA=0 keeps media requests on the native path (A/B).
         """
         import hashlib
 
@@ -7097,18 +7177,27 @@ class MLXMultimodalLM:
         media_end = max((i + 1 for i, t in enumerate(tokens) if t in media_ids), default=0)
         if not media_end:
             return None
-        digest = hashlib.sha256()
-        for key, value in (("pixel_values", pixel_values),) + tuple(
-                (k, extra.get(k)) for k in ("pixel_values_videos", "target_sizes", "target_sizes_videos",
-                                            "image_grid_thw", "video_grid_thw")):
-            if value is None:
-                continue
-            arr = np.asarray(value.astype(mx.float32) if getattr(value, "dtype", None) == mx.bfloat16 else value)
-            digest.update(key.encode() + str(arr.shape).encode() + arr.tobytes())
-        salt = digest.hexdigest()[:32]
+        try:
+            key_tokens = _dspark_crop_media_keys(tokens, config, pixel_values, extra)
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            logger.debug("DSpark crop identity unavailable; whole-request identity", exc_info=True)
+            key_tokens = None
+        salt = None
+        if key_tokens is None:
+            digest = hashlib.sha256()
+            for key, value in (("pixel_values", pixel_values),) + tuple(
+                    (k, extra.get(k)) for k in ("pixel_values_videos", "target_sizes", "target_sizes_videos",
+                                                "image_grid_thw", "video_grid_thw")):
+                if value is None:
+                    continue
+                arr = np.asarray(value.astype(mx.float32) if getattr(value, "dtype", None) == mx.bfloat16 else value)
+                digest.update(key.encode() + str(arr.shape).encode() + arr.tobytes())
+            salt = digest.hexdigest()[:32]
+            key_tokens = _dspark_salted_media_keys(tokens, media_ids, salt)
+        logger.info("DSpark media prefix identity: %s", "per-crop" if salt is None else "whole-request fallback")
         return {
             "prompt_tokens": tokens,
-            "key_tokens": _dspark_salted_media_keys(tokens, media_ids, salt),
+            "key_tokens": key_tokens,
             "materialize": materialize,
             "media_end": media_end,
             "first_media_index": next(i for i, t in enumerate(tokens) if t in media_ids),

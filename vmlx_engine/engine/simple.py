@@ -71,6 +71,20 @@ def _dflash2_enabled() -> bool:
     return is_dflash2_enabled()
 
 
+def _with_request_seed(fn, seed):
+    """Seed once on the model worker, after admission, only when requested."""
+    if seed is None:
+        return fn
+
+    def seeded(*args, **kwargs):
+        import mlx.core as mx
+
+        mx.random.seed(int(seed))
+        return fn(*args, **kwargs)
+
+    return seeded
+
+
 class _IdleReleaseLock(asyncio.Lock):
     """SimpleEngine's generation lock, which also notices when the engine goes idle (2026-10-12).
 
@@ -1021,6 +1035,7 @@ class SimpleEngine(BaseEngine):
 
         async with self._generation_lock:
             _admission_wait = await self._await_prior_terminal_persistence(None)
+            request_seed = kwargs.pop("seed", None)
             if self._is_mllm:
                 if (
                     self._model_family_name() == "mimo_v2"
@@ -1041,7 +1056,7 @@ class SimpleEngine(BaseEngine):
                         source="rendered MiMo text-only chat prompt",
                     )
                     output = await self._run_model_call(
-                        self._mimo_text_only_generate,
+                        _with_request_seed(self._mimo_text_only_generate, request_seed),
                         prompt=prompt,
                         tokenizer=tokenizer,
                         max_tokens=max_tokens,
@@ -1066,7 +1081,7 @@ class SimpleEngine(BaseEngine):
                 if template_tools:
                     mllm_kwargs["tools"] = template_tools
                 output = await self._run_model_call(
-                    self._model.chat,
+                    _with_request_seed(self._model.chat, request_seed),
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
@@ -1170,7 +1185,7 @@ class SimpleEngine(BaseEngine):
                 # Generate inline (don't call self.generate() — we already hold
                 # _generation_lock and asyncio.Lock is not reentrant).
                 output = await self._run_model_call(
-                    self._model.generate,
+                    _with_request_seed(self._model.generate, request_seed),
                     prompt=prompt,
                     max_tokens=max_tokens,
                     temperature=temperature,
@@ -1262,6 +1277,7 @@ class SimpleEngine(BaseEngine):
             last_cached_tokens = 0
             last_cache_detail = ""
             last_prefill_usage = None
+            request_seed = kwargs.pop("seed", None)
 
             # Pass enable_thinking to MLLM for models that support it (Qwen3-VL, etc.)
             mllm_kwargs = dict(kwargs)
@@ -1285,13 +1301,13 @@ class SimpleEngine(BaseEngine):
                         # Create and consume the synchronous iterator on the
                         # same MLX worker thread that loaded the model.
                         stream_iter = await self._run_model_call(
-                            lambda: iter(self._model.stream_chat(
+                            _with_request_seed(lambda: iter(self._model.stream_chat(
                                 messages=messages,
                                 max_tokens=max_tokens,
                                 temperature=temperature,
                                 top_p=top_p,
                                 **mllm_kwargs,
-                            ))
+                            )), request_seed)
                         )
                     except Exception as e:
                         logger.error(f"MLLM stream_chat failed to start: {type(e).__name__}: {e}")

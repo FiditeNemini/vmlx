@@ -277,9 +277,9 @@ def test_metal_headroom_guard_contract_covers_all_public_text_surfaces():
         "cli_vmlx_engine_serve_explicit_max_tokens",
     ):
         assert surface in source
-    assert "requested=8192" in source
-    assert "safe_cap=1" in source
-    assert "projected safe Metal headroom" in source
+    assert 'item["max_tokens"] == 8192' in source
+    assert 'response.status_code != 413' in source
+    assert '"estimated_cap": 1' in source
 
 
 @pytest.fixture

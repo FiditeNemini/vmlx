@@ -3,7 +3,6 @@ import json
 import logging
 
 import pytest
-from fastapi import HTTPException
 
 
 def test_status_projection_does_not_warn_or_consume_request_dedup(monkeypatch, caplog):
@@ -16,16 +15,14 @@ def test_status_projection_does_not_warn_or_consume_request_dedup(monkeypatch, c
     monkeypatch.setattr(server, '_projected_guard_warned', set())
     with caplog.at_level(logging.WARNING):
         status = server._model_effective_defaults_status('diagnostic')
-        assert status['effective_defaults']['max_output_tokens'] == 11436
+        assert status['effective_defaults']['max_output_tokens'] == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
         assert not server._projected_guard_warned
-        assert not any('headroom guard clamped' in r.message for r in caplog.records)
+        assert not any('headroom advisory' in r.message for r in caplog.records)
         assert server._resolve_max_tokens(4096, 'diagnostic') == 4096
-        assert server._resolve_max_tokens(None, 'diagnostic') == 11436
-        assert sum('headroom guard clamped implicit' in r.message for r in caplog.records) == 1
-    # Suppressing telemetry warnings must never bypass explicit safety.
-    with pytest.raises(HTTPException) as exc:
-        server._resolve_max_tokens(16384, 'diagnostic', emit_warning=False)
-    assert exc.value.status_code == 413
+        assert server._resolve_max_tokens(None, 'diagnostic') == server._FALLBACK_MAX_OUTPUT_TOKENS_REASONING
+        assert sum('headroom advisory for implicit' in r.message for r in caplog.records) == 1
+    # Status projection and explicit requests preserve the same caller policy.
+    assert server._resolve_max_tokens(16384, 'diagnostic', emit_warning=False) == 16384
 
 
 @pytest.mark.parametrize('metadata', ['generation_config.json', 'jang_config.json'])

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""API contract proof for projected Metal output-token guard.
+"""API admission contract for advisory projected Metal output estimates.
 
 This harness uses FastAPI's in-process TestClient with a minimal loaded-engine
-shape because the contract under test is route-level rejection before model
-forward. It is intentionally not a model-quality proof.
+shape that records requested limits and raises at the forward boundary.
+It proves admission/parameter transport, not successful generation or model quality.
 """
 
 from __future__ import annotations
@@ -121,6 +121,27 @@ def _json_safe(value: Any) -> Any:
     return repr(value)
 
 
+class _ForwardBoundaryProbe(SimpleNamespace):
+    """Never load/run a model; record the limit that reaches the engine."""
+    def _record(self, method, kwargs):
+        self.forward_calls.append({"method": method, "max_tokens": kwargs.get("max_tokens")})
+        raise RuntimeError("projected-headroom-forward-boundary-probe")
+
+    async def chat(self, *args, **kwargs):
+        self._record("chat", kwargs)
+
+    async def generate(self, *args, **kwargs):
+        self._record("generate", kwargs)
+
+    async def stream_chat(self, *args, **kwargs):
+        self._record("stream_chat", kwargs)
+        yield  # Makes this an async iterator; never reached.
+
+    async def stream_generate(self, *args, **kwargs):
+        self._record("stream_generate", kwargs)
+        yield
+
+
 def _install_fake_loaded_engine(
     server: Any,
     *,
@@ -135,7 +156,9 @@ def _install_fake_loaded_engine(
         torch_dtype="bfloat16",
     )
     server._api_key = None
-    server._engine = SimpleNamespace(
+    server._engine = _ForwardBoundaryProbe(
+        forward_calls=[],
+        tokenizer=None,
         model=SimpleNamespace(config=cfg),
         is_mllm=False,
         preserve_native_tool_format=False,
@@ -149,13 +172,7 @@ def _install_fake_loaded_engine(
 
 
 def _resolve_default_clamp(server: Any) -> dict[str, Any]:
-    """A CLI --max-tokens session default above the cap must CLAMP, not 413.
-
-    Defaults-driven requests carry no max_tokens the caller could reduce, so
-    rejecting made every plain request fail while the session looked healthy
-    (live 2026-08-07: UI-saved 12288 vs DSV4 safe_cap 10063). The hard 413 is
-    reserved for per-request values, pinned by the route surfaces above.
-    """
+    """CLI/session defaults must survive the projected estimate unchanged."""
     try:
         value = server._resolve_max_tokens(None, "fake-metal-headroom-model")
     except Exception as exc:
@@ -166,7 +183,7 @@ def _resolve_default_clamp(server: Any) -> dict[str, Any]:
             "body_excerpt": str(getattr(exc, "detail", exc))[:500],
         }
     return {
-        "ok": value == 1,
+        "ok": value == 8192,
         "resolved": value,
         "status_code": None,
         "body_excerpt": "",
@@ -298,20 +315,19 @@ def run_contract() -> dict[str, Any]:
     rows: dict[str, Any] = {}
     failures: list[str] = []
     for name, (path, body) in REQUESTS.items():
+        before = len(server._engine.forward_calls)
         response = client.post(path, json=body)
         text = response.text
-        ok = (
-            response.status_code == 413
-            and "requested=8192" in text
-            and "safe_cap=1" in text
-            and "projected safe Metal headroom" in text
-            and "Metal OOM / kernel-panic risk" in text
+        forwarded = server._engine.forward_calls[before:]
+        ok = response.status_code != 413 and bool(forwarded) and all(
+            item["max_tokens"] == 8192 for item in forwarded
         )
         rows[name] = {
             "path": path,
             "status_code": response.status_code,
             "ok": ok,
             "body_excerpt": text[:500],
+            "forwarded": forwarded,
         }
         if not ok:
             failures.append(name)
@@ -324,8 +340,8 @@ def run_contract() -> dict[str, Any]:
     return {
         "status": "pass" if not failures else "fail",
         "failures": failures,
-        "contract": "metal_headroom_projected_output_rejects_before_forward",
-        "safe_cap": 1,
+        "contract": "metal_headroom_projected_output_advisory_preserves_forward_limit",
+        "estimated_cap": 1,
         "requested_tokens": 8192,
         "surfaces": rows,
     }

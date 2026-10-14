@@ -1062,7 +1062,7 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
             )
             _buffer_ceiling_logged.add(buffer_cap)
             log(
-                "Metal live-buffer ceiling is the binding output limit: "
+                "Metal live-buffer ceiling is the lower projected output estimate: "
                 "cap=%d tokens (resource_limit=%s, %.1f buffers/token). "
                 "The byte projection alone would have allowed %s.",
                 buffer_cap,
@@ -1075,9 +1075,9 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
         return None
 
 
-# Implicit-clamp WARNINGs deduplicate on (requested, cap, model): the /health
+# Headroom advisories deduplicate on (requested, cap, model): the /health
 # poll re-resolves the implicit max output every few seconds, so an unchanged
-# clamp would otherwise emit hundreds of identical lines per session.  A new
+# estimate would otherwise emit hundreds of identical lines per session. A new
 # tuple (cap moved, model swapped) still warns.
 _projected_guard_warned: set[tuple[int, int, str]] = set()
 
@@ -1102,24 +1102,12 @@ def _apply_projected_output_guard(
     cap = _metal_projected_output_token_cap(model_name)
     if cap is None or requested <= cap:
         return requested
-    if explicit:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                "Requested max output tokens exceed projected safe Metal "
-                f"headroom: requested={requested}, safe_cap={cap}. "
-                "Reduce max_tokens/max_output_tokens, context length, paged "
-                "cache blocks, or load a smaller model. Set "
-                "VMLX_METAL_PROJECTED_OUTPUT_GUARD=0 only for explicit "
-                "developer diagnostics; disabling it accepts Metal OOM / "
-                "kernel-panic risk."
-            ),
-        )
     if not emit_warning:
         # /health and capabilities describe a hypothetical omitted request.
         # They must not masquerade as an actual inference admission warning
-        # or consume its warning-dedup key. The computed cap is unchanged.
-        return max(1, int(cap))
+        # or consume its warning-dedup key. An estimate never changes the
+        # user's or bundle's generation policy.
+        return requested
     resolved_model = model_name or _model_path or _model_name or ""
     # Dedup on the basename: boot resolves with the filesystem path while
     # requests resolve with the API model name, and both describe the same
@@ -1133,14 +1121,15 @@ def _apply_projected_output_guard(
     )
     _projected_guard_warned.add(dedup_key)
     log(
-        "Projected Metal headroom guard clamped %s max output tokens: "
-        "requested=%d safe_cap=%d model=%s",
-        source,
+        "Projected Metal headroom advisory for %s max output tokens: "
+        "requested=%d estimated_cap=%d model=%s; preserving the requested "
+        "limit. This is an estimate, not measured allocation admission.",
+        "request" if explicit else source,
         requested,
         cap,
         resolved_model,
     )
-    return max(1, int(cap))
+    return requested
 
 
 def _resolve_max_prompt_tokens(
@@ -2892,11 +2881,8 @@ def _resolve_max_tokens(
             emit_warning=emit_warning,
         )
     if _default_max_tokens_explicit:
-        # A session-level --max-tokens default above the projected cap must
-        # clamp, not 413: the request author sent no max_tokens and cannot fix
-        # the config. Rejecting made every defaults-driven request fail while
-        # the session looked healthy (live 2026-08-07: UI-saved 12288 vs DSV4
-        # safe_cap 10063). Per-request values above the cap still 413 above.
+        # Explicit session defaults have the same precedence as before;
+        # projected memory is advisory rather than a hidden token limit.
         return _apply_projected_output_guard(
             int(_default_max_tokens),
             explicit=False,

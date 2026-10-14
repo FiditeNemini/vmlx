@@ -7,85 +7,39 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 
 
-def test_explicit_max_tokens_over_safe_headroom_rejects(monkeypatch):
+def test_explicit_max_tokens_above_estimate_is_preserved(monkeypatch):
     from vmlx_engine import server
-
     monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
-
-    with pytest.raises(HTTPException) as exc:
-        server._resolve_max_tokens(8192, "tight-headroom-model")
-
-    assert exc.value.status_code == 413
-    assert "8192" in str(exc.value.detail)
-    assert "1024" in str(exc.value.detail)
-    assert "Metal" in str(exc.value.detail)
+    assert server._resolve_max_tokens(8192, "tight-headroom-model") == 8192
 
 
-def test_explicit_max_tokens_rejects_when_projected_safe_cap_is_zero(monkeypatch):
+def test_explicit_one_token_limit_survives_zero_estimate(monkeypatch):
     from vmlx_engine import server
-
     monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 0)
-
-    with pytest.raises(HTTPException) as exc:
-        server._resolve_max_tokens(1, "no-headroom-model")
-
-    assert exc.value.status_code == 413
-    assert "requested=1" in str(exc.value.detail)
-    assert "safe_cap=0" in str(exc.value.detail)
+    assert server._resolve_max_tokens(1, "no-headroom-model") == 1
 
 
-def test_implicit_default_over_safe_headroom_clamps(monkeypatch):
+@pytest.mark.parametrize("estimate", [0, 1024])
+def test_implicit_fallback_survives_projected_estimate(monkeypatch, estimate):
     from vmlx_engine import server
-
     monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
-    monkeypatch.setattr(server, "_default_max_tokens", 4096)
     monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
-    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
-
-    assert server._resolve_max_tokens(None, "tight-headroom-model") == 1024
-
-
-def test_implicit_default_with_zero_safe_cap_clamps_to_one(monkeypatch):
-    from vmlx_engine import server
-
-    monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
-    monkeypatch.setattr(server, "_default_max_tokens", 4096)
-    monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
-    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 0)
-
-    assert server._resolve_max_tokens(None, "no-headroom-model") == 1
+    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": estimate)
+    assert server._resolve_max_tokens(None, "tight-headroom-model") == server._effective_fallback_max_tokens()
 
 
-def test_session_default_over_safe_headroom_clamps_instead_of_rejecting(
-    monkeypatch, caplog
-):
-    """A session-level --max-tokens default above the cap clamps with a
-    warning. It previously raised the per-request 413, which made EVERY
-    request that omitted max_tokens fail while the session looked healthy
-    (live 2026-08-07: UI-saved Max Output 12288 vs DSV4 safe_cap 10063 —
-    plain chat/completions requests were unservable). The request author
-    sent no max_tokens and cannot fix the config, so the hard 413 is
-    reserved for per-request values."""
+def test_session_default_above_estimate_warns_without_rewriting(monkeypatch, caplog):
     import logging
-
     from vmlx_engine import server
-
     monkeypatch.setattr(server, "_default_max_tokens_explicit", True)
     monkeypatch.setattr(server, "_default_max_tokens", 4096)
     monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
     monkeypatch.setattr(server, "_projected_guard_warned", set())
-
     with caplog.at_level(logging.DEBUG, logger=server.logger.name):
-        assert server._resolve_max_tokens(None, "tight-headroom-model") == 1024
-
-    warnings = [
-        r
-        for r in caplog.records
-        if r.levelno == logging.WARNING and "headroom guard clamped" in r.message
-    ]
+        assert server._resolve_max_tokens(None, "tight-headroom-model") == 4096
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "headroom advisory" in r.message]
     assert len(warnings) == 1
     assert "session-default (--max-tokens)" in warnings[0].message
 
@@ -200,7 +154,7 @@ def test_projection_uses_loaded_model_config(monkeypatch):
     assert cap > 0
 
 
-def test_implicit_clamp_warning_dedupes_on_repeat_resolutions(monkeypatch, caplog):
+def test_implicit_advisory_warning_dedupes_on_repeat_resolutions(monkeypatch, caplog):
     import logging
 
     from vmlx_engine import server
@@ -211,29 +165,29 @@ def test_implicit_clamp_warning_dedupes_on_repeat_resolutions(monkeypatch, caplo
     monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
     monkeypatch.setattr(server, "_projected_guard_warned", set())
 
-    def clamp_warnings():
+    def advisory_warnings():
         return [
             r
             for r in caplog.records
-            if r.levelno == logging.WARNING and "headroom guard clamped" in r.message
+            if r.levelno == logging.WARNING and "headroom advisory" in r.message
         ]
 
     with caplog.at_level(logging.DEBUG, logger=server.logger.name):
         # Simulate the /health poll re-resolving the same implicit default.
         for _ in range(5):
-            assert server._resolve_max_tokens(None, "tight-headroom-model") == 1024
-        assert len(clamp_warnings()) == 1
+            assert server._resolve_max_tokens(None, "tight-headroom-model") == server._effective_fallback_max_tokens()
+        assert len(advisory_warnings()) == 1
 
         # A changed cap is new information and must warn again.
         monkeypatch.setattr(
             server, "_metal_projected_output_token_cap", lambda model_name="": 512
         )
-        assert server._resolve_max_tokens(None, "tight-headroom-model") == 512
-        assert server._resolve_max_tokens(None, "tight-headroom-model") == 512
-        assert len(clamp_warnings()) == 2
+        assert server._resolve_max_tokens(None, "tight-headroom-model") == server._effective_fallback_max_tokens()
+        assert server._resolve_max_tokens(None, "tight-headroom-model") == server._effective_fallback_max_tokens()
+        assert len(advisory_warnings()) == 2
 
 
-def test_implicit_clamp_warning_dedupes_path_and_api_name(monkeypatch, caplog):
+def test_implicit_advisory_warning_dedupes_path_and_api_name(monkeypatch, caplog):
     """Boot resolves with the filesystem path, requests with the API model
     name; both describe the same loaded model and must warn once total."""
     import logging
@@ -251,16 +205,16 @@ def test_implicit_clamp_warning_dedupes_path_and_api_name(monkeypatch, caplog):
             server._resolve_max_tokens(
                 None, "/Users/example/.mlxstudio/models/DeepSeek-V4-Flash-0731-JANG"
             )
-            == 1024
+            == server._effective_fallback_max_tokens()
         )
         assert (
             server._resolve_max_tokens(None, "models/DeepSeek-V4-Flash-0731-JANG")
-            == 1024
+            == server._effective_fallback_max_tokens()
         )
     warnings = [
         r
         for r in caplog.records
-        if r.levelno == logging.WARNING and "headroom guard clamped" in r.message
+        if r.levelno == logging.WARNING and "headroom advisory" in r.message
     ]
     assert len(warnings) == 1
 
@@ -308,7 +262,7 @@ def test_buffer_ceiling_info_logs_once_per_binding_cap(monkeypatch, caplog):
         return [
             r
             for r in caplog.records
-            if r.levelno == logging.INFO and "binding output limit" in r.message
+            if r.levelno == logging.INFO and "lower projected output estimate" in r.message
         ]
 
     with caplog.at_level(logging.DEBUG, logger=server.logger.name):

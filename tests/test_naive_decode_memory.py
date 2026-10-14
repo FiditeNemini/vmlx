@@ -72,8 +72,7 @@ def test_real_native_cache_allocation_is_bounded_after_chunk_and_decode(config):
         assert index.values.shape[-1] == 0 and index.keys.dtype == mx.float32
 
 
-def test_server_uses_native_decode_geometry_without_disabling_guard(config, monkeypatch):
-    from fastapi import HTTPException
+def test_server_uses_native_decode_geometry_as_output_advisory(config, monkeypatch):
     from vmlx_engine import server
     monkeypatch.setattr(server, "_loaded_model_config_for_memory_projection", lambda: config)
     monkeypatch.setattr(server, "_metal_projection_stats", lambda: (96*2**30,108*2**30))
@@ -81,8 +80,6 @@ def test_server_uses_native_decode_geometry_without_disabling_guard(config, monk
     cap = server._metal_projected_output_token_cap("native-test")
     assert 50_000 < cap < 60_000
     assert server._apply_projected_output_guard(12_000, explicit=True) == 12_000
-    with pytest.raises(HTTPException) as e:
-        server._apply_projected_output_guard(cap + 1, explicit=True)
-    assert e.value.status_code == 413
+    assert server._apply_projected_output_guard(cap + 1, explicit=True) == cap + 1
     config["model_type"] = "unknown"
     assert server._metal_projected_output_token_cap("generic-test") < 12_000

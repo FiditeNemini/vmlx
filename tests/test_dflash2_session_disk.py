@@ -174,6 +174,70 @@ def test_v4_schema_clears_legacy_entries(tmp_path, legacy):
 
 
 # ---- delta entries (v4, 2026-10-12) ---------------------------------------------------------------------------
+def test_pending_token_turn_can_parent_next_boundary_delta(ssd):
+    # Native DFlash2 signs every confirmed token, but caches confirmed[:-1].
+    # The pending EOS is processed as the first row of the resumed suffix.
+    turn = [IM_START] + list(range(1, 257)) + [IM_END]
+    target = _target(len(turn) - 1)
+    first = ssd.put({"kind": "turn", "tokens": turn,
+                     "cache_len": len(turn) - 1, "target_cache": target})
+    assert ssd.flush() and first.result()["durable"]
+    boundary = turn + [IM_START, 7, 8, IM_END, 9]
+    _grow(target, len(boundary) - (len(turn) - 1))
+    child = ssd.put({"kind": "boundary", "tokens": boundary,
+                     "cache_len": len(boundary), "target_cache": target,
+                     "ssd_parent": dict(first.vmlx_ssd_ref, receipt=first)})
+    assert ssd.flush() and child.result()["durable"]
+    assert ssd.stats["delta_writes"] == 1
+    assert child.vmlx_ssd_ref["depth"] == 1
+    got = _take(ssd, boundary + [IM_START, 42])
+    assert got is not None and got["cache_len"] == len(boundary)
+    for old, restored in zip(target, got["target_cache"]):
+        assert all(mx.array_equal(a, b) for a, b in zip(old.state, restored.state))
+    root_path = ssd.store.paths(first.vmlx_ssd_ref["sig"])[0]
+    child_path = ssd.store.paths(child.vmlx_ssd_ref["sig"])[0]
+    assert child_path.stat().st_size < root_path.stat().st_size / 2
+
+
+def test_pending_token_parent_cannot_be_overwritten_by_its_own_delta(ssd):
+    tokens = [IM_START, 1, 2, IM_END]
+    target = _target(len(tokens) - 1)
+    parent = ssd.put({"kind": "turn", "tokens": tokens,
+                      "cache_len": len(tokens) - 1, "target_cache": target})
+    assert ssd.flush()
+    _grow(target, 1)
+    # Same lookup key with one more cached row must become a full root,
+    # not a self-referential parent chain at the same file signature.
+    child = ssd.put({"kind": "boundary", "tokens": tokens,
+                     "cache_len": len(tokens), "target_cache": target,
+                     "ssd_parent": dict(parent.vmlx_ssd_ref, receipt=parent)})
+    assert ssd.flush() and child.result()["durable"]
+    assert child.vmlx_ssd_ref["depth"] == 0
+    got = _take(ssd, tokens + [IM_START, 3])
+    assert got is not None and got["cache_len"] == len(tokens)
+    assert all(mx.array_equal(a, b) for a, b in zip(target[0].state, got["target_cache"][0].state))
+
+
+@pytest.mark.parametrize("parent", [
+    {"sig": "bad", "len": 3},
+    {"sig": "4:wrong-digest", "len": 3},
+    {"sig": None, "len": 3},
+    {"sig": "3:wrong-digest", "len": 3},
+])
+def test_parent_key_validation_rejects_invalid_signatures(parent):
+    from vmlx_engine.dflash2_session_disk import _parent_key_length
+    assert _parent_key_length(parent, [IM_START, 1, 2, IM_END, 9]) is None
+
+
+def test_parent_key_validation_rejects_changed_pending_token():
+    from vmlx_engine.dflash2_session_disk import _parent_key_length, signature_for
+    tokens = [IM_START, 1, 2, IM_END]
+    parent = {"sig": signature_for(tokens), "len": len(tokens) - 1}
+    assert _parent_key_length(parent, tokens + [9]) == len(tokens)
+    assert _parent_key_length(parent, tokens[:-1] + [7, 9]) is None
+    assert _parent_key_length({**parent, "len": 2}, tokens + [9]) is None
+
+
 def _grow(target, n_more):
     """Append n_more rows to the KV layer and advance the GDN state, as a continued prefill/decode would."""
     kv, gdn = target

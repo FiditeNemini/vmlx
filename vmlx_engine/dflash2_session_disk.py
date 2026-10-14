@@ -101,6 +101,25 @@ def signature_for(tokens: list[int]) -> str:
     return f"{len(tokens)}:{_token_digest(tokens)}"
 
 
+def _parent_key_length(parent: dict, tokens: list[int]) -> Optional[int]:
+    """Validate the lookup prefix independently of its cached row count.
+
+    A DFlash2 turn signs confirmed tokens but caches confirmed[:-1]. Its
+    pending final token belongs to the key and is evaluated on resume.
+    Require a strictly shorter key to prevent overwriting a parent with a
+    delta that depends on that same file.
+    """
+    try:
+        sig = parent["sig"]
+        rows = int(parent["len"])
+        key_len = int(sig.split(":", 1)[0])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    if not 0 < rows <= key_len <= rows + 1 or key_len >= len(tokens):
+        return None
+    return key_len if signature_for(tokens[:key_len]) == sig else None
+
+
 def candidate_cuts(prompt: list[int], im_start_id: Optional[int], eos_ids: Iterable[int]) -> list[int]:
     """Prefix lengths at which a stored entry can end, longest first."""
     eos = {int(t) for t in eos_ids}
@@ -275,7 +294,7 @@ class DFlash2SessionSSD:
         n, tokens = int(parent.get("len", 0)), entry["tokens"]
         if not 0 < n < int(entry["cache_len"]) or n > len(tokens) or int(parent.get("depth", 0)) + 1 > MAX_CHAIN:
             return None
-        if signature_for([int(t) for t in tokens[:n]]) != parent.get("sig"):
+        if _parent_key_length(parent, tokens) is None:
             return None
         receipt = parent.get("receipt")
         if receipt is not None and receipt.done():
@@ -487,12 +506,15 @@ class DFlash2SessionSSD:
             if len(links) > MAX_CHAIN + 1:
                 return None
             n = int(parent["len"])
+            key_len = _parent_key_length(parent, prefix)
+            if key_len is None or n >= int(cur["cache_len"]):
+                return None
             loaded = self.store.load(parent["sig"], lambda p: mx.load(str(p), return_metadata=True))
             if loaded is None:
                 return None
             p_arrays, p_metadata = loaded
             p_meta = json.loads(p_metadata["dflash2"])
-            if int(p_meta["cache_len"]) != n or p_arrays["tokens"].tolist() != prefix[:n]:
+            if int(p_meta["cache_len"]) != n or p_arrays["tokens"].tolist() != prefix[:key_len]:
                 return None
             links.insert(0, (p_arrays, p_meta))
             cur = p_meta
